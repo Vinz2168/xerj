@@ -84,19 +84,8 @@ const FALLBACK_OPENSEARCH_VERSION: &str = "2.11.0";
 ///    `EsVersion::default()`.
 fn resolve_compat_version(state: &AppState, headers: &axum::http::HeaderMap) -> EsVersion {
     let mut version = EsVersion::default();
-
     let cfg = &state.config.compat;
-    let user_agent = headers
-        .get(axum::http::header::USER_AGENT)
-        .and_then(|v| v.to_str().ok());
-
-    let is_opensearch = if !cfg.distribution.is_empty() {
-        cfg.distribution == "opensearch"
-    } else {
-        user_agent
-            .map(|ua| ua.to_ascii_lowercase().contains("opensearch"))
-            .unwrap_or(false)
-    };
+    let is_opensearch = is_opensearch_caller(state, headers);
 
     if is_opensearch {
         version.distribution = Some("opensearch".to_string());
@@ -112,6 +101,33 @@ fn resolve_compat_version(state: &AppState, headers: &axum::http::HeaderMap) -> 
     }
 
     version
+}
+
+/// Is THIS caller (or is xerj forced to treat every caller as) an
+/// OpenSearch client? Shared by `resolve_compat_version` (the `version`/
+/// `distribution` block) and `router::es_headers_middleware` (the
+/// `x-elastic-product` response header — a real OpenSearch server never
+/// sends this at all, so an OpenSearch-detected caller shouldn't receive
+/// an Elastic-specific product-identity marker, on general correctness
+/// grounds — this alone was NOT sufficient to get a real OpenSearch
+/// Dashboards container past its `.kibana` saved-objects-migration 404,
+/// see PR description for what was actually confirmed).
+///
+/// Same two-tier priority as `resolve_compat_version`: an explicit
+/// `--compat-distribution` override always wins; otherwise a
+/// case-insensitive "contains opensearch" match on `User-Agent` (verified
+/// empirically against real `opensearch-py`/`opensearch-js` — including
+/// OpenSearch Dashboards' own internal client).
+pub(crate) fn is_opensearch_caller(state: &AppState, headers: &axum::http::HeaderMap) -> bool {
+    let cfg = &state.config.compat;
+    if !cfg.distribution.is_empty() {
+        return cfg.distribution == "opensearch";
+    }
+    headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|ua| ua.to_ascii_lowercase().contains("opensearch"))
+        .unwrap_or(false)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
