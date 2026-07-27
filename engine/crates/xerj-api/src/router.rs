@@ -26,7 +26,7 @@ use tracing::Level;
 use uuid::Uuid;
 use xerj_common::config::CorsConfig;
 
-use crate::{auth::auth_middleware, es_compat, memory_api, native, state::AppState};
+use crate::{auth::auth_middleware, bulk_sink, es_compat, memory_api, native, state::AppState};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Native xerj router (:8080)
@@ -55,6 +55,11 @@ use crate::{auth::auth_middleware, es_compat, memory_api, native, state::AppStat
 /// GET    /v1/metrics                        metrics (Prometheus text)
 /// GET    /v1/schema/:name                   get_schema
 /// POST   /v1/schema/:name/evolve            evolve_schema
+/// GET    /v1/bulk-sink/status               bulk_sink::status
+/// GET    /v1/bulk-sink/config                bulk_sink::get_config
+/// PUT    /v1/bulk-sink/config                bulk_sink::put_config
+/// POST   /v1/bulk-sink/pause                bulk_sink::pause
+/// POST   /v1/bulk-sink/resume               bulk_sink::resume
 /// ```
 pub fn build_native_router(state: AppState) -> Router {
     let body_limit = state.config.limits.max_body_bytes;
@@ -146,6 +151,15 @@ pub fn build_native_router(state: AppState) -> Router {
             "/v1/indices/:name/ingest",
             post(native::ingest_with_pipeline),
         )
+        // bulk_sink — event-driven forwarding of selected indices to an
+        // external ES-compat cluster (see crate::bulk_sink module docs)
+        .route("/v1/bulk-sink/status", get(bulk_sink::status))
+        .route(
+            "/v1/bulk-sink/config",
+            get(bulk_sink::get_config).put(bulk_sink::put_config),
+        )
+        .route("/v1/bulk-sink/pause", post(bulk_sink::pause))
+        .route("/v1/bulk-sink/resume", post(bulk_sink::resume))
         // Shared state
         .with_state(state.clone())
         // Middleware stack (applied outermost-last)

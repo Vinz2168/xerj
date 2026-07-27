@@ -17171,7 +17171,7 @@ fn es_aggregator_class_name_ctx(
     }
 }
 
-fn glob_match_simple(pattern: &str, name: &str) -> bool {
+pub(crate) fn glob_match_simple(pattern: &str, name: &str) -> bool {
     if pattern == "*" {
         return true;
     }

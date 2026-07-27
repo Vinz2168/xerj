@@ -1425,6 +1425,10 @@ async fn async_main() -> Result<()> {
     //       millions of docs, hiding the RSS-runaway and WAL-growth signals).
     xerj_engine::set_engine_metrics(state.metrics.clone());
     tokio::spawn(xerj_api::es_compat::run_metrics_gauge_loop(state.clone()));
+    // bulk_sink — event-driven forwarding of selected indices to an external
+    // ES-compat cluster. No-ops immediately when `bulk_sink.enabled = false`
+    // (the default); see `xerj_api::bulk_sink` module docs.
+    tokio::spawn(xerj_api::bulk_sink::run_loop(state.clone()));
 
     // 9c. Routers — engine and Xerj Console are *peer* surfaces.  Each crate
     //     builds a complete Router (routes + its own auth + its own

@@ -10,6 +10,11 @@ xerj-common  = { path = "../xerj-common" }
 xerj-engine  = { path = "../xerj-engine" }
 xerj-query   = { path = "../xerj-query" }
 xerj-wasm    = { path = "../xerj-wasm" }
+# bulk_sink reads WAL entries directly (a second, read-only consumer of the
+# same durability log used for crash recovery — see bulk_sink.rs) and pushes
+# them to an external ES-compat cluster over HTTP.
+xerj-storage = { path = "../xerj-storage" }
+reqwest      = { workspace = true }
 # Note: this crate intentionally does NOT depend on xerj-console-api.
 # Xerj Console is a peer product mounted at the server level (`xerj-server`)
 # via Router::merge. Engine API and Xerj Console API are decoupled — the

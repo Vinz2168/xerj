@@ -84,6 +84,9 @@ pub struct Config {
     pub logging: LoggingConfig,
     /// Elasticsearch/OpenSearch wire-compatibility identity — 2 settings.
     pub compat: CompatConfig,
+    /// Event-driven forwarding of selected indices to an external ES-compat
+    /// cluster — 7 settings. Single-node only; see [`ClusterConfig`].
+    pub bulk_sink: BulkSinkConfig,
 }
 
 // Total: 5+3+2+3+10+5+3+1+6+2+4+3+4+3+2 = 56 fields (incl. cors: 2, auth: 3,
@@ -218,6 +221,31 @@ impl Config {
         }
 
         self.engine.validate()?;
+
+        // bulk_sink is a single-node feature: one process, one local WAL,
+        // one cursor. There is no story yet for checkpointing across a
+        // multi-node cluster's shard/region splits, so refuse to start
+        // rather than silently forwarding from only one node's view of the
+        // data (or, worse, every node forwarding overlapping data).
+        if self.bulk_sink.enabled && self.cluster.enabled {
+            return Err(XerjError::config(
+                "bulk_sink requires single-node mode: bulk_sink.enabled and cluster.enabled \
+                 cannot both be true",
+            ));
+        }
+        if self.bulk_sink.enabled && self.bulk_sink.target_url.trim().is_empty() {
+            return Err(XerjError::config(
+                "bulk_sink.target_url is required when bulk_sink.enabled = true",
+            ));
+        }
+        if self.bulk_sink.enabled {
+            let kind = self.bulk_sink.target_kind.as_str();
+            if !["auto", "elasticsearch", "opensearch", "xerj"].contains(&kind) {
+                return Err(XerjError::config(format!(
+                    "bulk_sink.target_kind must be one of auto|elasticsearch|opensearch|xerj, got {kind:?}"
+                )));
+            }
+        }
 
         // Logging: format must be one of the two supported line formats.
         let fmt = self.logging.format.as_str();
@@ -1102,6 +1130,63 @@ impl Default for ClusterConfig {
             port: 9300,
             peers: Vec::new(),
             tick_ms: 50,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `bulk_sink` — event-driven forwarding of a selected subset of local
+/// indices to an external ES-compat cluster (Elasticsearch, OpenSearch, or
+/// another xerj node) over the standard `_bulk` NDJSON wire format.
+///
+/// Single-node only: rejected at startup (see [`Config::validate`]) when
+/// combined with `cluster.enabled = true`. There is no multi-node checkpoint
+/// story here — one process, one local WAL, one cursor.
+///
+/// Always opt-in: `enabled` defaults to `false`, and even when `true` the
+/// sink stays inactive until at least one pattern is listed in `indices` —
+/// it never forwards "everything" by default. Indices whose name starts
+/// with `.` (dashboards, sessions, users, ...) are always excluded,
+/// regardless of `indices`, and this exclusion is not configurable.
+///
+/// **7 settings.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BulkSinkConfig {
+    /// Enable the sink (default: `false`). Fixed at startup — toggling it
+    /// requires a restart; use `POST /v1/bulk-sink/pause` and `/resume` for
+    /// runtime on/off without a restart.
+    pub enabled: bool,
+    /// Base URL of the target cluster, e.g. `"http://localhost:9201"`. The
+    /// sink POSTs to `<target_url>/_bulk`. Required when `enabled = true`.
+    pub target_url: String,
+    /// Optional API key sent as `Authorization: ApiKey <target_api_key>`.
+    pub target_api_key: Option<String>,
+    /// Informational/diagnostic only — does not change the `_bulk` body,
+    /// since all three targets speak the same wire format. One of `"auto"`
+    /// (default), `"elasticsearch"`, `"opensearch"`, or `"xerj"`.
+    pub target_kind: String,
+    /// Glob patterns (`resolve_index_selector`-style: exact name, `prefix*`,
+    /// `*suffix`, or `*`) selecting which local indices to forward. Empty
+    /// (the default) means the sink forwards nothing.
+    pub indices: Vec<String>,
+    /// Maximum WAL entries per `_bulk` request (default: `500`).
+    pub batch_size: usize,
+    /// Poll interval for new WAL entries, in milliseconds (default: `1500`).
+    pub flush_interval_ms: u64,
+}
+
+impl Default for BulkSinkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target_url: String::new(),
+            target_api_key: None,
+            target_kind: "auto".to_string(),
+            indices: Vec::new(),
+            batch_size: 500,
+            flush_interval_ms: 1500,
         }
     }
 }

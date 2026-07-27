@@ -5848,6 +5848,7 @@ dependencies = [
  "http-body-util",
  "libc",
  "prometheus",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -5861,6 +5862,7 @@ dependencies = [
  "xerj-common",
  "xerj-engine",
  "xerj-query",
+ "xerj-storage",
  "xerj-wasm",
 ]
 

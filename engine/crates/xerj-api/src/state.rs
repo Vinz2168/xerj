@@ -473,6 +473,12 @@ pub struct AppState {
     /// Live background scoring tasks, keyed by datafeed id. Aborted on `_stop`
     /// (and replaced on a re-`_start`). In-memory only.
     pub ml_datafeed_tasks: Arc<DashMap<String, tokio::task::JoinHandle<()>>>,
+    /// Event-driven forwarding of selected indices to an external ES-compat
+    /// cluster. Always constructed (so `/v1/bulk-sink/*` can always report
+    /// status), but its background poll loop
+    /// (`bulk_sink::run_loop`, spawned once in `xerj-server/src/main.rs`)
+    /// is a no-op unless `bulk_sink.enabled = true` in config.
+    pub bulk_sink: Arc<crate::bulk_sink::BulkSinkService>,
 }
 
 impl AppState {
@@ -496,6 +502,10 @@ impl AppState {
         let watcher_active = Arc::new(AtomicBool::new(true));
         let ml_detectors = Arc::new(MlDetector::load_all(&config.server.data_dir));
         let ml_datafeeds = Arc::new(MlDatafeed::load_all(&config.server.data_dir));
+        let bulk_sink = crate::bulk_sink::BulkSinkService::new(
+            &config.bulk_sink,
+            std::path::Path::new(&config.server.data_dir),
+        );
         Self {
             config: Arc::new(config),
             engine: Arc::new(engine),
@@ -507,6 +517,7 @@ impl AppState {
             ml_datafeeds,
             ml_results: Arc::new(DashMap::new()),
             ml_datafeed_tasks: Arc::new(DashMap::new()),
+            bulk_sink,
         }
     }
 
