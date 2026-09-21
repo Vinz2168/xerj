@@ -280,20 +280,40 @@ test('the whole operator console runs under the shipped policy with zero violati
     '#/dashboards/logs-overview', '#/dashboards/anomaly-detect', '#/dashboards/ingest-pipeline', '#/dashboards/system', '#/discover', '#/reader', '#/alerts', '#/data', '#/users', '#/settings', '#/corpus'];
   for (const r of routes) {
     await page.setHash(r);
+    // aria-busy is only ever set to 'false' at the END of a render (app.js) —
+    // nothing flips it 'true' while the next route's query() is pending — so
+    // this condition is already satisfied by the PREVIOUS route's still-mounted
+    // DOM. It proves the shell booted, not that THIS route rendered.
     await page.waitFor(`document.getElementById('app').getAttribute('aria-busy') === 'false' && document.querySelector('.h-scene, h1')`, { label: r });
-    await new Promise((res) => setTimeout(res, 150));
-    const v = await page.eval('window.__cspViolations');
-    assert.deepEqual(v, [], `${r}: Content-Security-Policy violation`);
     // Honest data-source status, per view: this node holds no telemetry, so a
     // telemetry dashboard is showing the in-memory sample — and must SAY so.
     // Only the views that really read the engine may say LIVE.
-    const pill = await page.eval(`document.querySelector('[data-nav-status]')?.textContent || ''`);
+    // While the new route's query() is pending, the pill honestly describes
+    // the PREVIOUS view — the one still on screen — e.g. corpus's LIVE · … ·
+    // 74.3MS right after switching to a telemetry dashboard. A fixed 150ms
+    // sleep raced that hand-off on a loaded runner (PR #1008's CI read the
+    // corpus LIVE pill on #/dashboards/ai-overview). Waiting for the pill to
+    // reach THIS route's terminal label is the synchronisation — and still the
+    // assertion: a view that never labels itself fails on the wait's timeout,
+    // showing the text it stalled on.
     const telemetry = /ai-overview|rag-quality|vector-index|agent-memory|logs-overview|anomaly-detect|ingest-pipeline|system|alerts|users/.test(r);
+    const wantsLive = /corpus|discover|data$/.test(r);
+    if (telemetry || wantsLive) {
+      const want = telemetry ? 'MOCK FALLBACK|SAMPLE DATA' : '^LIVE';
+      await page.waitFor(
+        `new RegExp(${JSON.stringify(want)}).test(document.querySelector('[data-nav-status]')?.textContent || '')`,
+        { label: `${r}: data-source pill settles (${want})` }
+      );
+    }
+    await new Promise((res) => setTimeout(res, 150));
+    const v = await page.eval('window.__cspViolations');
+    assert.deepEqual(v, [], `${r}: Content-Security-Policy violation`);
+    const pill = await page.eval(`document.querySelector('[data-nav-status]')?.textContent || ''`);
     if (telemetry) {
       assert.match(pill, /MOCK FALLBACK|SAMPLE DATA/, `${r}: a sample-backed view must be labelled (${pill})`);
       assert.doesNotMatch(pill, /^LIVE/, `${r}: a sample-backed view must never claim LIVE`);
     }
-    if (/corpus|discover|data$/.test(r)) assert.match(pill, /^LIVE/, `${r}: ${pill}`);
+    if (wantsLive) assert.match(pill, /^LIVE/, `${r}: ${pill}`);
   }
   // theme switch + edit mode toggle exercise the shell's own handlers
   await page.eval(`(document.querySelector('[data-theme-set="day"], [data-theme="day"], [data-theme-toggle]')?.click(), true)`);
