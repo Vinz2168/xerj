@@ -1511,6 +1511,85 @@ mod flush_publication_recovery_tests {
         assert_eq!(idx.search(&request).await.unwrap().hits[0].id, "survivor");
     }
 
+    /// #950: building the id→position map must NOT materialise the full
+    /// stored section.  Before the fix, `id_pos_map_for` ran the complete
+    /// `stored_slices_for` decode — every column of every stored document
+    /// as a `serde_json::Value` tree (~10-20x the JSON text) — to read one
+    /// string per row; a delete-by-query storm over that path was the
+    /// dominant RSS transient on the 5,369-index corpus server
+    /// (heap-profiled: 6.1 of 11.1 GiB sampled live).  After the fix the
+    /// map comes from the `__id` column projection alone and the
+    /// stored-slices cache stays COLD — the observable contract pinned
+    /// here.  Fails-before: the legacy path publishes a `StoredSlices`
+    /// entry for the segment as a side effect of building the map.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn id_pos_map_builds_from_projection_without_warming_stored_slices() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.server.data_dir = dir.path().to_string_lossy().into_owned();
+        let engine = crate::Engine::new(config).unwrap();
+        engine
+            .create_index("idpos-projection", slash_field_schema())
+            .unwrap();
+        let idx = engine.get_index("idpos-projection").unwrap();
+        idx.abort_background_tasks();
+        // Enough docs that every memtable shard flushes a segment above
+        // V2_MIN_DOCS (128), so the stored section is columnar ZBS2 and the
+        // projection path applies (smaller segments stay legacy LZ4 and
+        // correctly fall back to the full decode).
+        for i in 0..4096u64 {
+            idx.index_document(Some(format!("doc-{i}")), json!({"bad/field": "needle"}))
+                .await
+                .unwrap();
+        }
+        idx.flush().await.unwrap();
+        // The flush's publish-time warm populates the stored caches, so a
+        // warm-cache assertion right after flush proves nothing.  Restart
+        // cold (this is also the shape the #950 profile came from: a booted
+        // server, cold stored caches, a delete-by-query storm) and probe.
+        drop(idx);
+        drop(engine);
+        let mut config2 = Config::default();
+        config2.server.data_dir = dir.path().to_string_lossy().into_owned();
+        let engine = crate::Engine::new(config2).unwrap();
+        let idx = engine.get_index("idpos-projection").unwrap();
+        idx.abort_background_tasks();
+        let snapshot = idx.store.snapshot();
+        let segs: Vec<_> = snapshot.segments.clone();
+        drop(snapshot);
+        assert!(!segs.is_empty());
+        for seg in &segs {
+            assert!(
+                idx.stored_slices_cache.get(&seg.id).is_none(),
+                "precondition: segment {} must be cold after restart",
+                seg.id
+            );
+        }
+        // Every flushed shard segment must answer its id map from the
+        // projection alone.
+        for seg in &segs {
+            let map = idx
+                .id_pos_map_for(&seg.id, seg.doc_count)
+                .expect("id map must build from the __id projection");
+            assert_eq!(map.len() as u64, seg.doc_count);
+            assert!(
+                idx.stored_slices_cache.get(&seg.id).is_none(),
+                "#950: id_pos must not warm the full stored decode (StoredSlices cache cold)"
+            );
+        }
+        // And the maps actually resolve ids across all shards.
+        let total: usize = segs
+            .iter()
+            .filter_map(|seg| idx.id_pos_cache.get(&seg.id).map(|e| e.value().len()))
+            .sum();
+        assert_eq!(
+            total, 4096,
+            "every indexed doc must resolve across the shard maps"
+        );
+        drop(idx);
+        drop(engine);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn slash_field_flush_publishes_and_restarts_searchable() {
         let _fault_test = FLUSH_FAULT_TEST_LOCK.lock().await;
@@ -28467,6 +28546,33 @@ impl Index {
         if let Some(entry) = self.id_pos_cache.get(seg_id) {
             return Some(Arc::clone(entry.value()));
         }
+        // #950: build the map from the `_id` column ALONE before touching
+        // the full stored decode.  `stored_slices_for` materialises every
+        // column of every stored document as a `serde_json::Value` tree
+        // (~10-20x the JSON text) where this map needs one string per row;
+        // a delete-by-query storm over that path was the dominant RSS
+        // transient on the #950 corpus server (heap-profiled: 6.1 GiB of
+        // 11.1 GiB sampled live).  Same id-resolution shape as meilisearch,
+        // which answers id lookups from `external_documents_ids()` and
+        // never from the document store.  Deliberately lock-free: the
+        // `_id` column decode is a dict-bitpacked microsecond read, so a
+        // concurrent-miss race only duplicates trivial work.
+        if let Some(map) = self.id_pos_map_from_projection(seg_id, expect_docs) {
+            let key = seg_id.to_string();
+            let bytes = cache_estimates::id_positions_bytes(
+                &key,
+                std::mem::size_of::<CacheResident<std::collections::HashMap<String, u32>>>(),
+                &map,
+            );
+            return Some(self.publish_current(
+                &self.id_pos_cache,
+                seg_id,
+                key,
+                SegmentCacheCategory::IdPositions,
+                bytes,
+                map,
+            ));
+        }
         let slices = self.stored_slices_for(seg_id, expect_docs)?;
         let mut map: std::collections::HashMap<String, u32> =
             std::collections::HashMap::with_capacity(slices.offsets.len());
@@ -28509,6 +28615,41 @@ impl Index {
             bytes,
             map,
         ))
+    }
+
+    /// `_id`-only map build over the stored projection (#950): decodes the
+    /// `_id` column without materialising any other column.  `None` falls
+    /// back to the full slice walk below — legacy LZ4/raw sections, a missing
+    /// `_id` column, a row count that disagrees with the segment metadata, a
+    /// non-string id, or duplicate ids (the same completeness guard the slice
+    /// walk applies, so a doc without a usable stored `_id` still defers to
+    /// the scan and no match is ever lost).
+    fn id_pos_map_from_projection(
+        &self,
+        seg_id: &str,
+        expect_docs: u64,
+    ) -> Option<std::collections::HashMap<String, u32>> {
+        use xerj_storage::stored_codec::{decode_stored_projection, StoredV2ProjectionResult};
+        let reader = self.store.open_segment_arc(seg_id).ok()?;
+        let raw = reader.section(SectionType::Stored).ok()??;
+        let projected = decode_stored_projection(raw, &["__id"]).ok()?;
+        let StoredV2ProjectionResult::Projected(projection) = projected else {
+            return None;
+        };
+        let ids = projection.columns.get("__id")?;
+        if ids.len() as u64 != expect_docs {
+            return None;
+        }
+        let mut map: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::with_capacity(ids.len());
+        for (pos, id) in ids.iter().enumerate() {
+            let id = id.as_str()?;
+            map.insert(id.to_string(), pos as u32);
+        }
+        if map.len() as u64 != expect_docs {
+            return None;
+        }
+        Some(map)
     }
 
     /// Lazily-built, cached `stored-position → seq_no` array for a segment

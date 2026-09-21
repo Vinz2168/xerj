@@ -725,6 +725,25 @@ pub fn decode_stored(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(bytes.to_vec())
 }
 
+/// Column-projected decode over any supported stored payload (#950).
+///
+/// Same dispatch as `decode_stored` (V3-wrapped or bare V2), but decodes
+/// ONLY the requested columns instead of materialising the whole segment.
+/// The engine's id-position map needs one string per row; running the full
+/// decoder for it cost a transient `serde_json::Value` universe per segment
+/// (~10-20x the JSON text).  Legacy LZ4/raw sections return `NotV2` so the
+/// caller can fall back to the compatibility decoder.
+pub fn decode_stored_projection(
+    bytes: &[u8],
+    requested: &[&str],
+) -> Result<StoredV2ProjectionResult> {
+    if bytes.len() >= 4 && &bytes[..4] == STORED_V3_MAGIC {
+        let (_present_nulls, inner) = split_stored_v3(bytes)?;
+        return decode_stored_v2_projection(inner, requested);
+    }
+    decode_stored_v2_projection(bytes, requested)
+}
+
 /// Conservative retained-size bound for the canonical stored bytes plus the
 /// `(start, end)` row-offset table used by the engine's `StoredSlices`.
 ///
@@ -1917,13 +1936,30 @@ fn decode_stored_v2(body: &[u8], present_nulls: &[(u32, u32)]) -> Result<Vec<u8>
     let id_col_ix = col_name_to_ix.get("__id").copied().unwrap_or(0);
     let seq_col_ix = col_name_to_ix.get("__seq_no").copied().unwrap_or(1);
 
-    let mut out_docs: Vec<serde_json::Value> = Vec::new();
-    out_docs.try_reserve_exact(num_docs).map_err(|error| {
-        StorageError::Other(anyhow::anyhow!(
-            "cannot reserve {num_docs} decoded stored rows: {error}"
-        ))
-    })?;
+    // #950: serialise one document at a time straight into the output
+    // buffer.  The previous shape accumulated ALL rows as a second full
+    // `Value` universe (`out_docs: Vec<Value>` built by `.cloned()` out of
+    // `col_data`) only to hand it to `serde_json::to_vec` and drop it — a
+    // transient the size of the whole column materialisation AGAIN, sitting
+    // on every stored warm/fetch path (heap-profiled at 6.1 GiB live on the
+    // #950 corpus server).  Per-row serialisation keeps the peak at
+    // `col_data` + one document and is byte-identical: same compact
+    // formatter, same `[doc,doc,...]` array framing as `to_vec(&Vec<Value>)`.
+    // The reserve is a floor, not the final size — it exists so a corrupt
+    // `num_docs` fails as an error instead of an abort, like the row reserve
+    // it replaces.
+    let mut out: Vec<u8> = Vec::new();
+    out.try_reserve_exact(num_docs.saturating_mul(16).saturating_add(2))
+        .map_err(|error| {
+            StorageError::Other(anyhow::anyhow!(
+                "cannot reserve {num_docs} decoded stored rows: {error}"
+            ))
+        })?;
+    out.push(b'[');
     for d in 0..num_docs {
+        if d > 0 {
+            out.push(b',');
+        }
         let mut source_map = serde_json::Map::new();
         for (cix, name) in col_names.iter().enumerate() {
             if cix == id_col_ix || cix == seq_col_ix {
@@ -1957,11 +1993,11 @@ fn decode_stored_v2(body: &[u8], present_nulls: &[(u32, u32)]) -> Result<Vec<u8>
                 .unwrap_or(serde_json::Value::Null),
         );
         doc.insert("_source".into(), serde_json::Value::Object(source_map));
-        out_docs.push(serde_json::Value::Object(doc));
+        serde_json::to_writer(&mut out, &serde_json::Value::Object(doc))
+            .map_err(|e| StorageError::Other(anyhow::anyhow!("v2 reassemble: {e}")))?;
     }
-
-    serde_json::to_vec(&out_docs)
-        .map_err(|e| StorageError::Other(anyhow::anyhow!("v2 reassemble: {e}")))
+    out.push(b']');
+    Ok(out)
 }
 
 // ── Column-level helpers ─────────────────────────────────────────────────
@@ -2761,6 +2797,111 @@ mod tests {
         assert_eq!(got[0]["_source"].get("z"), Some(&serde_json::Value::Null));
         assert_eq!(got[0]["_source"].get("b"), Some(&serde_json::Value::Null));
         assert!(got[1]["_source"].get("z").is_none());
+    }
+
+    /// #950 (fix part 2): the reassembly serialises one document at a time
+    /// instead of accumulating a second full `Value` universe.  Downstream
+    /// consumers (`brace_walk_offsets`, `extract_stored_id`) walk the output
+    /// bytes blind, so the output must stay EXACTLY the canonical JSON array —
+    /// framing intact and every document fully equal (not spot-checked),
+    /// including escapes, unicode, control characters, nested structures,
+    /// floats, and present-null keys.
+    #[test]
+    fn v2_decode_streaming_output_is_canonical_for_nasty_docs() {
+        let mut docs: Vec<serde_json::Value> = Vec::new();
+        for i in 0..64u64 {
+            let mut source = json!({
+                "quote": format!("said \"hi\" {}", i),
+                "unicode": "héllo → 世界 ✓",
+                "backslash": "C:\\path\\to",
+                "control": "\u{0007}\n\t",
+                "nested": { "deep": [1, 2, { "deeper": true }] },
+                "float": 0.010127 + i as f64,
+                "empty_str": "",
+            });
+            if i % 3 == 0 {
+                source["opt"] = serde_json::Value::Null;
+            }
+            docs.push(json!({
+                "_id": format!("id-\"{}\"", i),
+                "_seq_no": i,
+                "_source": source,
+            }));
+        }
+        let raw = serde_json::to_vec(&docs).unwrap();
+        let encoded = encode_stored_v2(&raw);
+        let decoded = decode_stored(&encoded).unwrap();
+        // Array framing: downstream walks these bytes blind.
+        assert_eq!(decoded.first(), Some(&b'['), "output must open the array");
+        assert_eq!(decoded.last(), Some(&b']'), "output must close the array");
+        let got: Vec<serde_json::Value> = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(got.len(), docs.len());
+        for (g, w) in got.iter().zip(docs.iter()) {
+            assert_eq!(
+                g,
+                w,
+                "full-document mismatch in streamed output: {}",
+                String::from_utf8_lossy(&decoded)
+            );
+        }
+    }
+
+    /// #950 (fix part 1): the column-projected decoder must serve `_id`
+    /// from both ZBS2 and ZBS3 payloads, refuse legacy LZ4/v1 sections with
+    /// `NotV2` (so callers fall back to the compatibility decoder), and
+    /// never decode unrequested columns.
+    #[test]
+    fn stored_projection_serves_ids_from_v2_and_v3_and_refuses_legacy() {
+        let docs: Vec<serde_json::Value> = (0..400u64)
+            .map(|i| {
+                if i % 5 == 0 {
+                    json!({ "_id": format!("d{}", i), "_seq_no": i, "_source": { "opt": null, "path": "/x" } })
+                } else {
+                    json!({ "_id": format!("d{}", i), "_seq_no": i, "_source": { "path": "/x" } })
+                }
+            })
+            .collect();
+        let v3 = encode_stored_v2(&serde_json::to_vec(&docs).unwrap());
+        assert_eq!(&v3[..4], STORED_V3_MAGIC, "present nulls must wrap as ZBS3");
+        match decode_stored_projection(&v3, &["__id"]).unwrap() {
+            StoredV2ProjectionResult::Projected(p) => {
+                assert_eq!(p.num_docs, docs.len());
+                let ids = p.columns.get("__id").expect("`__id` column must project");
+                assert_eq!(ids.len(), docs.len());
+                for (i, id) in ids.iter().enumerate() {
+                    assert_eq!(id.as_str(), Some(format!("d{}", i).as_str()), "row {i}");
+                }
+                assert!(
+                    !p.columns.contains_key("path"),
+                    "unrequested columns must not be decoded"
+                );
+            }
+            StoredV2ProjectionResult::NotV2 => panic!("ZBS3 payload must project"),
+        }
+
+        let null_free: Vec<serde_json::Value> = (0..400u64)
+            .map(|i| json!({ "_id": format!("d{}", i), "_seq_no": i, "_source": { "path": "/x" } }))
+            .collect();
+        let v2 = encode_stored_v2(&serde_json::to_vec(&null_free).unwrap());
+        assert_eq!(&v2[..4], STORED_V2_MAGIC, "null-free stays ZBS2");
+        match decode_stored_projection(&v2, &["__id"]).unwrap() {
+            StoredV2ProjectionResult::Projected(p) => {
+                let ids = p.columns.get("__id").expect("`__id` column must project");
+                assert_eq!(ids.len(), null_free.len());
+                assert_eq!(ids[399].as_str(), Some("d399"));
+            }
+            StoredV2ProjectionResult::NotV2 => panic!("ZBS2 payload must project"),
+        }
+
+        // A legacy (non-columnar) section reports NotV2 so the engine falls
+        // back to the full compatibility decoder instead of failing.
+        let raw_legacy = br#"[{"_id":"a","_seq_no":1,"_source":{"m":"x"}}]"#;
+        match decode_stored_projection(raw_legacy, &["__id"]).unwrap() {
+            StoredV2ProjectionResult::NotV2 => {}
+            StoredV2ProjectionResult::Projected(_) => {
+                panic!("legacy section must not claim to project")
+            }
+        }
     }
 
     #[test]
