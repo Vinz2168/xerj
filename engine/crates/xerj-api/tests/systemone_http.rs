@@ -263,6 +263,180 @@ async fn a_plain_string_state_with_object_instructions_also_votes() {
     assert_eq!(r["answers"]["q1"]["noul"], json!(1.0));
 }
 
+/// #1000: instruction wording must not change the answer. The instruction is
+/// a question ABOUT the payload; its vocabulary is not retrieval text. The
+/// issue measured a 32-point accuracy swing on a real SMS history (0.9867
+/// empty instruction vs 0.6700 criteria-rich) purely from wording — here the
+/// same state is asked three times with three different instructions and all
+/// three answers must be identical.
+#[tokio::test]
+async fn instruction_wording_does_not_change_the_answer() {
+    let node = gate_node().await;
+    // A ham-shaped state: its own terms retrieve the `false` doc and nothing
+    // else, whatever the prose says.
+    let state = json!("shipping delivery times");
+    let rich = "Is this SMS message spam? prize claims, paid subscriptions, \
+                marketing, premium-rate numbers, refund, money back";
+    let mut answers = Vec::new();
+    for instructions in [
+        None,
+        Some(json!("Is this message spam?")),
+        Some(json!(rich)),
+        // the criteria-block shape a Jev migrant sends
+        Some(json!({"question": "Is this message spam?", "criteria": {
+            "spam": "prize claims, paid subscriptions, marketing",
+            "ham": "plain personal correspondence"}})),
+    ] {
+        let mut q = serde_json::Map::new();
+        q.insert("type".into(), json!("noul"));
+        if let Some(i) = instructions {
+            q.insert("instructions".into(), i);
+        }
+        let (st, r) = node
+            .systemone(json!({
+                "state": state,
+                "questions": {"d0": Value::Object(q)}
+            }))
+            .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        answers.push(r["answers"]["d0"]["noul"].as_f64().unwrap_or(-1.0));
+    }
+    // All four answers identical, and the vote followed the STATE: a
+    // shipping text over this history is `false` outright.
+    assert!(
+        answers.iter().all(|a| (a - answers[0]).abs() < 1e-9),
+        "instruction wording changed the answer: {answers:?}"
+    );
+    assert!(
+        (answers[0] - 0.0).abs() < 1e-9,
+        "the state's own vote is `false`, got {answers:?}"
+    );
+}
+
+/// #1001: an object state votes on ALL its string leaves. The issue measured
+/// accuracy 0.1733 — exactly the spam base rate — for `{"message": …}` (every
+/// item scored from identical instruction text) against 0.9667 for the same
+/// message as a string or as `{"query": …}`. The key name must not decide
+/// whether the payload is searched.
+#[tokio::test]
+async fn an_object_state_votes_on_all_its_string_leaves() {
+    let node = gate_node().await;
+    let (st, r) = node
+        .systemone(json!({
+            "state": {"message": "refund refund asked for money back twice charged"},
+            "questions": {
+                "is_spam": {"type": "noul", "instructions": "Is this SMS message spam?"}
+            }
+        }))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["answers"]["is_spam"]["noul"], json!(1.0), "{r}");
+}
+
+/// A question whose backtick references resolve to nothing is REFUSED with
+/// the paths named — not silently voted on whatever text is left. A confident
+/// answer computed from a payload the question never saw is the #1001 defect
+/// class in another coat.
+#[tokio::test]
+async fn a_backtick_reference_that_resolves_nowhere_is_named_not_guessed() {
+    let node = gate_node().await;
+    let (st, r) = node
+        .systemone(json!({
+            "state": {"message": "refund money back"},
+            "questions": {
+                "q1": {"type": "noul", "instructions": "Is `typo.path` relevant?"}
+            }
+        }))
+        .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{r}");
+    assert_eq!(r["error"]["type"], "illegal_argument", "{r}");
+    let why = reason(&r);
+    assert!(why.contains("`q1`"), "{why}");
+    assert!(why.contains("`typo.path`"), "{why}");
+}
+
+/// A payload with no text at all is a 422 naming the question — not a vote
+/// on the instruction prose over a history that never saw the payload.
+#[tokio::test]
+async fn a_state_with_no_text_is_refused_by_name() {
+    let node = gate_node().await;
+    let (st, r) = node
+        .systemone(json!({
+            "state": {"spam_count": 42, "flags": [true, false]},
+            "questions": {"q1": {"type": "noul", "instructions": "classify"}}
+        }))
+        .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{r}");
+    assert_eq!(r["error"]["type"], "illegal_argument", "{r}");
+    let why = reason(&r);
+    assert!(why.contains("`q1`"), "{why}");
+    assert!(why.contains("state"), "{why}");
+}
+
+/// The data-field pattern — the question carries its payload inside
+/// `instructions` and names it in backticks, the shape xerj-rerank's stage
+/// sends and the TypeSafe docs prescribe. The referenced field IS the vote
+/// text, and a state whose vocabulary would pollute the vote stays out of
+/// it: the question selected its payload.
+#[tokio::test]
+async fn an_instructions_data_field_is_the_payload_and_the_state_stays_out() {
+    let node = gate_node().await;
+    let (st, r) = node
+        .systemone(json!({
+            "state": "shipping delivery times",
+            "questions": {
+                "d0": {"type": "noul", "instructions": {
+                    "question": "Judge `document` against the query in the state.",
+                    "document": "refund refund asked for money back"
+                }}
+            }
+        }))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    // The refund document votes `true` outright — the misleading state string
+    // never entered the query.
+    assert_eq!(r["answers"]["d0"]["noul"], json!(1.0), "{r}");
+    assert_eq!(r["decisions"]["evidence"]["d0"]["label"], "true", "{r}");
+}
+
+/// `jev-reranker` ≥ 0.1.2's `rerank_relevance()` preset ships its rubric
+/// object in `state` and names it in backticks ("Apply all remaining
+/// evaluation rules in `rubric`."). The rubric is judge rules, not payload:
+/// it must be acknowledged without its string leaves joining the vote —
+/// embedding them is exactly the #1000 defect (criteria-rich prose). The
+/// vote runs on the text references: the document and the query. On the
+/// pre-skip code this shape was a 422 ("`rubric` resolves to nothing").
+#[tokio::test]
+async fn a_structure_reference_like_the_clients_rubric_is_not_vote_text() {
+    let node = gate_node().await;
+    let (st, r) = node
+        .systemone(json!({
+            "state": {
+                "query": "triage inbox unsolicited correspondence",
+                "documents": {"doc_0": "shipping delivery times when does it arrive"},
+                "rubric": {
+                    "instructions": "refund refund asked for money back prize winner claim",
+                    "criteria": {"true": "retain", "false": "discard"}
+                }
+            },
+            "model": "jev-1.13.0",
+            "questions": {
+                "doc_0": {"type": "noul",
+                    "instructions": "Does `documents.doc_0` help answer `query` and \
+                     deserve a high position in its search results? Apply all \
+                     remaining evaluation rules in `rubric`.",
+                    "criteria": {"true": "retain", "false": "discard"}}
+            }
+        }))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    // The shipping document drives the vote to `false` outright — the rubric's
+    // refund/spam vocabulary never entered the query, and the neutral query's
+    // terms retrieve nothing over this history.
+    assert_eq!(r["answers"]["doc_0"]["noul"], json!(0.0), "{r}");
+    assert_eq!(r["decisions"]["evidence"]["doc_0"]["label"], "false", "{r}");
+}
+
 /// A `choice` question answers with a probability for EVERY criterion option —
 /// options with no neighbour weight appear as 0.0, not as missing keys — the
 /// winner is the argmax, and its confidence is its own probability.
@@ -280,8 +454,9 @@ async fn choice_answers_carry_a_probability_for_every_option() {
     )
     .await;
 
-    // state carries no `query` field, so the vote text is exactly the resolved
-    // ticket — the same string /_decide is asked below, making the arithmetic
+    // The vote text is exactly what the question's `ticket` reference
+    // resolves to — instruction prose is the question, never the query — so
+    // it is the same string /_decide is asked below, making the arithmetic
     // cross-checkable between the two surfaces.
     let vote = "cancel my subscription";
     let (st, r) = node

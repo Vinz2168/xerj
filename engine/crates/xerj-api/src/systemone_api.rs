@@ -21,11 +21,20 @@
 //!
 //! Request: `{ state, model, questions: { id: { type, instructions, criteria } } }`.
 //! `state` may be a string or an object; question `instructions` may be a
-//! string, object or array (all string leaves are joined). Strings may point
-//! at state data with backtick paths — `` `documents.doc_0` `` — which are
-//! resolved against `state` before the vote text is built. That is the
-//! reference pattern of the System One API and the shape `jev-reranker`
-//! sends in its listwise mode.
+//! string, object or array. **The vote text is payload data, never
+//! instruction prose (#1000, #1001).** A question votes on exactly what it
+//! points at: every `` `path` `` reference its instructions name — resolved
+//! against the instructions' own string fields first (the data-field
+//! pattern: `{"question": "Judge `document` …", "document": text}`) and then
+//! against the state by dotted path (`` `documents.doc_0` ``, the shape
+//! `jev-reranker` sends) — or, when it references nothing, on the state
+//! alone: a string state whole, an object state by all its string leaves.
+//! A reference that resolves to structure rather than text (the rubric
+//! object `jev-reranker` ≥ 0.1.2 ships with its relevance preset) is
+//! acknowledged and skipped: judge rules are not retrieval vocabulary.
+//! References that resolve to nothing, and a payload with no text at all,
+//! are 422s naming the question — never a confident vote on text the
+//! question never saw.
 //!
 //! Response: `{ model, answers, usage }` with `answers` keyed exactly by the
 //! question ids sent and each answer carrying only its documented fields —
@@ -389,36 +398,90 @@ fn parse_question(id: &str, q: &Value, state_val: &Value) -> Result<Question, St
             ))
         }
     };
-    // `instructions` is polymorphic on this wire: string, object or array.
-    // Every string leaf joins the vote text — an object's fields arrive in
-    // serde_json's BTreeMap order, which is stable but arbitrary; the text is
-    // retrieved by content, not by field order.
-    let mut text = String::new();
-    if let Some(instructions) = obj.get("instructions") {
-        join_strings(instructions, &mut text);
+    // The vote text is RETRIEVAL TEXT, and retrieval text must be payload
+    // data, never instruction prose (#1000). An instruction is a question
+    // ABOUT the payload; its vocabulary retrieves neighbours on its own —
+    // measured 0.9867 accuracy with an empty instruction against 0.6700 with
+    // a criteria-rich one, the same 300 messages. So a question votes on
+    // exactly what it POINTS AT:
+    //
+    // - every `` `path` `` reference its instructions name, resolved first
+    //   against the instructions' own string fields (the data-field pattern:
+    //   `{"question": "Judge `document` …", "document": text}`, which
+    //   xerj-rerank's stage and the provider's docs use) and then against
+    //   the state (the jev-reranker pattern: documents in state, referenced
+    //   by dotted path). The state does NOT ride along here — a question
+    //   that named its payload gets its payload, not its payload plus
+    //   whatever else the state holds;
+    // - a reference that resolves to STRUCTURE, not text, contributes no
+    //   vote text. `jev-reranker` ≥ 0.1.2's `rerank_relevance()` preset
+    //   ships its rubric object in state and names it in backticks; the
+    //   rubric is judge rules, and embedding its string leaves is exactly
+    //   the #1000 defect (criteria-rich prose, the measured 0.6700 class).
+    //   Structure is acknowledged and skipped — text is text, rules are
+    //   rules;
+    // - a question that references nothing votes on the state alone: a
+    //   string state whole, an object state by ALL its string leaves (#1001:
+    //   only `query` used to be read, so `{"message": …}` answered from the
+    //   instruction alone, at the spam base rate);
+    // - a question whose references resolve NOWHERE is refused naming them —
+    //   a confident vote on text the question never saw is the silent-fake
+    //   defect class, in another coat;
+    // - a vote text that is still empty is refused naming the question.
+    //
+    // `criteria` descriptions are never embedded: no benchmark measures
+    // criteria text, and it is the richest vocabulary on the wire.
+    let instructions = obj.get("instructions");
+    let mut paths: Vec<String> = Vec::new();
+    if let Some(instr) = instructions {
+        collect_backtick_paths(instr, &mut paths);
     }
-    // `criteria` descriptions are NOT embedded: the vote is over text the
-    // history was labelled on, and no benchmark measures criteria text.
-    let resolved = resolve_backticks(&text, state_val);
-    // The query rides along from state — a plain-string state whole, an
-    // object state via its `query` field, exactly the two shapes the wire's
-    // own examples use. Other state fields are referenced (or not) by the
-    // instructions' backtick paths, which have already been resolved.
-    let mut vote_text = resolved;
-    match state_val {
-        Value::String(s) => {
-            vote_text.push(' ');
-            vote_text.push_str(s);
-        }
-        Value::Object(m) => {
-            if let Some(q) = m.get("query").and_then(Value::as_str) {
-                vote_text.push(' ');
-                vote_text.push_str(q);
+    let mut vote_text = String::new();
+    if paths.is_empty() {
+        join_strings(state_val, &mut vote_text);
+    } else {
+        let mut unresolved: Vec<String> = Vec::new();
+        for path in &paths {
+            match resolve_reference(instructions, state_val, path) {
+                Some(Value::String(text)) => {
+                    if !vote_text.is_empty() {
+                        vote_text.push(' ');
+                    }
+                    vote_text.push_str(text);
+                }
+                // Resolves, but to structure — an object, number, boolean.
+                // Rules and figures carry no retrieval vocabulary: skipping
+                // them is the difference between this and #1000, where the
+                // prose joined the vote and wording moved accuracy 32 points.
+                Some(_) => {}
+                None => unresolved.push(path.clone()),
             }
         }
-        _ => {}
+        if !unresolved.is_empty() {
+            let listed = unresolved
+                .iter()
+                .map(|p| format!("`{p}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "question `{id}`: backtick reference{} {listed} resolve{} to nothing in \
+                 this request — the vote would run on text the question never named; \
+                 reference existing instructions fields or state paths, or drop the \
+                 backticks",
+                if unresolved.len() == 1 { "" } else { "s" },
+                if unresolved.len() == 1 { "s" } else { "" },
+            ));
+        }
     }
     let vote_text = clip(vote_text.trim(), MAX_VOTE_TEXT_CHARS);
+    if vote_text.is_empty() {
+        return Err(format!(
+            "question `{id}`: no text to vote on — the payload resolved to nothing; put \
+             text in `state` (a string, or an object with string fields) or reference it \
+             in backticks from the instructions, remembering that only string-valued \
+             references carry text"
+        ));
+    }
     Ok(Question { vote_text, kind })
 }
 
@@ -482,43 +545,56 @@ fn join_strings(v: &Value, out: &mut String) {
     }
 }
 
-/// Resolve `` `dotted.path` `` references against `state`. An unresolvable
-/// path is left literally in place — visible in the vote text rather than
-/// silently dropped.
-fn resolve_backticks(text: &str, state: &Value) -> String {
-    if !text.contains('`') || state.is_null() {
-        return text.to_string();
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find('`') {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 1..];
-        match after.find('`') {
-            Some(end) => {
-                let path = &after[..end];
-                match walk(state, path) {
-                    Some(v) => out.push_str(v),
-                    None => out.push_str(&rest[start..start + end + 2]),
+/// Collect every `` `path` `` a question's instructions name, in order of
+/// first appearance, deduplicated. The prose between backticks is ignored —
+/// it is the question, not the payload (#1000). An unpaired backtick names
+/// nothing.
+fn collect_backtick_paths(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(s) => {
+            let mut rest = s.as_str();
+            while let Some(start) = rest.find('`') {
+                let after = &rest[start + 1..];
+                match after.find('`') {
+                    Some(end) => {
+                        let path = &after[..end];
+                        if !path.is_empty() && !out.iter().any(|p| p == path) {
+                            out.push(path.to_string());
+                        }
+                        rest = &after[end + 1..];
+                    }
+                    None => break,
                 }
-                rest = &after[end + 1..];
-            }
-            None => {
-                out.push_str(&rest[start..]);
-                return out;
             }
         }
+        Value::Array(a) => a.iter().for_each(|x| collect_backtick_paths(x, out)),
+        Value::Object(m) => m.values().for_each(|x| collect_backtick_paths(x, out)),
+        _ => {}
     }
-    out.push_str(rest);
-    out
 }
 
-fn walk<'a>(v: &'a Value, path: &str) -> Option<&'a str> {
+/// Resolve one backtick reference to the value it names. The instructions'
+/// own string fields win over same-named state paths — the data-field
+/// pattern puts the payload next to the prose that names it — then the
+/// state is walked by dotted path. `None` means the reference names
+/// nothing in this request; a caller decides what a non-string resolution
+/// means (here: structure, not vote text).
+fn resolve_reference<'a>(
+    instructions: Option<&'a Value>,
+    state: &'a Value,
+    path: &str,
+) -> Option<&'a Value> {
+    instructions
+        .and_then(|i| walk(i, path))
+        .or_else(|| walk(state, path))
+}
+
+fn walk<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
     let mut cur = v;
     for seg in path.split('.') {
         cur = cur.get(seg)?;
     }
-    cur.as_str()
+    Some(cur)
 }
 
 fn clip(s: &str, max: usize) -> String {
@@ -580,12 +656,12 @@ fn no_support(ids: &[String], cfg: &DecisionsConfig) -> axum::response::Response
              error, not a fabricated probability — add labelled examples to the history \
              index or use POST /_decide to inspect what is there",
             cfg.index,
-            cfg.k,
             if ids.len() == 1 { "" } else { "s" },
             ids.iter()
                 .map(|i| format!("`{i}`"))
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            cfg.k,
         ),
     )
 }

@@ -273,7 +273,7 @@
 
 <div class="uc-hero">
   <p class="blog-crumb"><a href="/blog/">&larr; ALL POSTS · /BLOG</a></p>
-  <div class="uc-eyebrow">BENCHMARKS · ONE JUDGE MODEL, MEASURED · ONE WIRE, ANSWERED · RUNS 2026-09-19..20</div>
+  <div class="uc-eyebrow">BENCHMARKS · ONE JUDGE MODEL, MEASURED · ONE WIRE, ANSWERED · RUNS 2026-09-19..21</div>
   <h1>DOES XERJ BEAT JEV?<br><span class="accent">ON THE BILL, OUTRIGHT. ON FIQA, NO.</span></h1>
   <p class="blog-byline">AUTHOR · XERJ ENGINEERING TEAM · PUBLISHED · 2026-09-21 · UPDATED · 2026-09-21</p>
 
@@ -283,7 +283,7 @@
     <div class="vh"><span class="wn">THE VERDICT</span>
       <span class="wm">split, measured, with the losses left in</span></div>
     <p>Not outright — and not behind, either: a split verdict, measured over <strong>1,271 judged BEIR queries</strong> (3 shuffled repeats each). Where reading beats word-overlap, Jev's hosted judge wins rerank: our BM25 top-30 reordered by Jev scores <strong>0.7410 nDCG@10 on SciFact</strong> (versus 0.6993 for our best zero-API-token arm, hybrid RRF) and <strong>0.3638 on FiQA</strong> (versus 0.2382 BM25 — a +0.126 lift, the biggest we measured and the clearest case where hosted Jev still wins); our local hybrid keeps NFCorpus, 0.3448 to the rerank path's 0.3312, and that losing row stays in the table rather than being hidden.</p>
-    <p>On the bill XERJ wins outright: the FiQA rerank run cost <strong>15,178,758 judge input tokens — $0.6375</strong> at $0.042/Mtok, input only, p50 1.23 s per call — while XERJ answers the same wire (<code class="inline">/v1/systemone</code> and <code class="inline">/_decide</code>) locally with zero tokens, no model, and p50 42.7 ms on <code class="inline">/v1/systemone</code> (<code class="inline">/_decide</code>: 34.8 ms), and the unmodified pip-installed <code class="inline">jev-reranker</code> ran against a XERJ node and passed its own strict validation (spam 0.9014 versus ham 0.0956). AG News reaches 0.9182 accuracy on all 7,600 test items with no model and no tokens — no Jev row exists for AG News and none is claimed.</p>
+    <p>On the bill XERJ wins outright: the FiQA rerank run cost <strong>15,178,758 judge input tokens — $0.6375</strong> at $0.042/Mtok, input only, p50 1.23 s per call — while XERJ answers the same wire (<code class="inline">/v1/systemone</code> and <code class="inline">/_decide</code>) locally with zero tokens, no model, and p50 42.7 ms on <code class="inline">/v1/systemone</code> (<code class="inline">/_decide</code>: 34.8 ms), and the unmodified pip-installed <code class="inline">jev-reranker</code> ran against a XERJ node and passed its own strict validation through both of its entry points (spam 0.9447 versus ham 0.0905, client 0.1.2, re-run 2026-09-21). AG News reaches 0.9182 accuracy on all 7,600 test items with no model and no tokens — no Jev row exists for AG News and none is claimed.</p>
     <p>Hold the caveats: hosted Jev's published SciFact 0.768 and NFCorpus 0.358 are not run by us and are not a race with our rows (different experiments sharing a metric); provider non-determinism makes any gap within ±0.01 nDCG@10 noise; and Jev's FiQA probabilities are badly calibrated (ECE 0.3109 — documents rated 0.93 confidence were relevant 34% of the time; order by them, never threshold them with <code class="inline">min_score</code>). Verdict: use Jev where the judge wins, FiQA-style rerank; use XERJ where tokens, latency, and data locality decide.</p>
   </section>
 
@@ -544,7 +544,7 @@
   </div>
 
   <h3 class="scene" style="font-size:var(--fs-24); margin-top:var(--sp-8);">The gate: the pip client, unmodified, on a local node</h3>
-  <p class="wide">No SDK of ours, no patches, no subclassing. <code class="inline">pip install jev-reranker</code> (0.1.0, MIT) in a clean venv, its own listwise template, its own splitting, its own strict response validation, pointed at a XERJ node holding 4,000 labelled SMS messages. Two environment variables, and one of them is a trap:</p>
+  <p class="wide">No SDK of ours, no patches, no subclassing. <code class="inline">pip install jev-reranker</code> (0.1.2, MIT), its own listwise template, its own splitting, its own strict response validation, pointed at a XERJ node holding 4,000 labelled SMS messages. The gate ranks through both of the client's entry points — the constructor default, and the documented relevance preset, which since 0.1.2 ships its rubric as an <em>object</em> the vote must acknowledge without reading it as retrieval text. Two environment variables, and one of them is a trap:</p>
 
   <pre class="code"><span class="prompt">$</span> pip install jev-reranker
 <span class="prompt">$</span> <span class="cmt"># TYPESAFE_ENDPOINT carries the FULL path. TYPESAFE_BASE_URL is silently ignored</span>
@@ -552,20 +552,21 @@
 <span class="prompt">$</span> export TYPESAFE_ENDPOINT=http://localhost:9441/v1/systemone
 <span class="prompt">$</span> export TYPESAFE_API_KEY=local-only        <span class="cmt"># the node ignores it; localhost only</span>
 <span class="prompt">$</span> python3 gate_run.py
-<span class="out">client resolved model: ['xerj-history-vote-1']
+<span class="out">client: jev-reranker 0.1.2 (pip, unmodified)
+client resolved model: ['xerj-history-vote-1']
   1.0000  spam  Please call our customer service representative on 0800 169 6031 betwe
   1.0000  spam  Great News! Call FREEFONE 08006344447 to claim your guaranteed £1000 C
   1.0000  spam  URGENT! Your Mobile number has been awarded with a £2000 prize GUARANT
   0.0000  ham   If you're not in my car in an hour and a half I'm going apeshit
   0.0000  ham   Carlos says we can pick up from him later so yeah we're set
-  ...                                                     <span class="cmt"># 10 fixed docs, 5+5</span>
-mean noul  spam=0.9014  ham=0.0956  gap=0.8058
+  ...                                                     <span class="cmt"># 10 fixed docs, 5+5, both entry points</span>
+mean noul  spam=0.9447  ham=0.0905  gap=0.8542
 GATE PASSED: unmodified jev-reranker ranked from the XERJ node</span></pre>
 
   <p class="wide">The client's own validation <em>is</em> the wire gate. Answers keyed by the sent ids. Every noul numeric in 0..1. Model a non-empty string. Usage non-negative integers. Surviving it unmodified is the compatibility claim. The spam/ham separation is the semantic one. <strong>Zero requests left the machine.</strong> The vote is an ordinary search of an ordinary index, and the module adds no outbound client.</p>
 
   <div class="loss">
-    <strong>The first gate attempt failed. It is the most useful thing on this page.</strong> The wire puts the query in <code class="inline">state</code>, and the vote text joins it, so query vocabulary takes part in retrieval. With a spam-bearing query like "winner claim prize", <em>every</em> document's vote retrieved spam neighbours. The vote measured the query, not the documents: spam 1.000 against ham 0.785. No separation. The fixed gate uses a query whose every term is absent from the corpus: "triage inbox unsolicited correspondence". Result, 0.9014 against 0.0956. This is inherent to a retrieval vote, not a defect. <strong>Pick the query for the history you have.</strong> Do not let a rerank habit leak vocabulary into a classification question.
+    <strong>The first gate attempt failed. It is the most useful thing on this page.</strong> The wire puts the query in <code class="inline">state</code>, and the vote text joined it, so query vocabulary took part in retrieval. With a spam-bearing query like "winner claim prize", <em>every</em> document's vote retrieved spam neighbours. The vote measured the query, not the documents: spam 1.000 against ham 0.785. No separation. We first called that "inherent to a retrieval vote". <strong>It was not. It was two defects, and we fixed them.</strong> The vote text used to concatenate the instruction's prose into the retrieval query — wording alone moved accuracy 32 points (0.9867 with an empty instruction, 0.6700 with a criteria-rich one, same 300 held-out messages) — and an object state contributed only its <code class="inline">query</code> field, so <code class="inline">{"message": …}</code> voted on prose at the spam base rate (0.1733 against 0.9667 for the same message as a string). The vote text is now exactly what the question points at: its backtick references, or the state's own string content — never instruction prose, never state the question never named. After the fix, all eight wording/shape arms of the same 300 messages score identically (0.9767). One part <em>is</em> by design, and it is the client's choice, not ours: since 0.1.2 the client's own question references the query in backticks, so the query is named payload — the question being asked is "does this document answer this query". <strong>Pick the query for the history you have</strong> still holds: under the deliberately spammy query the gap narrows from 0.8542 to 0.6087, and the gate asserts both.
   </div>
 
   <h3 class="scene" style="font-size:var(--fs-24); margin-top:var(--sp-8);">Speed: the Rust side of the same wire</h3>
@@ -698,7 +699,7 @@ EOF
 <span class="prompt">$</span> python3 -m venv ~/gate-venv &amp;&amp; ~/gate-venv/bin/pip install jev-reranker
 <span class="prompt">$</span> TYPESAFE_ENDPOINT=http://localhost:9441/v1/systemone \
   TYPESAFE_API_KEY=local-only ~/gate-venv/bin/python benchmarks/systemone-gate/gate_run.py
-<span class="out">mean noul  spam=0.9014  ham=0.0956  gap=0.8058
+<span class="out">mean noul  spam=0.9447  ham=0.0905  gap=0.8542
 GATE PASSED: unmodified jev-reranker ranked from the XERJ node</span></pre>
   <p class="src">Everything on this page: <a href="https://github.com/xerj-org/xerj/tree/main/benchmarks/beir-hybrid/results/2026-09-20-rerank-pilot" rel="external">the pilot</a> ·
     <a href="https://github.com/xerj-org/xerj/tree/main/benchmarks/beir-hybrid/results/2026-09-20-rerank-full" rel="external">the full run</a> ·
@@ -706,7 +707,7 @@ GATE PASSED: unmodified jev-reranker ranked from the XERJ node</span></pre>
     <a href="https://github.com/xerj-org/xerj/tree/main/benchmarks/decisions-as-retrieval/results/2026-09-20-agnews" rel="external">the AG News vote</a> ·
     <a href="https://github.com/xerj-org/xerj/tree/main/benchmarks/systemone-gate" rel="external">the gate</a> ·
     <a href="https://github.com/xerj-org/xerj/blob/main/docs/research/typesafe-skill-2026-09/NOTES.md" rel="external">the research narrative</a> ·
-    measured 2026-09-19..20 · engine at the wire-compat branch plus the WAND commit cf6a9989, ES-YAML conformance <!-- snapshot:2026-09-20 -->1371 passed / 0 failed on that branch (canonical: 1366 / 1369 today) ·
+    measured 2026-09-19..21 · engine at the wire-compat branch plus the WAND commit cf6a9989, ES-YAML conformance <!-- snapshot:2026-09-20 -->1371 passed / 0 failed on that branch (canonical: 1366 / 1369 today) ·
     related: <a href="/benchmarks/">the benchmarks hub</a> · <a href="/answers/rerank-search-results-calibrated-judge">the rerank stage, documented</a> ·
     <a href="/benchmarks/elasticsearch">the ES scorecard</a>.</p>
 </section>

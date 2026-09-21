@@ -62,26 +62,48 @@ wrong one when you do not. Where there is no history — a new policy, a new
 category — use a judge model; that is what
 [docs/RERANK.md](./RERANK.md) is for.
 
-**The query's vocabulary pollutes a classification history.** The wire puts
-the query in `state`, and the vote text is the resolved question text plus
-that query — so query terms participate in retrieval. For a rerank-shaped
-request that is correct (relevance IS query-relative). For a classification
-history it can swamp the document: against the SMS corpus, the query
-"congratulations winner claim free prize" retrieves spam neighbours for *every*
-document and the vote says nothing about the document (measured: spam mean
-1.000 vs ham 0.785 — no separation). Keep the query neutral for the corpus
-(every term of `triage inbox unsolicited correspondence` is absent from the SMS
-corpus: spam 0.901 vs ham 0.096). This is inherent to a retrieval vote, not a
-defect to fix: pick the query for the history you have.
+**What the vote retrieves on — the payload, never the prose (#1000, #1001).**
+A question's `instructions` are a question ABOUT the payload; their vocabulary
+is not retrieval text. The vote text is exactly what the question points at:
+
+- every `` `path` `` reference the instructions name — resolved against the
+  instructions' own string fields first (the data-field pattern:
+  `{"question": "Judge `document` …", "document": text}`, which
+  `xerj-rerank`'s stage and the provider's docs use), then against the state
+  by dotted path (`` `documents.doc_0` ``, the shape `jev-reranker` sends).
+  A reference that resolves to structure rather than text — the rubric
+  object `jev-reranker` ≥ 0.1.2 ships with its relevance preset — is
+  acknowledged and skipped: judge rules are not retrieval vocabulary;
+- a question that references nothing votes on the state alone — a string
+  state whole, an object state by ALL its string leaves, whatever the keys
+  are named;
+- references that resolve to nothing, and a payload with no text at all, are
+  422s naming the question — never a confident vote on text the question
+  never saw.
+
+Two defects this design closes, both measured on the SMS history (4,000
+train / 300 held-out, shuffle seed 7): instruction wording used to change the
+answer — accuracy 0.9867 with an empty instruction against 0.6700 with a
+criteria-rich one, a 32-point swing from wording alone — and an object state
+used to contribute only its `query` field, so `{"message": …}` voted on the
+instruction prose at the spam base rate (accuracy 0.1733 against 0.9667 for
+the same message as a string). After the fix the same 300 held-out messages
+score identically under every instruction wording and every state shape —
+0.9767 across all eight arms (the absolute number sits ~1 point under the
+issue runs' 0.9867 because the history was re-indexed fresh for the re-run;
+the invariant is the identity, not the digit). One nuance the client itself
+decides: since 0.1.2, `jev-reranker`'s own question references `` `query` ``
+in backticks, so the query is named payload and joins the vote BY CLIENT
+DESIGN — the acceptance gate still uses a neutral query for a classification
+history, and survives a deliberately spammy one (gap 0.61 against 0.85,
+threshold 0.3).
 
 ## The wire, and the two deliberate breaks
 
 Request: `{state, model, questions: {id: {type, instructions, criteria}}}`.
 `state` may be a string or an object; `instructions` may be a string, object
-or array (all string leaves join); strings may reference state data with
-backtick paths — `` `documents.doc_0` `` — resolved against `state` before the
-vote text is built. That is the reference pattern of the API and the shape
-`jev-reranker` sends.
+or array. `criteria` descriptions are never retrieval text; the options they
+name are `choice` answers, not query vocabulary.
 
 Response: `{model, answers, usage}` with `answers` keyed exactly by the
 question ids sent, each answer carrying only its documented fields (clients
