@@ -3883,24 +3883,31 @@ impl Engine {
     /// new way to wedge. Returns the number of indexes drained; closed
     /// indexes are skipped (their caches were already released at close).
     pub async fn drain_rebuildable_memory(&self) -> usize {
-        let mut drained = 0usize;
-        for entry in self.indices.iter() {
-            let idx = Arc::clone(entry.value());
-            let name = entry.key();
-            if self.closed_indices.contains_key(name.as_str()) {
-                continue;
-            }
+        let loaded: Vec<Arc<Index>> = self
+            .indices
+            .iter()
+            .filter(|e| !self.closed_indices.contains_key(e.key().as_str()))
+            .map(|e| Arc::clone(e.value()))
+            .collect();
+        self.release_rebuildable_memory(&loaded).await
+    }
+
+    /// Flush then release the rebuildable caches of exactly `indices`, then
+    /// purge the allocator (issue #950). The shared body of the
+    /// memory-pressure drain and of `POST /{index}/_cache/clear`, so the
+    /// operator-facing clear and the breaker's drain cannot drift apart: same
+    /// flush-first ordering as [`Self::close_index`], nothing closed, reads
+    /// re-hydrate from disk. Best-effort per index. Returns how many were
+    /// released.
+    pub async fn release_rebuildable_memory(&self, indices: &[Arc<Index>]) -> usize {
+        for idx in indices {
             if idx.flush().await.is_err() {
-                tracing::warn!(
-                    index = name.as_str(),
-                    "memory-pressure drain: flush failed, releasing caches anyway"
-                );
+                tracing::warn!("memory release: flush failed, releasing caches anyway");
             }
             idx.release_memory();
-            drained += 1;
         }
         purge_allocator_pages();
-        drained
+        indices.len()
     }
 
     /// Spawn the background resource sampler (item 1/3): every

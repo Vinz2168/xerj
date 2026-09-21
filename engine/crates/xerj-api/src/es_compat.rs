@@ -29261,7 +29261,7 @@ pub async fn get_tasks(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /{index}/_cache/clear — clear cache stub
+// POST /{index}/_cache/clear — release the index's rebuildable caches
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub async fn clear_cache(
@@ -29269,14 +29269,19 @@ pub async fn clear_cache(
     Path(index): Path<String>,
 ) -> impl IntoResponse {
     // Resolve wildcard/comma/_all specs to every matching index (404 only
-    // when a literal name doesn't exist). xerj has no separately-addressable
-    // field/query cache to purge, so there is nothing to clear — but we
-    // still report an honest _shards block sized to what actually matched.
+    // when a literal name doesn't exist). Clearing flushes each index and
+    // releases its hydrated per-segment caches (#950); the next read
+    // re-hydrates from disk, so this is a memory lever, never a data change.
     let index = strip_remote_cluster_prefix(&index);
     let handles = match resolve_indices_for_op(&state, &index).await {
         Ok(h) => h,
         Err(e) => return ApiError::new(e).into_response(),
     };
+    let indices: Vec<_> = handles
+        .iter()
+        .map(|(_, idx)| std::sync::Arc::clone(idx))
+        .collect();
+    state.engine.release_rebuildable_memory(&indices).await;
     let n = handles.len() as u32;
     Json(json!({
         "_shards": { "total": n, "successful": n, "failed": 0 }
