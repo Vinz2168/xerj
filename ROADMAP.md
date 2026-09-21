@@ -2,7 +2,7 @@
 
 This roadmap tracks capabilities that are **planned but not yet fully implemented**, so the project's public claims stay honest about what ships today versus what is coming. Status is verified against the actual code and by real API requests to the release binary, not aspirational.
 
-Last reviewed: 2026-09-20 (against `v1.0.0-rc.75` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298). *The zero-token direction* below was added and verified separately on 2026-09-18, against `main` @ `4d8dadbf`; the rest of the file was not re-reviewed on that date.
+Last reviewed: 2026-09-21 (against `v1.0.0-rc.76` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298). *The zero-token direction* below was added and verified separately on 2026-09-18, against `main` @ `4d8dadbf`; the rest of the file was not re-reviewed on that date.
 
 ## Follow the roadmap
 
@@ -24,60 +24,43 @@ These are implemented and exercised by real API requests / the test suite / benc
 - **Hybrid search** — BM25 + kNN combined in a single request via the `hybrid` **query type** with `rrf|linear` fusion, verified live. (`fusion: "learned"` is parsed and **rejected** with a 400 naming the supported values — it is not implemented.) (The ES-native top-level `{query, knn}` body also unions both halves since rc.72 — see *Known partials* for its performance caveat.)
 - **Zero-config folder onboarding** — `xerj autoindex <folder>` sniffs files, infers datasets, and creates one index per dataset: tree-sitter AST extraction for 34 languages (symbols, defs, line numbers — the [#295](https://github.com/xerj-org/xerj/issues/295) expansion; still open: Clojure and source-SQL wait on usable grammar crates, Nim/Crystal have none, fixed-form Fortran is deliberately unclaimed), CSV/JSON/JSONL/XML/YAML/SQLite/PDF/DOCX/HTML/log/`.eml`/mbox (Google Takeout) formats, `.gitignore`/`.xerjignore` support, incremental re-runs, and a machine-parseable progress stream.
 - **Agent-memory REST API** (`/_memory/*`), **second-brain knowledge graph** (`/_graph`), **anomaly detection** (`_ml` with continuous datafeeds), **auto-embed on ingest** (default embedder is deterministic **lexical** feature-hashing — never described as neural; `--embed-mode neural` runs the in-binary BERT encoder, `--embed-mode proxy` an external endpoint).
+- **The System One wire, answered locally** (since rc.76) — `POST /v1/systemone` (native REST) and `POST /_decide` (ES-compat): typed judgement questions (`noul` / `choice`) answered by a rank-weighted kNN vote over a labelled-history index — no model, no provider key, no egress ([benchmarks/decisions-as-retrieval](./benchmarks/decisions-as-retrieval): Banking77 0.933 accuracy / ECE 0.012, SMS spam 0.983). The acceptance gate is the unmodified pip `jev-reranker` ranked off a XERJ node ([benchmarks/systemone-gate](./benchmarks/systemone-gate)). It is **not** a judge model and claims no zero-shot judgement: where there is no history, use the `rerank` stage and its provider.
 - **Columnar storage** — the ZBS2 columnar block with 9 domain-aware encodings, ZSTD/LZ4 codecs, and SQ8 vector quantization, wired into the segment write path.
 - Bulk / scroll / delete-by-query, aliases, index templates, **executed** index-lifecycle policies (ISM-modeled, `_ilm/*` + `_plugins/_ism/*`, since rc.15), `_cat/*`, `_cluster/health`, `_count` / `_msearch` / `_mget`, `_update` / `_update_by_query` — all live-verified.
 - **A single native binary**, statically linked, no JVM, sub-second cold start.
 
 The release-by-release record of how all of this landed is [CHANGELOG.md](./CHANGELOG.md) — this file no longer duplicates it. Be aware of a real gap in that record: rc.1–rc.18 and rc.71 have entries, **rc.19 through rc.70 do not**. Those 52 releases are reconstructable only from `git log` and the release list, and closing that gap is itself a GA item below.
 
-## Next release — [v1.0.0-rc.76](https://github.com/xerj-org/xerj/milestones)
+## Next release — [v1.0.0-rc.77](https://github.com/xerj-org/xerj/milestones)
 
-**rc.75 was cut on 2026-09-20** — its full contents are the
-[CHANGELOG.md](./CHANGELOG.md) entry, not this file. It is **the object-storage and
-freshness release**: `xerj autoindex s3://bucket/prefix` indexes an S3-compatible bucket
-(AWS S3, Cloudflare R2, MinIO, Ceph) with per-request cost accounting, `--watch` keeps
-either a local folder or a bucket current from change events rather than a re-run,
-`xerj share` hands one person read-only search over one index, mbox and Google Takeout
-exports are extracted, the console gained a corpus home and a reader with a read-only
-guest mode, and `_search` gained an opt-in `rerank` stage. Underneath it, `xerj-storage`
-gained a real S3 `StorageBackend` with a read-through cache — the client and the cache
-only: an index still cannot live in a bucket, and `storage.backend = "s3"` still refuses
-to start on purpose.
+**rc.76 was cut on 2026-09-21** — its full contents are the
+[CHANGELOG.md](./CHANGELOG.md) entry, not this file. It is **the JEV-interface and
+honest-fixes release**: the node answers the System One wire itself — `POST
+/v1/systemone` (native REST) and `POST /_decide` (ES-compat), a rank-weighted kNN vote
+over a labelled-history index, nothing leaving the node — and the unmodified pip
+`jev-reranker` runs against it through both of its entry points. Two deliberate,
+test-pinned wire breaks: `model` echoes `xerj-history-vote-1` (never a Jev name), and
+zero support is a 422 (never a fabricated 0.5). The same release ships a WAND fast path
+in `xerj-fts` (2.0× on the vote workload, bit-identical scores), `xerj code` /
+`xerj corpus add|index|list` (the reference-coding loop as binary commands), FiQA and
+BEIR judged-query datasets on the record, .deb release assets (amd64/arm64), and a long
+list of fixes each carrying its own reproduction — the rerank stage as it shipped in
+rc.75 scored 0.3822 nDCG@10 where plain BM25 scored 0.7750, and that bug was ours.
 
-Two things that shaped the release and are worth carrying forward. **Object-store
-requests cost the operator money**, so every path that issues them counts billed
-attempts (not successes), keeps a restart-surviving spend ledger, and stops at a budget
-that is free-tier-safe by default. And **a local cross-encoder judge was measured and
-not shipped as the default**: on BEIR it does not beat the hybrid RRF query we already
-ship — SciFact 0.7021 hybrid against 0.7186 for `hybrid → local base` with a confidence
-interval spanning zero, NFCorpus 0.3445 against 0.3597 for `hybrid → local small`, the
-one gain whose interval excludes zero. No tier wins on both, so the local provider stays
-opt-in and the work is not on `main`.
+**In flight for rc.77:**
 
-rc.72 was cut on 2026-08-31 — its full contents are the [CHANGELOG.md](./CHANGELOG.md)
-entry, not this file. It is **the idle-cost release**: a measurement session found the
-process was not quiet at rest — 464 small indices (the shape `xerj autoindex` produces)
-cost 15-27% of a core and 115 wakeups/s with zero requests, and a 154 MB corpus spent
-40+ minutes at ~110% CPU merging after ingest "finished". Three of the four mechanisms
-are fixed ([#871](https://github.com/xerj-org/xerj/issues/871) event-driven merge
-scheduling, [#872](https://github.com/xerj-org/xerj/issues/872) an incremental memtable
-aggregate replacing 74,240 lock acquisitions per second,
-[#873](https://github.com/xerj-org/xerj/issues/873) an idle-age flush so a small dataset
-reaches a segment instead of living in RAM). It also carries six ES-compatibility and
-autoindex correctness fixes, each with a test proven to fail on the unfixed code.
-
-**In flight for rc.73:**
-
-- **The fourth idle-cost mechanism** — merge re-analyzes every document instead of
-  merging postings ([#876](https://github.com/xerj-org/xerj/issues/876)). The segment
-  writer already accepts a `PostingsWriter` rather than text, so the fix reuses machinery
-  that exists; the design is published on the issue. The
-  [#874](https://github.com/xerj-org/xerj/issues/874) budget — idle CPU under 0.5% of one
-  core *independent of index count* — is not met until this and the remaining
-  [#873](https://github.com/xerj-org/xerj/issues/873) levers (adaptive WAL shards,
-  cold-index state) land.
-- **The regression rc.72 shipped knowingly** — `knn` beside `query` is now correct but is
-  answered by a stored-document scan ([#892](https://github.com/xerj-org/xerj/issues/892)).
+- **The systemone vote-text fix** — instruction wording must not change the answer and
+  object state must not be silently dropped
+  ([#1000](https://github.com/xerj-org/xerj/issues/1000),
+  [#1001](https://github.com/xerj-org/xerj/issues/1001); PR
+  [#1007](https://github.com/xerj-org/xerj/pull/1007)): measured 32- and 79-point
+  accuracy swings from wording and key names, both closed by voting on exactly what the
+  question points at.
+- **Segments in an object store** ([#965](https://github.com/xerj-org/xerj/issues/965)):
+  the ZBM1 bundle format and the flush/merge/read/boot wiring exist on the branch; the
+  gates and the flip are what remains.
+- **RSS feeds as an autoindex source** ([#950](https://github.com/xerj-org/xerj/issues/950)),
+  evaluated against the ledger evidence #948 landed for ingest memory.
 - **Retrieval quality** — the symbol index returns whole class and method bodies rather
   than declarations, measured at 32-48x more bytes than grep for the same answer
   ([#500](https://github.com/xerj-org/xerj/issues/500)). This one undercuts a claim the
