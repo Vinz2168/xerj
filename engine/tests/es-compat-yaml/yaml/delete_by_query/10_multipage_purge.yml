@@ -1,0 +1,76 @@
+---
+"delete_by_query pages through the whole index in batches":
+  # Seed 9 docs; scroll_size 2 forces 5 batches, so the run must advance a
+  # keyset cursor across pages instead of stopping at the first batch
+  # (#1019: the runner used to fire ONE size=10000 search and truncate).
+  - do:
+      index: { index: dbq_src, id: "1", body: { n: 1 } }
+  - do:
+      index: { index: dbq_src, id: "2", body: { n: 2 } }
+  - do:
+      index: { index: dbq_src, id: "3", body: { n: 3 } }
+  - do:
+      index: { index: dbq_src, id: "4", body: { n: 4 } }
+  - do:
+      index: { index: dbq_src, id: "5", body: { n: 5 } }
+  - do:
+      index: { index: dbq_src, id: "6", body: { n: 6 } }
+  - do:
+      index: { index: dbq_src, id: "7", body: { n: 7 } }
+  - do:
+      index: { index: dbq_src, id: "8", body: { n: 8 } }
+  - do:
+      index: { index: dbq_src, id: "9", refresh: true, body: { n: 9 } }
+
+  - do:
+      delete_by_query:
+        index: dbq_src
+        body:
+          query: { match_all: {} }
+          scroll_size: 2
+
+  # total is the exact match count (not the first page's length), deleted
+  # every match, batches the real page count.
+  - match: { total: 9 }
+  - match: { deleted: 9 }
+  - match: { batches: 5 }
+  - match: { failures: [] }
+
+  - do:
+      count:
+        index: dbq_src
+        body:
+          query: { match_all: {} }
+  - match: { count: 0 }
+
+---
+"delete_by_query honors max_docs":
+  - do:
+      index: { index: dbq_max, id: "1", body: { n: 1 } }
+  - do:
+      index: { index: dbq_max, id: "2", body: { n: 2 } }
+  - do:
+      index: { index: dbq_max, id: "3", body: { n: 3 } }
+  - do:
+      index: { index: dbq_max, id: "4", body: { n: 4 } }
+  - do:
+      index: { index: dbq_max, id: "5", refresh: true, body: { n: 5 } }
+
+  # ES: max_docs <= scroll_size means a single batch, no scroll.
+  - do:
+      delete_by_query:
+        index: dbq_max
+        body:
+          query: { match_all: {} }
+          max_docs: 2
+
+  - match: { total: 2 }
+  - match: { deleted: 2 }
+  - match: { batches: 1 }
+
+  - do:
+      count:
+        index: dbq_max
+        body:
+          query: { match_all: {} }
+  - match: { count: 3 }

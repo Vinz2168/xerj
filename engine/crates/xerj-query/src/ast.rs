@@ -1252,6 +1252,21 @@ pub struct SearchRequest {
     /// lookups, suggesters) never pay for a number nobody will read.
     #[serde(skip)]
     pub savings: SavingsMode,
+
+    /// INTERNAL (never on the wire — `serde(skip)`): the caller reads nothing
+    /// from the hits except their `id`s (`_delete_by_query` pages, the
+    /// engine-level purge loop). When the request shape needs nothing beyond
+    /// ids — sort keys confined to `_id`/`_doc`, no `fields` /
+    /// `script_fields` / `highlight` / `explain` / `collapse` / `rescore` /
+    /// `aggs` / `min_score` — the executor's hydration sites extract the
+    /// stored `_id` without building the `_source` `Value` tree and the
+    /// returned hits carry `source: Value::Null` (#1019). Any shape the
+    /// engine's eligibility gate rejects runs exactly as a full request.
+    ///
+    /// Set ONLY by engine-controlled callers; `parse_request` never sets it,
+    /// so it can never arrive from the wire (same contract as `savings`).
+    #[serde(skip)]
+    pub ids_only: bool,
 }
 
 /// Whether — and how precisely — to measure withheld `_source` bytes.
@@ -1303,6 +1318,7 @@ impl Default for SearchRequest {
             min_score: None,
             leaf_ts_field: None,
             savings: SavingsMode::Off,
+            ids_only: false,
         }
     }
 }
