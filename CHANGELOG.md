@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.77] - 2026-09-21
+
+The stateless-index and reader-fairness release. Two headline changes:
+`storage.backend = "s3"` starts for real (#965), and readers stop starving
+under sustained ingest (#1013) — both with fail-before reproductions.
+
+### Added
+
+- **`storage.backend = "s3"` works (#965, PR #1008).** Before this commit the
+  startup guard refused the setting outright, honestly: a flush uploaded one
+  file per segment while a 25-field segment family is 104 files, `snapshot.json`
+  never left local disk, and a fresh node pointed at the bucket saw zero
+  segments. Now the whole segment family packs into ONE immutable object — a
+  ZBM1 bundle whose footer is the existing ZCM1 flush-completion manifest
+  extended with absolute offsets (trailer shape adapted from quickwit's
+  split-footer bundle, Apache-2.0, approach only). One object per segment plus
+  the catalogue PUT is ~18% of Cloudflare R2's free Class-A tier at a 30 s
+  flush interval, where 104 PUTs would be ~899%. `snapshot.json` per index is
+  the publication point: merges publish output bundles before retiring inputs,
+  boot fetches the catalogue and adopts backfill, reads hydrate families on
+  demand, per-index meta rides the same bucket. Config grows to 128 settings
+  (`storage.s3_bucket`); an empty bucket name stays a hard error (XERJ never
+  calls CreateBucket). Fail-before, verified live on the base commit:
+  `an_s3_index_round_trips_to_a_fresh_node` panicked "the flush must publish
+  the snapshot catalogue". Honest limits stay documented in
+  `docs/OBJECT_STORAGE.md`: single-writer v1, the WAL stays local, in-memory
+  packs with no multipart upload, crash-consistency pinned against the
+  in-process simulation only.
+
 ### Fixed
 
 - **`/v1/systemone` votes on the payload, never on the instruction prose.**
@@ -33,6 +62,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wording/shape arms, and the pip-client acceptance gate passes through both
   client entry points (neutral-query gap 0.8542) and under a deliberately
   spammy query (gap 0.6087, threshold 0.3) — client 0.1.2, unmodified.
+
+- **Readers no longer starve under sustained ingest (#1013, PR #1014).**
+  `CollectionPublication` is a seqlock; `search()` admitted a reader and
+  validated the token at the **end** of the search — demanding a writer-free
+  *interval* spanning the whole scan. The flush path holds its guard across
+  the entire finalize, concurrent flushes are allowed, and every document
+  write takes its own bracket, so under sustained ingest writer-free
+  search-length intervals stop existing: search and `delete_by_query` retried
+  to their deadline and returned HTTP 500 (reproduced twice in the #950
+  profiling run). Validation now happens at the **capture boundary**: a
+  generation reference before the first collection-state read, validated with
+  the seqlock evenness check right after the memtable snapshot — readers need
+  a writer-free *instant*, not a writer-free search. A straddled capture
+  returns a typed retry root (`CollectionCaptureCrossedPublication`,
+  downcastable through `anyhow` context wraps) and `search()` retries until
+  its deadline. Fail-before (`search_completes_under_publication_churn`): a
+  churn thread holds a cancelled 1 ms publication bracket every 3 ms — old
+  code FAILED at its 2 s deadline with exactly the production error; new code
+  passes in 0.37 s, total exactly 5050. Gates: 723/723 engine lib tests,
+  ES-YAML 1376/0 failed. Follow-up #1015 tracks shrinking the flush bracket
+  itself (a latency consideration now, not a starvation hazard).
+
+- **The console tour's pill assertions raced the route hand-off (#1011).**
+  The browser security suite's policy tour waited on
+  `aria-busy === 'false'`, but app.js only ever sets aria-busy to 'false' at
+  the END of a render — nothing flips it 'true' while the next route's query
+  is pending — so the wait was satisfied by the previous route's still-mounted
+  DOM, and the fixed 150 ms sleep then read the old view's pill. Failed only
+  on slow runners (PR #1008's CI): the window scales with runner latency. The
+  tour now waits for the route's own scene, and a latency-injection
+  demonstration failed the old assertion deterministically at 400 ms.
+
+- **CI: the reference-coding toolkit's tests never ran.** `cargo test
+  --features x -- xc_ y` passes one filter per invocation, so `xc_` matched
+  nothing and the step was green on zero tests (3aba5786). And the toolkit
+  job's MCP schema gate looked for a release binary that job never builds
+  (8f8e5444). Both fixed; the job now genuinely executes.
+
+- **docs: roadmap re-reviewed against rc.76** (release-drift guard, 213ce8f8).
 
 ## [1.0.0-rc.76] - 2026-09-21
 
