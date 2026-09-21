@@ -8494,7 +8494,12 @@ impl Index {
         );
         std::fs::create_dir_all(&index_dir)?;
 
-        let store_config = store_config_from(config, wal_shards_override_from_settings(&settings));
+        let storage_mode = storage_mode_from_config(&config.storage, name.as_str())?;
+        let store_config = store_config_from(
+            config,
+            wal_shards_override_from_settings(&settings),
+            storage_mode,
+        );
         let store = IndexStore::open(&index_dir, store_config)?;
 
         let managed = ManagedSchema {
@@ -8556,6 +8561,13 @@ impl Index {
             &index_dir,
             &[("binding", "canonical"), ("segment_analyzers", "honored")],
         );
+        // #965 — publish the index's small per-index meta files to the
+        // bucket so a fresh node (no local dir) opens the same index:
+        // settings, schema, the analyzer-binding marker, the embedding
+        // identity and the raw ES mapping. Best-effort by design — a failed
+        // PUT must not fail an index that already committed locally; the
+        // next meta mutation re-publishes.
+        publish_index_meta_objects(&store, &index_dir, name.as_str());
         let registry = Arc::new(build_registry_from_settings(&settings));
 
         info!(name = name.as_str(), "index created");
@@ -8756,8 +8768,28 @@ impl Index {
         // unparseable settings.json is refused rather than defaulted to null:
         // the shard count, the custom analyzers and the index blocks all live
         // in here, so "null" is a different index, not a safe fallback.
+        //
+        // #965 — in object-store mode the meta objects are fetched FIRST, so
+        // this open (which may be a fresh node whose local dir is empty)
+        // sees the same settings/schema the creating node persisted. The
+        // fetch is local-file-absent-only: a node that already has them
+        // never pays a round trip.
+        let storage_mode = storage_mode_from_config(&config.storage, name.as_str())?;
+        if let xerj_storage::StorageMode::ObjectStore { backend, .. } = &storage_mode {
+            for meta_name in INDEX_META_FILES {
+                IndexStore::fetch_aux_object_from_backend(
+                    backend,
+                    meta_name,
+                    &index_dir.join(meta_name),
+                )?;
+            }
+        }
         let settings = load_settings(&index_dir)?.unwrap_or(Value::Null);
-        let store_config = store_config_from(config, wal_shards_override_from_settings(&settings));
+        let store_config = store_config_from(
+            config,
+            wal_shards_override_from_settings(&settings),
+            storage_mode,
+        );
         let store = IndexStore::open(&index_dir, store_config)?;
 
         // Estimate doc count from snapshot.
@@ -12593,20 +12625,57 @@ impl Index {
                         // here, a crash in between merely loses the side-car
                         // and reopen falls back to the (slow but correct)
                         // decode-stored path — the pre-fix status quo.
+                        //
+                        // Issue #965 — in object-store mode this is
+                        // `finalize_merge_output`: the same `.ids` write,
+                        // then a synthesized ZCM1 manifest, then the family
+                        // packed into ONE bundle object, then the bucket
+                        // catalogue. The catalogue still names the INPUTS
+                        // until it succeeds, so on failure the inputs must
+                        // NOT be retired below — the bucket would keep a
+                        // consistent pre-merge view whose replacement bytes
+                        // never landed, and deleting the local input files
+                        // would make those referenced bundles unrecoverable.
+                        // Local mode keeps today's warn-and-continue exactly.
+                        let mut merge_finalize_failed_in_object_mode = false;
                         {
                             let pairs: Vec<(u64, &str)> = ids_pairs
                                 .iter()
                                 .map(|(seq, id)| (*seq, id.as_str()))
                                 .collect();
-                            if let Err(e) = self
-                                .store
-                                .write_ids_sidecar(merged_meta.id.as_str(), &pairs)
-                            {
-                                tracing::warn!(
-                                    merged_id = merged_meta.id.as_str(),
-                                    "merge: failed to write .ids sidecar: {e}"
-                                );
+                            if let Err(e) = self.store.finalize_merge_output(&merged_meta, &pairs) {
+                                if self.store.is_object_store_mode() {
+                                    tracing::error!(
+                                        merged_id = merged_meta.id.as_str(),
+                                        "merge: durable publication of the merged segment \
+                                         failed; input retirement skipped to keep the bucket \
+                                         catalogue consistent: {e}"
+                                    );
+                                    merge_finalize_failed_in_object_mode = true;
+                                } else {
+                                    tracing::warn!(
+                                        merged_id = merged_meta.id.as_str(),
+                                        "merge: failed to write .ids sidecar: {e}"
+                                    );
+                                }
                             }
+                        }
+                        if merge_finalize_failed_in_object_mode {
+                            failed_batches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            // Keep the local input families: they are still
+                            // the bucket catalogue's referenced set. The
+                            // merged output stays locally authoritative; the
+                            // next catalog publish self-heals it (bundle
+                            // upload for every snapshot-listed segment).
+                            dropped_seg_ids.extend(batch_slice.iter().cloned());
+                            // Same pipeline rule as the failed-apply path: the
+                            // `continue` below bypasses the loop's bottom
+                            // top-up, so launch the next disjoint batch here.
+                            if let Some((batch, metas)) = pending.take() {
+                                in_flight.push(spawn_one(batch, metas));
+                                pending = queue_iter.next();
+                            }
+                            continue;
                         }
                         // Disk-space fix (2026-07): the input segments are
                         // now unreachable from the (persisted) snapshot —
@@ -23335,6 +23404,8 @@ impl Index {
         let bytes = serde_json::to_vec_pretty(&new_settings)?;
         write_file_atomic(&path, &bytes).map_err(EngineError::Io)?;
         *self.settings.write().await = new_settings;
+        // #965 — keep the bucket's meta copy in step with the local write.
+        publish_index_meta_objects(&self.store, &self.data_dir, self.name.as_str());
         Ok(())
     }
 
@@ -23551,6 +23622,9 @@ impl Index {
         let bytes = serde_json::to_vec_pretty(&settings)?;
         write_file_atomic(&path, &bytes).map_err(EngineError::Io)?;
         *self.settings.write().await = settings;
+        // #965 — index blocks live in settings.json; keep the bucket's meta
+        // copy in step so a fresh node honours the same blocks.
+        publish_index_meta_objects(&self.store, &self.data_dir, self.name.as_str());
         Ok(())
     }
 
@@ -24176,6 +24250,9 @@ impl Index {
         let path = self.data_dir.join("schema.json");
         let bytes = serde_json::to_vec_pretty(schema)?;
         write_file_atomic(&path, &bytes).map_err(EngineError::Io)?;
+        // #965 — every schema mutation funnels through here, so this is also
+        // the single place the bucket's meta/schema.json copy is refreshed.
+        publish_index_meta_objects(&self.store, &self.data_dir, self.name.as_str());
         // Every schema mutation funnels through here (`add_fields` for an
         // explicit mapping update, `persist_evolved_schema` for dynamic
         // evolution), so this is the one place the sync-readable date-scale
@@ -35367,7 +35444,49 @@ mod per_index_map_tests {
     }
 }
 
-fn store_config_from(config: &Config, wal_shards_override: Option<usize>) -> IndexStoreConfig {
+/// The per-index JSON meta files that make a fresh node the same index as
+/// the node that created it (issue #965). Everything here is small (bytes to
+/// a few KB), written atomically beside the WAL, and read at `Index::open`
+/// BEFORE the store exists — which is why both the publish and the fetch
+/// sides go through names, not store internals.
+const INDEX_META_FILES: [&str; 5] = [
+    "settings.json",
+    "schema.json",
+    ANALYSIS_BINDING_MARKER,
+    EMBEDDING_IDENTITY_FILE,
+    "es_mapping.json",
+];
+
+/// #965 — publish every present per-index meta file to the object-store
+/// backend, best-effort. A no-op in local mode. A failed PUT logs and moves
+/// on: the local file is already the committed truth, the bucket copy is
+/// what makes a FRESH node faithful, and the next meta mutation re-publishes
+/// the file — retention, not loss.
+fn publish_index_meta_objects(store: &IndexStore, index_dir: &Path, index_name: &str) {
+    if !store.is_object_store_mode() {
+        return;
+    }
+    for meta_name in INDEX_META_FILES {
+        let path = index_dir.join(meta_name);
+        if !path.exists() {
+            continue;
+        }
+        if let Err(error) = store.publish_aux_object(meta_name, &path) {
+            tracing::warn!(
+                index = index_name,
+                meta = meta_name,
+                %error,
+                "object-store meta publication deferred"
+            );
+        }
+    }
+}
+
+fn store_config_from(
+    config: &Config,
+    wal_shards_override: Option<usize>,
+    storage_mode: xerj_storage::StorageMode,
+) -> IndexStoreConfig {
     let sync_mode = match config.storage.wal_sync {
         xerj_common::config::WalSync::Sync => SyncMode::Strict,
         xerj_common::config::WalSync::Batched | xerj_common::config::WalSync::Async => {
@@ -35388,7 +35507,7 @@ fn store_config_from(config: &Config, wal_shards_override: Option<usize>) -> Ind
         sync_mode,
         wal_batch_ms,
         schema_version: 1,
-        storage_mode: xerj_storage::StorageMode::Local,
+        storage_mode,
         num_wal_shards: wal_shards_override.unwrap_or(config.engine.ingest_shards),
         // #320 — the retention floor a WAL consumer needs, as the store's
         // *seed* value.
@@ -35403,6 +35522,102 @@ fn store_config_from(config: &Config, wal_shards_override: Option<usize>) -> Ind
         // `WalWriter`s instead. Both halves are required: this one alone
         // acknowledged a floor that never reached a writer.
         wal_min_retained_generations: config.wal_tap.min_retained_generations,
+    }
+}
+
+/// Issue #965 — build the store's [`xerj_storage::StorageMode`] from the
+/// `[storage]` config section. `Local` (the default, and the only mode a
+/// default config can even reach past validation) maps to plain local disk.
+/// `s3` maps to [`xerj_storage::S3Backend::connect`], which is synchronous
+/// and does no network I/O — the handshake happens on the first object
+/// operation — so this is callable from `Index::create` / `Index::open`
+/// before the store exists.
+///
+/// **Per-index key namespace.** The bucket layout under one prefix is one
+/// catalog (`snapshot.json`), one `segments/` tree and one `meta/` tree —
+/// i.e. ONE index. Two indices sharing a prefix would overwrite each
+/// other's catalog on every publish, so the index name is spliced into the
+/// key prefix: `s3_prefix/indices/<name>/…`. `IndexName::validate` has
+/// already rejected separators and traversal by the time this runs, and the
+/// name is re-checked here because a bucket key is a filesystem path on
+/// MinIO and the simulated backend alike.
+///
+/// **Test hook.** `XERJ_TEST_OBJECT_STORE_DIR` swaps the real backend for
+/// [`xerj_storage::SimulatedObjectStore`] rooted at that directory — the
+/// same local-testing rule as `XERJ_SKIP_WAL` (never a cloud credential in
+/// a test). The prefix rules are identical, so a test exercises exactly the
+/// key layout production uses.
+pub fn storage_mode_from_config(
+    storage: &xerj_common::config::StorageConfig,
+    index_name: &str,
+) -> std::result::Result<xerj_storage::StorageMode, xerj_storage::StorageError> {
+    use xerj_common::config::StorageBackendType;
+    // Mirror `IndexName::validate`'s charset (lowercase alnum, `-`, `_`,
+    // `.`, optional leading `.`) rather than trusting every caller to have
+    // gone through it: the derived prefix becomes a bucket key, which the
+    // simulated backend turns into a filesystem path — a `/`, `\` or NUL
+    // must never reach it.
+    if index_name.is_empty()
+        || index_name.len() > 255
+        || index_name.contains('/')
+        || index_name.contains('\\')
+        || index_name.contains('\0')
+        || !index_name
+            .chars()
+            .all(|ch| matches!(ch, 'a'..='z' | '0'..='9' | '-' | '_' | '.'))
+    {
+        return Err(xerj_storage::StorageError::Backend(format!(
+            "cannot derive an object-storage key namespace for index name {index_name:?}"
+        )));
+    }
+    match storage.backend {
+        StorageBackendType::Local => Ok(xerj_storage::StorageMode::Local),
+        StorageBackendType::S3 => {
+            // `s3_prefix` arrives as "xerj/" or "xerj" (or empty) — normalise
+            // so the per-index namespace is always `<prefix>/indices/<name>/`.
+            // The naive `{prefix}indices/` concatenation glued the default
+            // into `xerjindices/`, one key level that reads as a typo in
+            // every bucket browser.
+            let base = storage.s3_prefix.trim().trim_end_matches('/');
+            let prefix = if base.is_empty() {
+                format!("indices/{index_name}/")
+            } else {
+                format!("{base}/indices/{index_name}/")
+            };
+            let backend: std::sync::Arc<dyn xerj_storage::StorageBackend> =
+                match std::env::var("XERJ_TEST_OBJECT_STORE_DIR") {
+                    Ok(dir) if !dir.trim().is_empty() => {
+                        std::sync::Arc::new(xerj_storage::SimulatedObjectStore::new(
+                            dir.trim(),
+                            storage.s3_bucket.clone(),
+                            prefix.clone(),
+                        ))
+                    }
+                    _ => {
+                        let endpoint = storage.s3_endpoint.trim();
+                        let cfg = xerj_storage::S3Config {
+                            bucket: storage.s3_bucket.clone(),
+                            prefix,
+                            region: storage.s3_region.clone(),
+                            endpoint_url: (!endpoint.is_empty()).then(|| endpoint.to_owned()),
+                            // An explicit endpoint means R2/MinIO-style
+                            // hosting; both accept path-style, and MinIO
+                            // requires it (no wildcard TLS).
+                            force_path_style: !endpoint.is_empty(),
+                            ..xerj_storage::S3Config::default()
+                        };
+                        std::sync::Arc::new(xerj_storage::S3Backend::connect(cfg)?)
+                    }
+                };
+            Ok(xerj_storage::StorageMode::ObjectStore {
+                backend,
+                cache_dir: std::path::PathBuf::from(if storage.local_cache_dir.trim().is_empty() {
+                    "cache".to_string()
+                } else {
+                    storage.local_cache_dir.clone()
+                }),
+            })
+        }
     }
 }
 

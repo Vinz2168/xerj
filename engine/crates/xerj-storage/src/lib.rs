@@ -25,6 +25,7 @@
 //! | [`merge`]         | Size-tiered merge, tombstone purge, rate-limited I/O       |
 
 pub mod backend;
+pub mod bundle;
 pub mod cache;
 pub mod doc_values;
 pub mod index_store;

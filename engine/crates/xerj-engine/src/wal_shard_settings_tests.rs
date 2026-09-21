@@ -144,9 +144,18 @@ fn the_store_config_takes_its_wal_shard_count_from_the_override_when_present() {
     let dir = TempDir::new().expect("temp dir");
     let config = config_for(&dir);
 
-    assert_eq!(store_config_from(&config, None).num_wal_shards, 8);
-    assert_eq!(store_config_from(&config, Some(1)).num_wal_shards, 1);
-    assert_eq!(store_config_from(&config, Some(2)).num_wal_shards, 2);
+    assert_eq!(
+        store_config_from(&config, None, xerj_storage::StorageMode::Local).num_wal_shards,
+        8
+    );
+    assert_eq!(
+        store_config_from(&config, Some(1), xerj_storage::StorageMode::Local).num_wal_shards,
+        1
+    );
+    assert_eq!(
+        store_config_from(&config, Some(2), xerj_storage::StorageMode::Local).num_wal_shards,
+        2
+    );
 }
 
 /// The whole point of persisting the setting: create and reopen must agree on

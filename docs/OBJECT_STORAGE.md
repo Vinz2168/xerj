@@ -5,9 +5,9 @@ mistake this page exists to prevent:
 
 - **As a SOURCE of documents** — `xerj autoindex s3://bucket/prefix`, shipped.
   Part 1, "Indexing object storage".
-- **As a HOME for the index itself** — segments and WAL living in a bucket. NOT
-  wired: `storage.backend = "s3"` still refuses to start, and what exists is the
-  client and the read-through cache underneath it. Part 2, "Object storage".
+- **As a HOME for the index itself** — segments living in a bucket, wired as of
+  issue #965: one immutable bundle object per segment plus a `snapshot.json`
+  catalogue, single-writer v1. The WAL stays local. Part 2, "Object storage".
 
 ---
 
@@ -413,10 +413,12 @@ the honest answer has two halves and only one of them is finished.
 (`engine/crates/xerj-storage/src/s3.rs`) and the read-through segment cache
 (`engine/crates/xerj-storage/src/cache.rs`).
 
-**Not implemented:** an index that lives in a bucket. `storage.backend = "s3"`
-still refuses to start, on purpose. Jump to
-[What is not wired](#what-is-not-wired) for why, and for the measurement that
-settles it.
+**Implemented, tested against the in-process simulation:** the index path
+(issue #965) — `storage.backend = "s3"` with an `s3_bucket` packs each flushed
+segment family into one immutable bundle object, publishes a `snapshot.json`
+catalogue beside it, and lets a fresh node hydrate everything back. The
+shape of that wiring is [The index path](#the-index-path); what it deliberately
+does not attempt yet is [What is not wired](#what-is-not-wired).
 
 ## Contents
 
@@ -424,6 +426,7 @@ settles it.
 - [Request cost is a design constraint](#request-cost-is-a-design-constraint)
 - [Free-tier arithmetic](#free-tier-arithmetic)
 - [The operation budget](#the-operation-budget)
+- [The index path](#the-index-path)
 - [The read-through cache](#the-read-through-cache)
 - [Measurements](#measurements)
 - [Retry and timeout policy](#retry-and-timeout-policy)
@@ -530,9 +533,16 @@ Read the row you are actually in:
 - Anything at or above 10,000 objects wants an interval of **5 minutes or
   more**, and a million-object bucket wants **hourly at the very fastest**.
 
-The same arithmetic on the write side, because `PutObject` is Class A too. One
-object per flushed segment, flushing every 30 seconds, is 86,400 Class A
-operations a month — 9% of the tier, fine. But a segment is not one file:
+The same arithmetic on the write side, because `PutObject` is Class A too.
+The index path as wired (#965) spends **two Class A operations per flush**: one
+`PutObject` for the segment bundle, one for the `snapshot.json` catalogue.
+Flushing every 30 seconds, that is 172,800 a month — **17% of the tier**.
+Deletes (retired segments) are free. A read-mostly node that boots once a day
+spends one catalogue `GET` plus one `GET` per segment it does not already have
+cached locally — Class B, of which there are ten times as many.
+
+That "two per flush" is only possible because a segment is one object, not one
+object per file. The counterfactual, had the wiring gone the naive way:
 
 | Flush interval | 1 object per segment | 104 objects per segment (one per file) |
 |---|---|---|
@@ -541,13 +551,13 @@ operations a month — 9% of the tier, fine. But a segment is not one file:
 
 104 is a hand count of one real 25-field index in this repository — `.seg`,
 `.sidx`, `.dv`, `.ids`, and `.fst`/`.meta`/`.norms`/`.post` per indexed field —
-not a figure any test asserts. `object_store_mode_does_not_yet_make_an_index_stateless`
-asserts only the part the conclusion rests on: the local directory holds many
-more files than the bucket does. The conclusion does not depend on the exact
-number. Uploading a segment as one object per file would cost nine times the
-free tier at a 30-second flush interval, and it would still be several times
-over at a tenth of 104. Any future wiring of the index path has to bundle a segment into one
-object; see [What is not wired](#what-is-not-wired).
+not a figure any test asserts. Uploading a segment as one object per file
+would cost nine times the free tier at a 30-second flush interval, and it
+would still be several times over at a tenth of 104. This is why the bundle
+format exists at all; the pinning test is now
+`object_store_mode_makes_a_single_writer_index_stateless` (in `index_store.rs`),
+which asserts the flipped property end-to-end: a fresh node on an empty data
+directory sees **every** segment the catalogue names, not zero.
 
 ## The operation budget
 
@@ -611,6 +621,91 @@ for a process that lives about a month. A CLI run that exits in a minute will
 never reach it, and a server restarted daily gets thirty times what the name
 suggests. Use the table above for the monthly arithmetic; use the preset to stop
 a bug.
+
+## The index path
+
+`storage.backend = "s3"` makes the bucket the home of the index (issue #965).
+Local remains the default; this is an opt-in deployment shape, not a tuning
+knob. It needs `storage.s3_bucket` to name a bucket that **already exists** —
+XERJ never calls `CreateBucket`, so there is no default to fall back on, and a
+config that says `backend = "s3"` with no bucket refuses to start rather than
+silently writing to disk.
+
+```toml
+[storage]
+backend     = "s3"
+s3_bucket   = "acme-index"
+s3_prefix   = "xerj/"            # every key lives under this
+s3_region   = "auto"             # R2 wants the literal "auto"
+s3_endpoint = ""                 # "" = AWS S3; set for R2/MinIO (path-style)
+```
+
+Every index gets its own key namespace, `<s3_prefix>indices/<name>/`, and the
+index name's charset is re-checked before it becomes a key.
+
+**One immutable object per segment.** A flushed segment family — `.seg`,
+`.sidx`, `.dv`, `.ids`, the per-field FTS files, and the synthesized
+`.complete` marker — is packed into `segments/{id}.bundle` (format `ZBM1`,
+magic `XBB1`, adapted from quickwit's split format, Apache-2.0 — approach
+cited, no code taken). The body is the family's bytes in name order; the
+footer carries each file's name, absolute offset, length and **CRC32**, plus a
+CRC over the footer itself; the trailer locates the footer. Unpacking verifies
+**every** per-file CRC before it writes anything to disk — a corrupt bundle
+leaves no partial family behind, which the tests pin by flipping bytes in the
+body, the trailer magic and the format version separately.
+
+**The catalogue.** `snapshot.json` is the bucket-side truth for which segments
+exist. It carries a monotonically increasing generation; publication is
+serialised behind a per-store lock, and the store verifies every segment named
+in the local snapshot is durable in the bucket before publishing — a bundle
+that failed to upload blocks the catalogue rather than shipping a dangling
+name.
+
+**Durability order.** Bundle `PUT` **before** catalogue `PUT`, always. A bundle
+the catalogue does not name is an orphan a later GC can delete; a catalogue
+name with no bundle is an index that cannot open. This order makes the bad
+direction impossible from a crash between the two writes. On the flush path an
+upload failure surfaces to the caller: the flush returns `Err`, the data stays
+in the WAL and memtable, and the segment is abandoned unpublished. A catalogue
+failure after a successful bundle upload defers maintenance instead of losing
+the flush.
+
+**Merges publish before retiring.** The merged output is bundled and
+catalogued first; only then are the input segments' bundles deleted
+(`DeleteObject` — free, best-effort, tolerant of an already-missing object). A
+crash in between leaves input bundles as orphans: recoverable garbage, not
+loss.
+
+**A fresh node hydrates.** Boot is one catalogue `GET`, then one `GET` per
+segment family the node does not already have on disk. A local snapshot that
+is *ahead* of the bucket (a local-mode index being moved onto the bucket) is
+adopted: the missing bundles are uploaded and the first catalogue published. A
+catalogue that names a segment with **no bundle** refuses to open — the error
+says so — rather than serving a subset of the index. The per-index meta files
+(`settings.json`, `schema.json`, the analysis binding, the embedding identity,
+`es_mapping.json`) ride the same bucket under `meta/`, so a fresh node
+re-creates the same index, not a dynamically re-mapped lookalike.
+
+**Single-writer v1.** One node writes an index at a time. Two writers would
+clobber each other's catalogue generations; nothing in v1 detects or prevents
+that except this paragraph. The WAL stays **local** — the bucket holds
+segments, not the write-ahead log, so a node that loses its disk loses
+whatever had not flushed, exactly as in local mode.
+
+**Costs worth knowing before opting in:**
+
+- Flush latency gains a synchronous upload round trip (pack + `PUT` +
+  catalogue `PUT`); the flush does not return until both are durable in the
+  bucket.
+- Boot on a cold disk pays one `GET` per segment; on the slow-box R2 terms in
+  [Measurements](#measurements) that is the 3.72 s row times your segment
+  count, once.
+- Bundles are packed **in memory** before the single `PUT`, and the client has
+  no multipart upload, so a segment family must fit both RAM and the
+  provider's 5 GiB single-PUT ceiling.
+- Orphan bundles — a crash between bundle and catalogue, or retired inputs a
+  crash saved from deletion — accumulate until a GC command exists; none ships
+  in v1.
 
 ## The read-through cache
 
@@ -688,8 +783,10 @@ produce **1 miss and 9 hits** — one billed `GetObject` for ten reads, hit rate
 0.900. `get_range` transferred 4,194,304 bytes; `get_range_uncached` of the same
 range transferred 65,536.
 
-Neither measurement involves the index path, because the index path does not
-use this backend. See below.
+Neither measurement involves the index path, which fetches whole **bundles**
+rather than ranges of a bare segment file — a different access pattern, and
+the reason the index path does not go through this cache. See
+[The index path](#the-index-path).
 
 ## Retry and timeout policy
 
@@ -742,62 +839,50 @@ echoes no values, so it is safe in a log.
 
 ## What is not wired
 
-**`storage.backend = "s3"` refuses to start, and should.** The guard is in
-`engine/crates/xerj-common/src/config.rs`.
-
-The client works. The index does not use it. Concretely:
-
-1. **Nothing constructs the object-store mode.** `StorageMode::ObjectStore`
-   exists in `engine/crates/xerj-storage/src/index_store.rs` and has both a
-   flush-upload path and a read-through open path. The only place outside tests
-   that builds a `StorageMode` is `engine/crates/xerj-engine/src/index.rs`, and
-   it hardcodes `StorageMode::Local`.
-2. **The upload path sends 1 file of 104.** It uploads the `.seg` and nothing
-   else — not the `.sidx` skip index, not `.dv` doc values, not `.ids`, and not
-   the four FTS files per indexed field.
-3. **`snapshot.json` never leaves local disk.** That file lists which segments
-   exist, so without it a node has nothing to look for.
-
-Point 3 is what makes an index in a bucket unrecoverable, and it is measured,
-not assumed. The test
+**`storage.backend = "s3"` works now** (issue #965 — the design and the
+durability contract are in [The index path](#the-index-path)). The gap this
+section used to document was measured before it was closed:
 `object_store_mode_does_not_yet_make_an_index_stateless` (in `index_store.rs`)
-runs the experiment: index two documents into a bucket-backed store, drop the
-node, open a fresh store on an empty data directory pointed at the same bucket.
-The fresh node sees **zero segments**.
+ran the experiment — index into a bucket-backed store, drop the node, open a
+fresh store on an empty data directory — and the fresh node saw **zero
+segments**, because no catalogue ever left local disk. Its successor
+`object_store_mode_makes_a_single_writer_index_stateless` asserts the flipped
+property, and the engine-level journey
+`an_s3_index_round_trips_to_a_fresh_node`
+(`engine/crates/xerj-engine/tests/object_storage_e2e.rs`) fails on the #965
+base commit with `the flush must publish the snapshot catalogue` and passes
+after — the fail-before evidence for the change.
 
-The same test found the half that does work, and it is the useful half: asked
-for a segment **by id**, a fresh node with an empty disk fetches it from the
-bucket, caches it locally, and reads back the correct document count. The bytes
-survive losing the node. What is missing is the catalogue that lets a node know
-what to ask for.
+What remains deliberately unwired:
 
-That test asserts the gap deliberately. When the wiring lands it will fail, and
-the failure is the reminder to update this page and to lift the config guard.
+- **Multi-writer publication.** v1 is single-writer per index: one node at a
+  time, enforced by this paragraph rather than by a lock, because a scheme
+  that survives two nodes writing one catalogue (conditional writes, a lease,
+  or per-node prefixes plus a merge step) is a design problem of its own.
+  Until it lands, two writers on one index clobber each other's catalogue
+  generations.
+- **Multipart upload.** The client implements none, so an object is capped at
+  the provider's 5 GiB single-PUT limit — and because the bundle is packed in
+  memory, RAM runs out long before that on most boxes.
+- **Crash-consistency tests against a real endpoint**, including a killed
+  process mid-upload. Everything the wiring claims about crashes is pinned
+  against the in-process simulation; a real endpoint can reorder, throttle and
+  tear in ways the simulation explicitly does not reproduce.
+- **A GC command for orphan bundles.** Deletes ride segment retirement, but a
+  crash between bundle and catalogue, or a retired input a crash saved from
+  deletion, leaves objects nothing lists. They are harmless and they cost
+  storage, and today the only removal tool is the provider's console.
 
-### What the remaining work needs
-
-- **Bundle a segment into one object.** Not an optimisation — see the
-  arithmetic above: one object per file is 899% of the free tier at a 30-second
-  flush interval, and one object per segment is 9%. quickwit solved this with
-  its `.split` format: concatenate every file of a split into one object and
-  append a footer holding each file's `[start, end)` byte offsets, so an
-  individual file is recovered with a ranged `GetObject`
-  (`quickwit/docs/internals/split-format.md`, Apache-2.0 — approach cited, no
-  code taken).
-- **Publish the snapshot to the bucket atomically**, with a scheme that
-  survives two nodes writing at once. This is the hard part, and it is why the
-  work is not in the same change as the client.
-- **Crash-consistency tests against a real endpoint** — including a killed
-  process mid-upload — before the config guard is relaxed.
-- **Multipart upload**, which this client does not implement, so an object is
-  capped at the provider's 5 GiB single-PUT limit.
-
-Also not implemented: bulk delete, server-side copy, object tagging,
-versioning, SSE-C.
+Also not implemented, unchanged from before #965 and independent of the index
+path: bulk delete, server-side copy, object tagging, versioning, SSE-C.
 
 ## Running the tests
 
-Unit tests need nothing. The integration tests need an endpoint and **skip with
+Unit tests need nothing. The index-path suites (issue #965) also need nothing:
+they run against the in-process filesystem simulation, not an endpoint — the
+object-store tests in `index_store.rs`, the `bundle.rs` unit tests, and the
+engine journey `object_storage_e2e.rs` all pass with a clean environment. The
+integration tests below need an endpoint and **skip with
 a printed reason** when one is absent — verified by running them with the
 environment unset, which prints eight explicit skips rather than eight silent
 passes.

@@ -1,6 +1,6 @@
 //! xerj configuration system.
 //!
-//! Configuration is intentionally minimal: **127 settings** versus
+//! Configuration is intentionally minimal: **128 settings** versus
 //! Elasticsearch's 3000+. Every option is named, documented, and has a sensible
 //! production-ready default. The format is TOML, loaded from a single file.
 //!
@@ -60,7 +60,7 @@ pub struct Config {
     pub cors: CorsConfig,
     /// TLS — 4 settings.
     pub tls: TlsConfig,
-    /// Write-ahead log and flush behaviour — 10 settings.
+    /// Write-ahead log, flush, and object-store backend — 12 settings.
     pub storage: StorageConfig,
     /// Segment merging — 8 settings.
     pub merge: MergeConfig,
@@ -103,7 +103,7 @@ pub struct Config {
     pub decisions: DecisionsConfig,
 }
 
-// 23 sub-configs, 127 leaf settings in total. Do not maintain that sum by hand
+// 23 sub-configs, 128 leaf settings in total. Do not maintain that sum by hand
 // — `journey_zero_config` in xerj-engine/tests/product_experience.rs counts a
 // serialised `Config::default()` and fails if this comment and the module
 // header stop matching. `Default` is derived: every field is a sub-config that
@@ -269,32 +269,31 @@ impl Config {
         // vectors are compressed 4×. Neither is true. Fail loud at startup so
         // the mismatch surfaces immediately instead of after data is written.
 
-        // Storage: the S3-compatible object-storage *backend* is real as of
-        // the `xerj-storage::s3` module — it does ranged GETs, PutObject,
-        // paginated ListObjectsV2 and HeadObject against R2, MinIO and S3, and
-        // `SegmentCache` serves byte ranges through it. What is NOT wired is
-        // the index's own read/write path: the only constructor of
-        // `StorageMode::ObjectStore` outside tests is in
-        // `xerj-engine/src/index.rs`, and it hardcodes `StorageMode::Local`.
+        // Storage: `storage.backend = "s3"` is wired as of #965 — flush packs
+        // each segment family into ONE bundle object (ZBM1) plus a per-index
+        // `snapshot.json` catalogue, merges publish their output before
+        // retiring their inputs, retired segments' bundles are deleted, and a
+        // fresh node hydrates families from the bucket on demand. The
+        // remaining limits are real and recorded in docs/OBJECT_STORAGE.md
+        // ("What is not wired"): SINGLE-WRITER v1 (one node per index at a
+        // time — two writers would clobber each other's `snapshot.json`
+        // catalogue), the WAL stays local (unflushed acked writes do not
+        // follow the bucket), bundles are packed in memory (single-PUT
+        // object ceiling), and bucket orphans have no GC command yet.
         //
-        // Even the flush path that does exist uploads one file per segment —
-        // the `.seg` — while a 25-field segment writes 104 (`.seg`, `.sidx`,
-        // `.dv`, `.ids`, and `.fst`/`.meta`/`.norms`/`.post` per indexed
-        // field), and `snapshot.json` never leaves local disk at all. A fresh
-        // node pointed at the bucket therefore sees zero segments; the
-        // regression test
-        // `xerj-storage::index_store::tests::object_store_mode_does_not_yet_make_an_index_stateless`
-        // pins that down and will fail when it stops being true.
-        //
-        // So the guard stays: an operator who sets this believes their index
-        // lands in the bucket, and it would not.
-        if self.storage.backend != StorageBackendType::Local {
+        // The one thing that stays a hard error: naming the backend without
+        // naming a bucket. An empty `s3_bucket` with `backend = "s3"` is a
+        // half-written config, and XERJ never creates the bucket itself (one
+        // created by accident outlives the process and quietly accrues
+        // storage cost), so there is no default to fall back to.
+        if self.storage.backend == StorageBackendType::S3
+            && self.storage.s3_bucket.trim().is_empty()
+        {
             return Err(XerjError::config(
-                "storage.backend: object storage is not implemented as an index backend in \
-                 this build. The S3-compatible client itself works (xerj-storage::s3), but \
-                 nothing routes segment reads and writes through it, and an index in a \
-                 bucket would not be readable by a fresh node. Only \"local\" is supported \
-                 — see docs/OBJECT_STORAGE.md",
+                "storage.backend = \"s3\" requires storage.s3_bucket to name an existing \
+                 bucket — XERJ never creates one, so there is no default to fall back to. \
+                 The single-writer contract and the remaining limits are in \
+                 docs/OBJECT_STORAGE.md",
             ));
         }
 
@@ -471,7 +470,7 @@ impl Config {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Sub-configs  (127 user-facing settings total; counted by
+// Sub-configs  (128 user-facing settings total; counted by
 // `journey_zero_config`, not by hand)
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -760,7 +759,7 @@ pub struct TlsConfig {
 
 /// Write-ahead log, flush, and object-store settings.
 ///
-/// **11 settings** (6 WAL/flush + 5 object-store).
+/// **12 settings** (6 WAL/flush + 6 object-store).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StorageConfig {
@@ -812,23 +811,39 @@ pub struct StorageConfig {
     // ── Object-store backend (compute-storage separation) ─────────────────────
     /// Storage backend: `"local"` or `"s3"` (default: `"local"`).
     ///
-    /// When set to `"s3"`, flushed segments are written to the configured S3
-    /// bucket using range reads for efficient random access.  Local NVMe is used
-    /// as a read-through cache (see `local_cache_dir`).
+    /// When set to `"s3"` (with `s3_bucket` naming an existing bucket), each
+    /// flushed segment family is packed into ONE immutable bundle object
+    /// (issue #965's ZBM1 format) plus a per-index `snapshot.json` catalogue;
+    /// merges publish their output before retiring their inputs; a fresh node
+    /// hydrates segment families from the bucket on demand. Single-writer v1:
+    /// one node per index at a time — see docs/OBJECT_STORAGE.md for the
+    /// contract and the unwired remainder.
     pub backend: StorageBackendType,
-    /// S3 bucket name (required when `backend = "s3"`).
+    /// S3 bucket name (required when `backend = "s3"`; must already exist).
     pub s3_bucket: String,
-    /// Key prefix prepended to every S3 object (default: `"xerj/"`).
+    /// Key prefix prepended to every S3 object (default: `"xerj/"`). Each
+    /// index gets its own namespace under it (`<prefix>indices/<name>/…`),
+    /// so one bucket can hold many indices without their catalogues
+    /// colliding.
     pub s3_prefix: String,
-    /// AWS region for S3 requests (default: `"us-east-1"`).
+    /// AWS region for S3 requests (default: `"us-east-1"`). Cloudflare R2
+    /// wants the literal `"auto"`.
     pub s3_region: String,
+    /// Optional S3-compatible endpoint override (default: `""` — AWS S3).
+    /// `"https://<account>.r2.cloudflarestages.com"` for Cloudflare R2,
+    /// `"http://127.0.0.1:9000"` for MinIO. When set, requests address the
+    /// bucket path-style (`<endpoint>/<bucket>/<key>`), which both R2 and
+    /// AWS accept and MinIO requires.
+    pub s3_endpoint: String,
     /// Local NVMe cache directory for S3 segments (default: `"./cache"`).
     ///
-    /// Segments are cached here after the first fetch from S3. Eviction is
-    /// **not** automatic: `SegmentCache::maybe_evict` exists but nothing calls
-    /// it yet outside tests, so whatever drives the cache has to drive eviction
-    /// too or the directory grows without bound. (This line used to claim a
-    /// "background task"; there is none.)
+    /// **Dormant as of #965**: segment families now materialize in
+    /// `data_dir/segments` (at flush time, and on read/boot when absent —
+    /// fetched from the bucket and CRC-verified), so this directory is not
+    /// consulted on the index path. The bounded-cache design that will
+    /// consume it again is recorded in docs/OBJECT_STORAGE.md ("What is not
+    /// wired"); until then the setting is accepted and validated, and the
+    /// path is used only by the dormant `SegmentCache` machinery.
     pub local_cache_dir: String,
 }
 
@@ -845,6 +860,7 @@ impl Default for StorageConfig {
             s3_bucket: String::new(),
             s3_prefix: "xerj/".into(),
             s3_region: "us-east-1".into(),
+            s3_endpoint: String::new(),
             local_cache_dir: "./cache".into(),
         }
     }
@@ -2491,28 +2507,58 @@ mod tests {
     }
 
     #[test]
-    fn s3_backend_rejected() {
-        // The object-storage *client* is real; the index path through it is
-        // not. Selecting it must therefore still fail loud rather than
-        // silently running on local disk while the operator believes their
-        // data is in a bucket.
+    fn s3_backend_without_a_bucket_is_rejected() {
+        // #965 wired `backend = "s3"` as a real index backend, so the old
+        // refusal of the setting itself is gone. What stays refused is naming
+        // the backend without naming a bucket: XERJ never creates one, so
+        // there is no default to fall back to and a half-written config must
+        // fail loud rather than silently run on local disk.
         let result = Config::from_toml_str(
+            r#"
+            [storage]
+            backend = "s3"
+            "#,
+        );
+        let err = result.expect_err("s3 backend without s3_bucket must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("s3_bucket"),
+            "error must name the missing field, got: {err}"
+        );
+        assert!(
+            msg.contains("docs/OBJECT_STORAGE.md"),
+            "error must point at the doc that holds the contract, got: {err}"
+        );
+    }
+
+    /// The flip side of the guard above: a complete s3 configuration loads
+    /// and validates. Before #965 this exact TOML was refused with "not
+    /// implemented as an index backend".
+    #[test]
+    fn s3_backend_with_a_bucket_is_accepted() {
+        let cfg = Config::from_toml_str(
             r#"
             [storage]
             backend = "s3"
             s3_bucket = "my-bucket"
             "#,
-        );
-        let err = result.expect_err("s3 backend must be rejected as unimplemented");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("not implemented as an index backend"),
-            "error must say it is the index backend that is missing, got: {err}"
-        );
-        assert!(
-            msg.contains("docs/OBJECT_STORAGE.md"),
-            "error must point at the doc that explains the split, got: {err}"
-        );
+        )
+        .expect("s3 backend with a named bucket must load");
+        assert_eq!(cfg.storage.backend, StorageBackendType::S3);
+        assert_eq!(cfg.storage.s3_bucket, "my-bucket");
+
+        // An S3-compatible endpoint override (R2 / MinIO) is accepted too,
+        // empty (AWS S3) or not.
+        let cfg = Config::from_toml_str(
+            r#"
+            [storage]
+            backend = "s3"
+            s3_bucket = "my-bucket"
+            s3_endpoint = "http://127.0.0.1:9000"
+            "#,
+        )
+        .expect("s3 endpoint override must load");
+        assert_eq!(cfg.storage.s3_endpoint, "http://127.0.0.1:9000");
     }
 
     #[test]
@@ -3106,7 +3152,7 @@ mod tests {
         ("auth", 3),
         ("cors", 2),
         ("tls", 4),
-        ("storage", 11),
+        ("storage", 12),
         ("merge", 8),
         ("compression", 3),
         ("fts", 1),
@@ -3167,7 +3213,7 @@ mod tests {
             "the section table must sum to the whole config"
         );
         assert_eq!(
-            total, 127,
+            total, 128,
             "the total settings count changed. It is quoted in this module's \
              header, in xerj-common/src/lib.rs, in engine/README.md, in \
              xerj.default.toml and in EXPECTED_SETTINGS in \
