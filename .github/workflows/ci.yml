@@ -125,7 +125,15 @@ jobs:
 
       # The published MCP schema must match the served tools byte-for-byte;
       # regenerating it is scripts/mcp-schema-check.sh --write.
+      # XERJ_BIN must be set explicitly: this job builds with --profile
+      # ci-test, so the binary the Toolkit-tests loop compiled lands in
+      # target/ci-test/, while the script's default is target/release/ —
+      # a binary this job never builds (the step as #977 shipped it failed
+      # "MCP server binary not found" every run; the same interaction is
+      # already solved this way in the smoke job below).
       - name: Published MCP schema drift
+        env:
+          XERJ_BIN: ${{ github.workspace }}/engine/target/ci-test/xerj
         run: ./scripts/mcp-schema-check.sh
 
   # #489: this script existed, worked, and had been failing locally for three
