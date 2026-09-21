@@ -841,3 +841,50 @@ jobs:
         env:
           XERJ_BIN: engine/target/ci-test/xerj
         run: bash .github/scripts/autoindex-fd-smoke.sh
+
+  # Issue #874's verification fixture, kept runnable: 15 repos x ~30 datasets
+  # (~450 tiny indices), boot, settle 120 s, measure idle CPU / wakeups / RSS
+  # via /proc, gate coarsely. The unit-level guards (merge-evaluation counter,
+  # idle-flush, memtable recount tests in xerj-engine) pin the mechanisms; this
+  # job pins the PROCESS-LEVEL budget they exist to protect: an idle node must
+  # cost < 0.5 % of one core, O(1) wakeups/s, <= 0.2 MB per idle index, and
+  # boot without replaying WAL on a cleanly-flushed corpus — independent of N.
+  # ubuntu only on purpose: the sampler walks /proc. Thresholds are coarse
+  # (~2x the measured healthy values, see benchmarks/idle-budget/README.md):
+  # a 2-4 vCPU shared runner cannot support ±1 % claims, and the regressions
+  # this catches (per-index timers, per-index polling, per-index retention)
+  # arrive as multiples, not percents.
+  idle-budget:
+    name: Idle budget (many-index at-rest CPU/RSS)
+    runs-on: ubuntu-latest
+    # One tier up from the no-compile tier: compiles one crate (xerj-server)
+    # on the shared ci-test cache, then boots and measures. The fixture itself
+    # is ~8 min measured (two 120 s settle windows + ~450 PUT/_bulk rounds);
+    # 30 min leaves 3x+ headroom for a cold cache and a slow runner.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: engine
+          # Read-only consumer of build-test's ci-test dependency cache; that
+          # job owns the key (same arrangement as api-checks / conformance).
+          shared-key: ci-test-linux
+          save-if: false
+
+      # ci-test, not release: the thresholds are coarse (O(N) blowups, not
+      # ±1 %), so fat LTO would buy measurement precision this gate does not
+      # claim to have. Same opt-level and features as every other booting job.
+      - name: Build xerj (ci-test profile)
+        working-directory: engine
+        run: cargo build --profile ci-test -p xerj-server
+
+      - name: Idle budget fixture (450 indices, 120 s settle, coarse thresholds)
+        env:
+          XERJ_BIN: ${{ github.workspace }}/engine/target/ci-test/xerj
+        run: bash benchmarks/idle-budget/run.sh

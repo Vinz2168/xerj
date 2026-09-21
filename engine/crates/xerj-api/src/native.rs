@@ -1173,6 +1173,16 @@ pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     // lives at the API layer). Cheap: a sum over the open-index set.
     let (qc_hits, qc_misses) = state.engine.query_cache_totals();
     state.metrics.set_query_cache(qc_hits, qc_misses);
+    // #874: doc_count / segment_count / wal_size_bytes / memory_usage refresh
+    // here too, at scrape time, the same way. A 10 s background loop used to
+    // feed them; its per-tick walk of every index's WAL subtree (one stat()
+    // per WAL shard, on an async runtime worker) was an idle CPU cost that
+    // scales with index count — ~0.7 % of one core at 450 idle indices,
+    // measured in benchmarks/idle-budget/README.md. A scrape is the only
+    // moment these gauges are observable, so refreshing here keeps them live
+    // exactly when they can be read and costs nothing in between. The WAL
+    // walk itself runs on the blocking pool (see refresh_metric_gauges).
+    crate::es_compat::refresh_metric_gauges(&state).await;
     match state.metrics.gather_text() {
         Ok(text) => (
             StatusCode::OK,

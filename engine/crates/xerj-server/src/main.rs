@@ -2446,13 +2446,15 @@ async fn async_main() -> Result<()> {
     //       flush/merge/WAL/index-latency observations into — the flush, merge
     //       and WAL write sites live deep in xerj-engine, which is built before
     //       `Metrics` exists and holds no handle to it.
-    //   (b) Spawn the 10 s gauge refresher that keeps doc_count / segment_count
-    //       / wal_size_bytes / memory_usage live (otherwise a flat zero even at
-    //       millions of docs, hiding the RSS-runaway and WAL-growth signals).
+    // (b) used to spawn a 10 s gauge refresher here. #874 removed it: its
+    //     per-tick cost walked every index's WAL subtree on an async runtime
+    //     worker — O(indices x wal shards) of stat()s whether anyone read the
+    //     values or not, ~0.7 % of one core at 450 idle indices (measured in
+    //     benchmarks/idle-budget/README.md). The /v1/metrics handler now
+    //     refreshes doc_count / segment_count / wal_size_bytes / memory_usage
+    //     at scrape time, so the gauges are live exactly when they are
+    //     observable and cost nothing while nobody is looking.
     xerj_engine::set_engine_metrics(state.metrics.clone());
-    if storage_available {
-        tokio::spawn(xerj_api::es_compat::run_metrics_gauge_loop(state.clone()));
-    }
 
     // 9b-2. WAL tap (issue #320) — one-directional push of an allowlisted
     //       index subset to an external ES-compatible target. The loop always

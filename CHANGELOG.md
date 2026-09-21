@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **An idle node no longer spends CPU per index on Prometheus gauges (#874).**
+  The 10 s background loop that fed `xerj_doc_count` / `xerj_segment_count` /
+  `xerj_wal_size_bytes` / `xerj_memory_usage_bytes` walked every index's WAL
+  subtree on an async runtime worker on every tick — one `read_dir` plus one
+  `stat()` per WAL shard (~16 per index at default sharding) whether anyone
+  read the values or not. The new at-rest fixture
+  (`benchmarks/idle-budget/`) measured that at ~0.7–0.9 % of one core for 450
+  idle indices (against #874's < 0.5 % budget), entirely in the `xerj-rt`
+  workers; deleting the loop and refreshing the gauges at scrape time in the
+  `/v1/metrics` handler (the same way the query-cache gauges already
+  reconcile) drops idle CPU to 0.15–0.18 % and wakeups from ~46/s to ~26/s on
+  the same corpus, with the WAL walk moved to the blocking pool. A scrape is
+  the only moment these gauges are observable, so nothing is lost between
+  scrapes. The fixture and its coarse CI gate (`idle-budget` job) keep the
+  whole budget honest: CPU < 0.5 % of one core, O(1) wakeups/s, ≤ 0.2 MB RSS
+  per idle index, boot-to-green with zero WAL replay on a cleanly-flushed
+  corpus.
+
 ## [1.0.0-rc.77] - 2026-09-21
 
 The stateless-index and reader-fairness release. Two headline changes:
