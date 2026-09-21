@@ -690,6 +690,76 @@ mod collection_publication_fail_closed_tests {
         assert_eq!(result.hits.first().map(|hit| hit.id.as_str()), Some("one"));
     }
 
+    // #1013 fail-before. Sustained ingest takes a publication bracket per
+    // doc write, so writer-free *instants* exist but writer-free *intervals*
+    // long enough to cover a whole search do not. The churn thread here
+    // reproduces exactly that shape (hold a bracket 1 ms, leave a 2 ms gap,
+    // repeat): the gap is far longer than the capture phase (probes +
+    // snapshot + a 50-doc memtable walk) yet far shorter than the whole
+    // search (a 5000-doc segment scan runs AFTER the capture bracket, inside
+    // the search). Before the fix, end-of-search validation demanded the
+    // whole search fit inside one gap and this test died at its deadline
+    // ("search could not complete within one stable collection generation
+    // before its deadline"); the capture-boundary check needs only the
+    // instant, so the reader converges.
+    #[tokio::test]
+    async fn search_completes_under_publication_churn() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.server.data_dir = dir.path().to_string_lossy().into_owned();
+        let engine = crate::Engine::new(config).unwrap();
+        engine.create_index("churn", text_schema()).unwrap();
+        let idx = engine.get_index("churn").unwrap();
+
+        // 5000 docs into a segment (the long, post-capture part of the
+        // search), 50 into the memtable (inside the capture bracket).
+        let docs: Vec<(Option<String>, Value)> = (0..5_000)
+            .map(|i| (Some(format!("seg-{i}")), json!({"body": "alpha"})))
+            .collect();
+        for r in idx.index_documents_batched(docs).await {
+            r.unwrap();
+        }
+        idx.flush().await.unwrap();
+        let docs: Vec<(Option<String>, Value)> = (0..50)
+            .map(|i| (Some(format!("mem-{i}")), json!({"body": "alpha"})))
+            .collect();
+        for r in idx.index_documents_batched(docs).await {
+            r.unwrap();
+        }
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let churn_idx = std::sync::Arc::clone(&idx);
+        let churn_stop = std::sync::Arc::clone(&stop);
+        let churn = std::thread::spawn(move || {
+            while !churn_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let mut guard = churn_idx.collection_publication.begin().unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                // A synthetic bracket must be cancelled, never dropped
+                // Pending — a Pending drop poisons the publication for good.
+                guard.cancel();
+                drop(guard);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        });
+
+        let request = xerj_query::parse_request(&json!({
+            "query": {"match": {"body": "alpha"}},
+            "size": 10,
+            "timeout": "2s"
+        }))
+        .unwrap();
+        let result = idx.search(&request).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        churn.join().unwrap();
+
+        let result = result.expect(
+            "#1013: search must complete under publication churn — a reader \
+             needs a writer-free instant to capture, not a writer-free \
+             interval spanning the whole search",
+        );
+        assert_eq!(result.total.value, 5_050, "exact under churn");
+    }
+
     #[tokio::test]
     async fn cache_and_singleflight_namespace_include_publication_generation() {
         let dir = tempfile::tempdir().unwrap();
@@ -17616,15 +17686,29 @@ impl Index {
             let result = self
                 .search_at_generation(request, token.generation(), deadline)
                 .await;
-            match self.collection_publication.validate_reader(token) {
-                ReadAdmission::Admitted(_) => return result,
-                ReadAdmission::Poisoned => return Err(collection_publication_interrupted()),
-                ReadAdmission::WriterActive if std::time::Instant::now() < deadline => continue,
-                ReadAdmission::WriterActive => {
+            // #1013 — end-of-search validation removed. Demanding that no
+            // publication crossed the WHOLE search starved readers under
+            // sustained ingest: the flush path holds its publication guard
+            // across the entire finalize (drain → segment write → publish),
+            // concurrent flushes are allowed, and every document write takes
+            // its own bracket, so writer-free intervals covering a full scan
+            // stopped existing and `delete_by_query`/search ran to their
+            // deadline and returned HTTP 500. The consistency that matters —
+            // the segment snapshot and the memtable capture describing ONE
+            // world — is now checked at the CAPTURE boundary inside
+            // `search_inner`, which needs only a writer-free instant, not a
+            // writer-free search. A capture that straddled a publication
+            // comes back as the typed retry below.
+            match result {
+                Err(e) if is_collection_capture_retry(&e) => {
+                    if std::time::Instant::now() < deadline {
+                        continue;
+                    }
                     return Err(EngineError::Fts(anyhow::anyhow!(
-                        "search could not complete within one stable collection generation before its deadline"
+                        "search could not capture a stable collection view before its deadline"
                     )));
                 }
+                other => return other,
             }
         }
     }
@@ -18093,6 +18177,18 @@ impl Index {
         request: &SearchRequest,
         search_deadline: std::time::Instant,
     ) -> Result<SearchResult> {
+        // #1013 — capture bracket reference. Every collection-state read in
+        // this function's capture phase (the leaf-order probes, the early
+        // deletes probe, `snap`, `deletes_present`, `mem_doc_count` and the
+        // `mem_snapshot` arms) must describe ONE publication world; the check
+        // after `mem_snapshot` rejects the whole capture if a publication
+        // began or finished (or is still in flight) across it. Reading the
+        // reference HERE rather than threading an admission token keeps the
+        // recursive callers (hybrid sub-legs) bracketed too.
+        let (capture_generation, _, capture_poisoned) = self.collection_publication.state();
+        if capture_poisoned {
+            return Err(collection_publication_interrupted());
+        }
         // Check read block.
         if self.is_read_blocked().await {
             return Err(EngineError::Common(xerj_common::XerjError::index_blocked(
@@ -19668,6 +19764,26 @@ impl Index {
             // Lock dropped here
         };
         phase_marks.push(("mem_snapshot", phase_t0.elapsed().as_millis() as u64));
+        // #1013 — capture-bracket validation, replacing end-of-search
+        // validation (see `search`). The segment snapshot and the memtable
+        // capture above are consistent iff no publication began or finished
+        // since the bracket reference at the top of this function and no
+        // writer is in flight NOW: a straddling publication could leave the
+        // pair torn (docs drained from the memtable but not yet installed in
+        // a segment — invisible to both), so retry the capture. This is the
+        // seqlock reader's evenness check: the search itself then runs
+        // against immutable captured state (the snapshot `Arc` and its read
+        // lease keep drained segments alive) and no longer needs a
+        // writer-free interval to exist for its whole duration.
+        {
+            let (generation, in_flight, poisoned) = self.collection_publication.state();
+            if poisoned {
+                return Err(collection_publication_interrupted());
+            }
+            if generation != capture_generation || in_flight != 0 {
+                return Err(collection_capture_crossed());
+            }
+        }
 
         let dbg_mem_arm: &'static str = match &mem_snapshot {
             MemSnapshot::Empty => "empty",
@@ -30023,6 +30139,25 @@ fn collection_publication_interrupted() -> EngineError {
     EngineError::Fts(anyhow::anyhow!(
         "collection publication was interrupted; reopen the index so WAL recovery can rebuild a consistent searchable state"
     ))
+}
+
+/// #1013 — typed root for the capture-retry signal so `search()` can
+/// distinguish "recapture and run again" from every other `Fts` error,
+/// structurally (anyhow keeps the root downcastable through `context`
+/// wraps), never by matching on a message string.
+#[derive(Debug, thiserror::Error)]
+#[error("collection capture crossed a publication")]
+struct CollectionCaptureCrossedPublication;
+
+fn collection_capture_crossed() -> EngineError {
+    EngineError::Fts(anyhow::Error::new(CollectionCaptureCrossedPublication))
+}
+
+fn is_collection_capture_retry(e: &EngineError) -> bool {
+    matches!(
+        e,
+        EngineError::Fts(err) if err.downcast_ref::<CollectionCaptureCrossedPublication>().is_some()
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
