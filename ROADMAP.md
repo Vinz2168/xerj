@@ -2,7 +2,7 @@
 
 This roadmap tracks capabilities that are **planned but not yet fully implemented**, so the project's public claims stay honest about what ships today versus what is coming. Status is verified against the actual code and by real API requests to the release binary, not aspirational.
 
-Last reviewed: 2026-09-21 (against `v1.0.0-rc.76` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298). *The zero-token direction* below was added and verified separately on 2026-09-18, against `main` @ `4d8dadbf`; the rest of the file was not re-reviewed on that date.
+Last reviewed: 2026-09-21 (against `v1.0.0-rc.77` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298). This review rolled the *Next release* section and the open-defects shortlist forward against the rc.77 cut; the *Shipping today* claims were last live-verified against rc.76, and *The zero-token direction* below was verified separately on 2026-09-18, against `main` @ `4d8dadbf`.
 
 ## Follow the roadmap
 
@@ -31,49 +31,45 @@ These are implemented and exercised by real API requests / the test suite / benc
 
 The release-by-release record of how all of this landed is [CHANGELOG.md](./CHANGELOG.md) — this file no longer duplicates it. Be aware of a real gap in that record: rc.1–rc.18 and rc.71 have entries, **rc.19 through rc.70 do not**. Those 52 releases are reconstructable only from `git log` and the release list, and closing that gap is itself a GA item below.
 
-## Next release — [v1.0.0-rc.77](https://github.com/xerj-org/xerj/milestones)
+## Next release — [v1.0.0-rc.78](https://github.com/xerj-org/xerj/milestones)
 
-**rc.76 was cut on 2026-09-21** — its full contents are the
-[CHANGELOG.md](./CHANGELOG.md) entry, not this file. It is **the JEV-interface and
-honest-fixes release**: the node answers the System One wire itself — `POST
-/v1/systemone` (native REST) and `POST /_decide` (ES-compat), a rank-weighted kNN vote
-over a labelled-history index, nothing leaving the node — and the unmodified pip
-`jev-reranker` runs against it through both of its entry points. Two deliberate,
-test-pinned wire breaks: `model` echoes `xerj-history-vote-1` (never a Jev name), and
-zero support is a 422 (never a fabricated 0.5). The same release ships a WAND fast path
-in `xerj-fts` (2.0× on the vote workload, bit-identical scores), `xerj code` /
-`xerj corpus add|index|list` (the reference-coding loop as binary commands), FiQA and
-BEIR judged-query datasets on the record, .deb release assets (amd64/arm64), and a long
-list of fixes each carrying its own reproduction — the rerank stage as it shipped in
-rc.75 scored 0.3822 nDCG@10 where plain BM25 scored 0.7750, and that bug was ours.
+**rc.77 was cut on 2026-09-21** — its full contents are the
+[CHANGELOG.md](./CHANGELOG.md) entry, not this file. It is **the stateless-index and
+reader-fairness release**: `storage.backend = "s3"` works for real (#965 — one immutable
+ZBM1 bundle per segment instead of 104 PUTs, `snapshot.json` as the publication point,
+merges publish before retiring inputs, a fresh node adopts the bucket), and readers stop
+starving under sustained ingest (#1013 — the seqlock publish bracket no longer spans the
+flush build; the evenness check that catches a straddling capture is part of what
+shipped). The same release carries the systemone vote-text fixes (#1000/#1001: the vote
+text is exactly what the question points at, never the instruction prose — a measured
+32-point accuracy swing from wording alone), the console-tour pill race (#1011), and CI
+repairs (the reference-coding toolkit's tests now actually run).
 
-**In flight for rc.77:**
+**In flight for rc.78:**
 
-- **The systemone vote-text fix** — instruction wording must not change the answer and
-  object state must not be silently dropped
-  ([#1000](https://github.com/xerj-org/xerj/issues/1000),
-  [#1001](https://github.com/xerj-org/xerj/issues/1001); PR
-  [#1007](https://github.com/xerj-org/xerj/pull/1007)): measured 32- and 79-point
-  accuracy swings from wording and key names, both closed by voting on exactly what the
-  question points at.
-- **Segments in an object store** ([#965](https://github.com/xerj-org/xerj/issues/965)):
-  the ZBM1 bundle format and the flush/merge/read/boot wiring exist on the branch; the
-  gates and the flip are what remains.
-- **RSS feeds as an autoindex source** ([#950](https://github.com/xerj-org/xerj/issues/950)),
-  evaluated against the ledger evidence #948 landed for ingest memory.
-- **Retrieval quality** — the symbol index returns whole class and method bodies rather
-  than declarations, measured at 32-48x more bytes than grep for the same answer
-  ([#500](https://github.com/xerj-org/xerj/issues/500)). This one undercuts a claim the
-  project leads with, so it is a correctness issue about our own marketing as much as a
-  performance one.
-- **CI reliability** — [#751](https://github.com/xerj-org/xerj/issues/751) still hangs the
-  default-parallelism test step intermittently, and it was red on `main` repeatedly during
-  the rc.72 cut. The cost is not the failed run, it is that a red gate stops distinguishing
-  a real break from noise. [#891](https://github.com/xerj-org/xerj/issues/891) is a
-  confirmed instance of the same class (a process-global counter two tests share).
-- **Data-loss follow-up** — [#890](https://github.com/xerj-org/xerj/issues/890): the
-  prefix-scoped exclusion sweep can over-delete across corpora on a legacy text-mapped
-  catalog. Filed against code that shipped in rc.72.
+- **Flush bracket, reader fairness part two**
+  ([#1015](https://github.com/xerj-org/xerj/issues/1015)): freeze the shard into a
+  frozen-generation list *before* the segment build, so ingest keeps writing while the
+  flush serializes, and retire the frozen generation inside the publish bracket. The
+  #1014 evenness check rejects captures that straddle a retire, so the bracket itself
+  must stay ms-scale — that constraint is the design.
+- **Resident-set memory growth during large corpus ingest**
+  ([#950](https://github.com/xerj-org/xerj/issues/950)): 27.1 GB peak RSS against a
+  15 GB breaker across 5,369 indices, with the breaker engaged 44 times yet never
+  capping the peak; idle steady-state ~4.5 GB. Both ingest aborts trace to #1013 (and
+  its fix has shipped), so what remains is attributing the growth itself — a third
+  full-scale measurement run and a symbolized heap profile are under way.
+
+**Open defects carried into rc.78.**
+[#1015](https://github.com/xerj-org/xerj/issues/1015) (the flush publication guard
+still spans the multi-second segment build — the remaining reader-fairness gap) and
+[#950](https://github.com/xerj-org/xerj/issues/950) (ingest RSS exceeds the breaker
+without the breaker capping it) are the open defects with code consequences.
+Trackers [#941](https://github.com/xerj-org/xerj/issues/941) (zero-token direction),
+[#874](https://github.com/xerj-org/xerj/issues/874) and
+[#298](https://github.com/xerj-org/xerj/issues/298) (this file's own review cadence)
+stay open by design; everything else the rc.77 cut closed is recorded in the
+CHANGELOG, not here.
 
 ## The road to [v1.0.0 GA](https://github.com/xerj-org/xerj/milestone/2)
 

@@ -52,6 +52,17 @@ if [ -z "${VERSION:-}" ]; then
   VERSION="$(git tag --list 'v1.0.0-rc.*' 2>/dev/null | sort -V | tail -1 | sed 's/^v//')"
 fi
 
+# The tree's own version (engine/Cargo.toml). A release PR stamps the footers
+# with the version it is cutting BEFORE that version's tag exists, so requiring
+# tag-equality on a release branch is unsatisfiable by construction — rc.76
+# dodged it only by cutting directly on main, which skipped every release gate
+# (#474). A footer matching the version of the tree it ships in is
+# self-consistent, not drift; the stale-footer drift this check exists for is a
+# footer matching NEITHER the tag NOR the tree. The allowed set is therefore
+# {newest released tag, engine/Cargo.toml version} — which collapses to just
+# the tag on every non-release branch.
+TREE_VERSION="$(awk -F'"' '/^version = /{print $2; exit}' engine/Cargo.toml 2>/dev/null || true)"
+
 fails=0
 note() { printf '  %s\n' "$1"; }
 fail() { printf 'FAIL  %s\n' "$1"; fails=$((fails + 1)); }
@@ -114,15 +125,20 @@ rm -f /tmp/.lcg_conf.$$
 # falsify a real run. Only the footer claims "this is the current release".
 if [ -n "${VERSION:-}" ]; then
   vre="$(echo "$VERSION" | sed 's/\./\\./g')"
+  tre="$(printf '%s' "$TREE_VERSION" | sed 's/\./\\./g')"
+  allow_ver="V${vre}([^0-9]|$)"
+  if [ -n "$tre" ] && [ "$tre" != "$vre" ]; then
+    allow_ver="V(${vre}|${tre})([^0-9]|$)"
+  fi
   bad_ver="$(grep -rniE 'XERJ\.AI[^<]*V1\.0\.0-RC\.?[0-9]+' "$LANDING" --include='*.html' 2>/dev/null \
-             | grep -viE "V${vre}([^0-9]|$)" \
+             | grep -viE "$allow_ver" \
              | grep -v '<!-- snapshot:' || true)"
   if [ -n "$bad_ver" ]; then
-    fail "version stamps disagree with the newest released tag (v$VERSION)"
+    fail "version stamps disagree with the newest released tag (v$VERSION) and the tree's own version (v$TREE_VERSION)"
     echo "$bad_ver" | head -20 | while IFS= read -r l; do note "${l:0:160}"; done
     n="$(echo "$bad_ver" | wc -l)"; [ "$n" -gt 20 ] && note "... and $((n - 20)) more"
   else
-    pass "version stamps match v$VERSION"
+    pass "version stamps match v$VERSION (tree: v$TREE_VERSION)"
   fi
 
   # The agent-facing llms*.txt carry a prose "Current release: **vX.Y.Z**"
@@ -131,14 +147,18 @@ if [ -n "${VERSION:-}" ]; then
   # shipped) exactly the way the footers used to — an agent that reads llms.txt
   # is handed the wrong version (#515 / #520). Hold it to the newest tag too.
   # Snapshot-marked lines stay exempt.
+  allow_llms="v${vre}([^0-9]|$)"
+  if [ -n "$tre" ] && [ "$tre" != "$vre" ]; then
+    allow_llms="v(${vre}|${tre})([^0-9]|$)"
+  fi
   bad_llms="$(grep -rniE 'current release:[^<]*v1\.0\.0-rc\.?[0-9]+' "$LANDING" --include='llms*.txt' 2>/dev/null \
-              | grep -viE "v${vre}([^0-9]|$)" \
+              | grep -viE "$allow_llms" \
               | grep -v '<!-- snapshot:' || true)"
   if [ -n "$bad_llms" ]; then
-    fail "llms*.txt 'Current release' disagrees with the newest released tag (v$VERSION)"
+    fail "llms*.txt 'Current release' disagrees with the newest released tag (v$VERSION) and the tree's own version (v$TREE_VERSION)"
     echo "$bad_llms" | while IFS= read -r l; do note "${l:0:160}"; done
   else
-    pass "llms 'Current release' matches v$VERSION"
+    pass "llms 'Current release' matches v$VERSION (tree: v$TREE_VERSION)"
   fi
 else
   note "skipped version check: no v1.0.0-rc.* tag found"
