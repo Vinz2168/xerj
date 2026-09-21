@@ -154,7 +154,20 @@ node_start() { # $1 = data dir, $2 = log file; sets SERVER_PID
   # no -c => Config::default() — default flush/merge/sampler behaviour is what
   # this fixture measures. Lexical embedder, explicitly (the default
   # feature-hashing embedder, never called neural).
-  "$XERJ_BIN" --insecure --port "$PORT" --data-dir "$1" \
+  #
+  # THP + decay pins: jemalloc follows the kernel's THP mode by default. On a
+  # kernel with transparent_hugepage=always (GitHub runners), every index's
+  # small boot allocations land in distinct 2 MB extents and each pins a full
+  # hugepage — measured 2075 kB anon per idle index on the runner vs 299 kB
+  # on a madvise host, i.e. a ~2 MB/index kernel page-granularity artifact
+  # that would fail a 0.2 MB/index budget even for a perfect engine. Pinning
+  # thp:never for the MEASURED process removes the artifact. The decay pins
+  # (dirty/muzzy -> 0) make both arms read true in-use memory instead of
+  # whatever freed pages the allocator happens to be retaining at sample
+  # time — without them the baseline arm alone wobbled 31-76 MB across runs
+  # on this host, which is a 1.5x swing in the per-index subtraction.
+  MALLOC_CONF="thp:never,dirty_decay_ms:0,muzzy_decay_ms:0" \
+    "$XERJ_BIN" --insecure --port "$PORT" --data-dir "$1" \
     --embed-mode lexical > "$2" 2>&1 &
   SERVER_PID=$!
   sleep 0.4
@@ -247,7 +260,10 @@ a = sample(); time.sleep(secs); b = sample()
 elapsed = b["t"] - a["t"]
 clk = os.sysconf("SC_CLK_TCK")
 ticks = (b["utime"] - a["utime"]) + (b["stime"] - a["stime"])
-vol = b["vol"] - a["vol"]; non = b["non"] - a["non"]
+# max(0, …): a thread exiting between the two passes drops its counters from
+# the second sum, which would otherwise print a negative rate (seen as the
+# CI run's "nonvoluntary -0.0/s").
+vol = max(0, b["vol"] - a["vol"]); non = max(0, b["non"] - a["non"])
 per_comm = {}
 for tid, (comm, ticks_then) in a["tasks"].items():
     if tid in b["tasks"]:
@@ -439,6 +455,11 @@ json.dump(out, open(path, "w"), indent=1)
 
 print()
 print("== measured ==")
+try:
+    _thp = next(l.strip() for l in open("/sys/kernel/mm/transparent_hugepage/enabled") if "[" in l)
+except (OSError, StopIteration):
+    _thp = "?"
+print(f"  kernel THP mode {_thp}, allocator MALLOC_CONF=thp:never,decay=0 (page-granularity artifact removed; in-use memory)")
 print(f"  boot-to-green, empty node        {out['boot_ms']['empty_node']:>8} ms")
 print(f"  boot-to-green, {N:>4} indices         {out['boot_ms']['n_indices']:>8} ms   (cleanly-flushed corpus)")
 print(f"  WAL replay lines after flush      {out['wal_replay_lines_after_clean_flush']:>8}      (0 = nothing to replay)")
