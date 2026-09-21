@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`/v1/systemone` votes on the payload, never on the instruction prose.**
+  A question's `instructions` used to be concatenated into the retrieval
+  query, so a well-written instruction destroyed accuracy — measured on the
+  SMS history (300 held-out, seed 7): 0.9867 empty vs 0.6700 criteria-rich, a
+  32-point swing from wording alone (#1000). And an object `state`
+  contributed only its `query` field, so `{"message": …}` voted on the
+  instruction at the spam base rate: accuracy 0.1733 vs 0.9667 for the same
+  message as a string (#1001). The vote text is now exactly what the question
+  points at: its backtick references (instructions data fields first, then
+  state paths — both client shapes keep working), or, when it references
+  nothing, the state's own string content (a string whole, an object by all
+  string leaves). A reference that resolves to structure rather than text —
+  the rubric object `jev-reranker` ≥ 0.1.2 ships with its relevance preset —
+  is acknowledged and skipped, not embedded and not fatal. References that
+  resolve to nowhere and payloads with no text are 422s naming the question.
+  Also fixed the `no_support` error body, which interpolated `k` and the
+  question ids into each other's slots.
+  Fail-before: five new `systemone_http` tests, all failing on the old code
+  (`[0.0, 0.0, 0.4545, 0.0]` across four instruction wordings of one state);
+  a sixth pins the client's rubric shape, a 422 before the skip rule. After:
+  the 300 held-out messages score 0.9767 identically across all eight
+  wording/shape arms, and the pip-client acceptance gate passes through both
+  client entry points (neutral-query gap 0.8542) and under a deliberately
+  spammy query (gap 0.6087, threshold 0.3) — client 0.1.2, unmodified.
+
 ## [1.0.0-rc.76] - 2026-09-21
 
 The JEV-interface and honest-fixes release. The headline is a measured answer
