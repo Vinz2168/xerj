@@ -1,6 +1,6 @@
 # xerj Default Configuration
 # ============================================================
-# This file sets 55 of XERJ's 127 user-facing settings to their
+# This file sets 55 of XERJ's 128 user-facing settings to their
 # production-ready defaults, and describes the rest in comments.
 # Every value here IS the default, so copying this file changes
 # nothing until you edit it (a test enforces that). The complete
@@ -203,6 +203,32 @@ flush_interval_secs = 30
 # worst-case latency is flush_idle_secs + flush_interval_secs and writes pay
 # nothing.
 flush_idle_secs = 300
+
+# ── Object-store backend (6 settings; all defaults shown) ────────────────────
+#
+# Issue #965 wires storage.backend = "s3" as a real index backend: each
+# flushed segment family is packed into ONE immutable bundle object plus a
+# per-index snapshot.json catalogue, merges publish before retiring, and a
+# fresh node hydrates families from the bucket on demand. Local stays the
+# default — object storage is an opt-in deployment shape, not a tuning knob.
+#
+# Single-writer v1: one node per index at a time (two writers would clobber
+# each other's catalogue). The WAL stays local, bundles are packed in memory
+# (single-PUT ceiling), and there is no bucket GC command yet. The contract
+# and the unwired remainder: docs/OBJECT_STORAGE.md.
+#
+# backend = "local"          # "local" (default) or "s3"
+# s3_bucket = ""             # required when backend = "s3"; must already
+#                            # exist — xerj never creates one
+# s3_prefix = "xerj/"        # every key lives under this; each index gets
+#                            # its own <prefix>indices/<name>/ namespace
+# s3_region = "us-east-1"    # Cloudflare R2 wants the literal "auto"
+# s3_endpoint = ""           # "" = AWS S3; "https://<acct>.r2.cloudflarestorage.com"
+#                            # for R2, "http://127.0.0.1:9000" for MinIO. When
+#                            # set, requests are path-style (<endpoint>/<bucket>/<key>)
+# local_cache_dir = "./cache" # DORMANT as of #965: families materialize in
+#                            # data_dir/segments; the bounded cache that will
+#                            # reuse this path is designed, not shipped
 
 # ── Segment Merging (8 settings) ──────────────────────────────────────────────
 #

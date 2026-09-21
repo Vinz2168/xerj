@@ -267,17 +267,25 @@ pub struct FsckReport {
 /// Controls where flushed segments are written.
 ///
 /// - `Local`: segments are written to `data_dir/segments/` (current default).
-/// - `ObjectStore`: segments are written to a pluggable backend (S3/GCS/local-sim).
-///   Local NVMe is used as a read-through cache: if a segment is present locally
-///   it is served from disk, otherwise it is fetched from the backend and cached.
+/// - `ObjectStore`: one immutable bundle object per segment (issue #965's
+///   ZBM1 format, `crate::bundle`) plus a `snapshot.json` catalogue. The
+///   bundle is the durable copy; the FAMILY materializes into
+///   `data_dir/segments` on this node — at flush time (it was just written
+///   there) and on read/boot when absent (fetched and CRC-verified), so a
+///   hydrated node looks exactly like a local-mode one and every existing
+///   recovery path works unchanged.
 pub enum StorageMode {
     /// All segment data lives in `data_dir` on the local filesystem.
     Local,
     /// Segment data is durably stored in the object-store backend.
-    /// The local cache directory is used for read-through caching.
     ObjectStore {
         backend: std::sync::Arc<dyn StorageBackend>,
-        /// Local directory used as an NVMe read-through cache.
+        /// RESERVED, DORMANT (issue #965): families now materialize in
+        /// `data_dir/segments`, not here. The field survives so existing
+        /// constructors and `Debug` output keep compiling; the
+        /// `SegmentCache` machinery that consumed it is unwired on the
+        /// index path and awaits a bounded-cache design (see
+        /// docs/OBJECT_STORAGE.md "What is not wired").
         cache_dir: PathBuf,
     },
 }
@@ -603,6 +611,15 @@ pub struct IndexStore {
     /// ticks re-check only its remaining unproven `(doc_id, seq)` pairs
     /// against the version map and prune once the list drains.
     wal_prune_cache: Mutex<std::collections::HashMap<(usize, u64), WalGenVerdict>>,
+    /// Issue #965 — serializes object-store publication sequences
+    /// (pack → bundle PUT → catalog PUT) so a catalog can never be written
+    /// while a snapshot-referenced bundle is still in flight (the flush-tail
+    /// vs merge-tail race; see `publish_catalog_to_backend`).
+    object_publish_lock: Mutex<()>,
+    /// Issue #965 — segment ids whose bundles are known durable in the
+    /// bucket: populated at upload, rebuilt from a bucket list at open.
+    /// Publish defers while any snapshot-referenced id is absent from it.
+    durable_bundles: Mutex<std::collections::HashSet<SegmentId>>,
     #[cfg(test)]
     fail_next_snapshot_save: std::sync::atomic::AtomicBool,
     #[cfg(test)]
@@ -644,6 +661,54 @@ enum WalGenVerdict {
     /// The file failed to decode end-to-end (torn tail from a crash) —
     /// never prunable this process lifetime; skipped without re-decoding.
     Undecodable,
+}
+
+// ── Object-store publication helpers (issue #965) ────────────────────────────
+
+/// Key for a segment bundle in the backend (one immutable object per
+/// segment — see [`crate::bundle`]).
+fn segment_bundle_key(segment_id: &str) -> String {
+    crate::bundle::bundle_key(segment_id)
+}
+
+/// Drive one backend future to completion from sync code.
+///
+/// Two calling contexts, both real in this codebase:
+///
+/// - ON a Tokio worker (`flush` from an async handler, `open` at boot): park
+///   the worker with `block_in_place` and drive the future on it. This
+///   requires a MULTI-THREAD runtime (a current-thread runtime panics); every
+///   object-store test therefore runs under
+///   `#[tokio::test(flavor = "multi_thread")]`, and Local mode never calls
+///   this.
+/// - OFF the runtime entirely: the engine runs flush finalizers on plain std
+///   threads (`xerj-bg-*`), where `Handle::current()` has no answer. There
+///   the future is driven on a process-global dedicated runtime, created on
+///   first use and shared for the lifetime of the store — one idle worker
+///   thread in Local mode (never created), one per process in object mode.
+///
+/// The futures driven here are plain backend I/O and never re-enter
+/// `block_on_backend`, so the dedicated runtime cannot nest `block_on`.
+fn block_on_backend<T>(
+    fut: impl std::future::Future<Output = crate::Result<T>>,
+) -> crate::Result<T> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+        Err(_) => object_io_runtime().block_on(fut),
+    }
+}
+
+/// The off-runtime driver described on [`block_on_backend`].
+fn object_io_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("xerj-obj-io")
+            .enable_all()
+            .build()
+            .expect("object-store I/O runtime")
+    })
 }
 
 const WAL_MAINTENANCE_INTERVAL_MS: u64 = 1_000;
@@ -706,7 +771,22 @@ impl IndexStore {
         // unparseable manifest is refused (Err propagates out of open) rather
         // than silently treated as empty — see `load_snapshot`. A genuinely
         // absent manifest (fresh index) yields an empty snapshot.
-        let snapshot = Self::load_snapshot(&data_dir)?.unwrap_or_else(IndexSnapshot::empty);
+        //
+        // Issue #965 — in object-store mode the bucket owns a second copy of
+        // the catalogue. `object_store_boot` fetches it, selects the
+        // higher-generation view, runs the one-time adoption backfill for a
+        // local-only directory, and hydrates every catalogued family into
+        // `data_dir/segments` BEFORE `rebuild_version_map_from_segments`
+        // (which reads `.ids`) and before either GC pass below.
+        let (snapshot, durable_bundles) = match &config.storage_mode {
+            StorageMode::ObjectStore { backend, .. } => {
+                Self::object_store_boot(&data_dir, backend)?
+            }
+            StorageMode::Local => (
+                Self::load_snapshot(&data_dir)?.unwrap_or_else(IndexSnapshot::empty),
+                std::collections::HashSet::new(),
+            ),
+        };
 
         let version_map = Arc::new(VersionMap::new());
 
@@ -740,6 +820,8 @@ impl IndexStore {
             segments_changed_hook: Mutex::new(None),
             pending_deletes: Mutex::new(std::collections::HashMap::new()),
             wal_prune_cache: Mutex::new(std::collections::HashMap::new()),
+            object_publish_lock: Mutex::new(()),
+            durable_bundles: Mutex::new(durable_bundles),
             #[cfg(test)]
             fail_next_snapshot_save: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -791,6 +873,19 @@ impl IndexStore {
         }
         if let Err(e) = store.cleanup_orphaned_segment_files() {
             tracing::warn!("segment-dir GC failed: {e}");
+        }
+
+        // Issue #965 — object mode: orphan recovery above can add snapshot
+        // segments whose bundles never reached the bucket (this node crashed
+        // between the local flush and the bundle PUT). Upload them now so
+        // catalog publication is not deferred forever.
+        if matches!(store.config.storage_mode, StorageMode::ObjectStore { .. }) {
+            if let Err(error) = store.backfill_missing_bundles() {
+                tracing::warn!(
+                    %error,
+                    "object-store backfill of local-only segments failed; catalog publication will retry on the next flush"
+                );
+            }
         }
 
         // SEQ-COUNTER SEEDING (2026-07, S3 root cause): the counter starts at
@@ -1186,7 +1281,17 @@ impl IndexStore {
     /// The manifest is an integrity envelope (IEEE CRC-32, not a cryptographic
     /// identity): it binds the segment header coordinates and the exact set
     /// of artifact names, sizes, and per-file CRCs visible at publication.
-    fn write_flush_completion_manifest(&self, meta: &SegmentMeta) -> std::io::Result<()> {
+    ///
+    /// #965 — `pub(crate)`: the merge path's bundle upload
+    /// (`finalize_merge_output`) synthesizes the same manifest for a merged
+    /// family (which historically got none), so a hydrated merged segment is
+    /// indistinguishable from a post-flush one. The encoder itself now lives
+    /// in `crate::bundle` (`complete_manifest_bytes`), shared with the
+    /// bundle packer so the two can never diverge.
+    pub(crate) fn write_flush_completion_manifest(
+        &self,
+        meta: &SegmentMeta,
+    ) -> std::io::Result<()> {
         let segments_dir = self.data_dir.join("segments");
         let prefix = format!("{}.", meta.id);
         let mut artifacts = Vec::new();
@@ -1201,30 +1306,14 @@ impl IndexStore {
             artifacts.push((name, metadata.len(), crc));
         }
         artifacts.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-        if !Self::valid_flush_artifact_set(&meta.id, &artifacts) {
+        if !crate::bundle::valid_flush_artifact_set(&meta.id, &artifacts) {
             return Err(std::io::Error::other(
                 "flush artifact set is incomplete or contains an unknown role",
             ));
         }
-        let mut body = Vec::new();
-        body.extend_from_slice(b"ZCM1");
-        body.extend_from_slice(&(meta.id.len() as u16).to_le_bytes());
-        body.extend_from_slice(meta.id.as_bytes());
-        body.extend_from_slice(&meta.doc_count.to_le_bytes());
-        body.extend_from_slice(&meta.min_seq_no.to_le_bytes());
-        body.extend_from_slice(&meta.max_seq_no.to_le_bytes());
-        body.extend_from_slice(&(artifacts.len() as u32).to_le_bytes());
-        for (name, size, crc) in artifacts {
-            body.extend_from_slice(&(name.len() as u16).to_le_bytes());
-            body.extend_from_slice(name.as_bytes());
-            body.extend_from_slice(&size.to_le_bytes());
-            body.extend_from_slice(&crc.to_le_bytes());
-        }
-        let envelope_crc = crc32fast::hash(&body);
-        body.extend_from_slice(&envelope_crc.to_le_bytes());
         xerj_common::fsio::write_file_durable(
             &segments_dir.join(format!("{}.complete", meta.id)),
-            &body,
+            &crate::bundle::complete_manifest_bytes(meta, &artifacts),
         )
     }
 
@@ -1243,46 +1332,6 @@ impl IndexStore {
             hasher.update(&buffer[..read]);
         }
         Ok(hasher.finalize())
-    }
-
-    fn valid_flush_artifact_set(segment_id: &str, artifacts: &[(String, u64, u32)]) -> bool {
-        let prefix = format!("{segment_id}.");
-        let mut roles = std::collections::HashSet::new();
-        let mut fts: std::collections::HashMap<&str, std::collections::HashSet<&str>> =
-            std::collections::HashMap::new();
-        for (name, _, _) in artifacts {
-            if !name.starts_with(&prefix) || name.contains('/') || name.contains('\\') {
-                return false;
-            }
-            let rest = &name[prefix.len()..];
-            if matches!(
-                rest,
-                "seg" | "sidx" | "ids" | "dv" | "fts-layout-v2" | "ftsan"
-            ) {
-                if !roles.insert(rest) {
-                    return false;
-                }
-                continue;
-            }
-            let Some((field, extension)) = rest.rsplit_once('.') else {
-                return false;
-            };
-            if field.is_empty()
-                || field.contains("..")
-                || !matches!(extension, "fst" | "post" | "meta" | "norms")
-                || !fts.entry(field).or_default().insert(extension)
-            {
-                return false;
-            }
-        }
-        roles.contains("seg")
-            && roles.contains("sidx")
-            && roles.contains("ids")
-            && fts.values().all(|extensions| {
-                ["fst", "post", "meta", "norms"]
-                    .iter()
-                    .all(|extension| extensions.contains(extension))
-            })
     }
 
     fn validate_flush_completion_manifest(
@@ -1397,7 +1446,7 @@ impl IndexStore {
             actual.push((name, metadata.len(), crc));
         }
         actual.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-        Self::valid_flush_artifact_set(segment_id, &declared) && declared == actual
+        crate::bundle::valid_flush_artifact_set(segment_id, &declared) && declared == actual
     }
 
     /// Unlink every on-disk file belonging to the given segment ids — the
@@ -1426,6 +1475,42 @@ impl IndexStore {
         if ids.is_empty() {
             return (0, 0);
         }
+
+        // #965 — object-store mode: retire the bucket object too. The
+        // caller (engine merge task) only reaches here after the
+        // replacement snapshot committed AND its catalog published, which
+        // is the durability order the design requires: parents are deleted
+        // strictly after their replacement is durable. Best-effort and
+        // exact-key — a leftover bundle is an orphan a future GC sweep can
+        // reclaim, never a correctness issue (nothing references it), while
+        // refusing to delete local files because the bucket is unreachable
+        // would wedge merges on a network blip. Both backends treat
+        // delete-of-missing as success.
+        //
+        // `try_current` (not `current`): this can run from a
+        // `SnapshotReadGuard` drop context where no async runtime handle
+        // exists; without a handle there is nothing to block on, so the
+        // bucket object simply outlives this call and the next retire (or
+        // the eventual GC command) retries it.
+        if let Some(backend) = self.backend() {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                for id in &ids {
+                    match block_on_backend(backend.delete(&segment_bundle_key(id))) {
+                        Ok(()) => {}
+                        Err(error) => warn!(
+                            error = %error,
+                            segment_id = *id,
+                            "bucket bundle delete failed; orphaned object remains (GC will reclaim)"
+                        ),
+                    }
+                }
+            }
+            self.durable_bundles
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|durable| !ids.contains(durable.as_str()));
+        }
+
         let entries = match std::fs::read_dir(&segments_dir) {
             Ok(e) => e,
             Err(_) => return (0, 0),
@@ -2083,40 +2168,6 @@ impl IndexStore {
         let prof_wfin_us = t_wfin.elapsed().as_micros();
         let segment_id = meta.id.clone();
 
-        // When using an object-store backend, upload the freshly-written segment
-        // and also populate the local cache directory so subsequent reads can
-        // be served locally (check-local-first strategy in SegmentCache).
-        if let StorageMode::ObjectStore { backend, cache_dir } = &self.config.storage_mode {
-            let seg_path = self.data_dir.join("segments").join(&meta.seg_path);
-            let seg_data = std::fs::read(&seg_path)?;
-            let object_key = format!("segments/{}", meta.seg_path);
-
-            // Drive the async upload synchronously.  `flush` is a sync method so
-            // we must not use `block_on` directly (it panics when called from inside
-            // an existing Tokio runtime).  Instead we use `block_in_place` which
-            // parks the current thread while the runtime schedules other work on
-            // this thread's pool.  When flush is eventually made async this becomes
-            // a plain `.await`.
-            let backend_clone = std::sync::Arc::clone(backend);
-            let key_clone = object_key.clone();
-            let data_clone = seg_data.clone();
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async move { backend_clone.write(&key_clone, &data_clone).await })
-            })
-            .map_err(|e| StorageError::Backend(format!("object-store upload failed: {e}")))?;
-
-            // Populate the local cache so the next read is served locally.
-            let cache_path = cache_dir.join(&meta.seg_path);
-            if let Some(parent) = cache_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            // Best-effort: if caching fails the next read will re-fetch from backend.
-            let _ = std::fs::write(&cache_path, &seg_data);
-
-            info!(segment_id, object_key, "segment uploaded to object store");
-        }
-
         // Run the caller-supplied "build side-car files" step.  This must
         // succeed BEFORE we publish the segment to the snapshot — otherwise
         // a racing query could open the segment and find the side-cars
@@ -2155,6 +2206,21 @@ impl IndexStore {
         }
         if let Err(error) = self.write_flush_completion_manifest(&meta) {
             return Err(self.abandon_unpublished_segment(&segment_id, error.into()));
+        }
+
+        // Issue #965 — object-store mode: the family is now complete and
+        // ZCM1-validated, so pack it into ONE bundle object and PUT it BEFORE
+        // the segment is published to the snapshot (durability order: bundle
+        // before any catalog that references it). Uploading after the ZCM1
+        // validation minimizes the `abandon_unpublished_segment` orphan
+        // window: an upload failure rides the existing error path below, the
+        // local files are rolled back, and the drained memtable is restored
+        // by `flush_with_publisher` — the data stays in WAL+memtable, no
+        // loss, and a later flush retries.
+        if self.is_object_store_mode() {
+            if let Err(error) = self.upload_segment_bundle(&meta) {
+                return Err(self.abandon_unpublished_segment(&segment_id, error));
+            }
         }
 
         // Update version map: point live docs at the new segment.
@@ -2283,6 +2349,28 @@ impl IndexStore {
         // the flush-side analogue of Lucene's maybeMerge-on-flush
         // (IndexWriter.java:706, MergeTrigger.FULL_FLUSH).
         self.notify_segments_changed();
+
+        // Issue #965 — object-store mode: publish the bucket catalog NOW, on
+        // every flush (not only on WAL-maintenance ticks), so that a flush
+        // that returned successfully is bucket-durable — the property the
+        // flipped pinning test asserts (flush -> node dies -> a fresh node
+        // sees the segments). A failure defers exactly like a failed local
+        // snapshot save: the segment stays local-durable, the WAL is never
+        // pruned past it, and the next publish retries.
+        if self.is_object_store_mode() {
+            if let Err(error) = self.publish_catalog_to_backend() {
+                warn!(
+                    error = %error,
+                    segment_id,
+                    "bucket catalog publication deferred; the segment stays local-durable \
+                     and the next publish retries"
+                );
+                return Ok(FlushFinalizeOutcome::Published {
+                    meta,
+                    maintenance_deferred: true,
+                });
+            }
+        }
         if prof {
             eprintln!(
                 "XERJ_PROF finalize docs={} ser_us={} encode_us={} writer_finish_us={} post_finish_us={} vm_us={} total_so_far_us={}",
@@ -2364,6 +2452,19 @@ impl IndexStore {
             // deletes' WAL pins.  Best-effort: on failure the deletes
             // simply stay WAL-pinned (retention, not loss).
             if let Err(e) = self.persist_pending_tombstones() {
+                if self.is_object_store_mode() {
+                    // #965 — the bucket catalog does not carry the
+                    // tombstone segment yet. Pruning the WAL now would let
+                    // a fresh node (stale catalog + pruned WAL) resurrect
+                    // every deleted doc, so this tick keeps the entries;
+                    // the next publish retries.
+                    warn!(error = %e, segment_id,
+                        "tombstone bucket publication failed — WAL maintenance deferred");
+                    return Ok(FlushFinalizeOutcome::Published {
+                        meta,
+                        maintenance_deferred: true,
+                    });
+                }
                 warn!(error = %e, "tombstone persistence failed — deletes stay WAL-pinned");
             }
             if let Err(error) = self.save_snapshot() {
@@ -2575,6 +2676,25 @@ impl IndexStore {
         // doc_count 0: tombstone-only.  finish() fsyncs file + dir.
         let meta = writer.finish(0, min_seq, max_seq)?;
 
+        // #965 — object-store mode: a tombstone-only segment is written by
+        // THIS path, not by `finalize_flush_with_publisher`, so its bundle
+        // upload happens here too. Everything runs BEFORE any state change
+        // (repoint / rcu): on failure the deletes stay memtable-resident and
+        // WAL-pinned — exactly the pre-existing failure mode of this
+        // function. The `.ids` side-car is EMPTY (the flush path writes only
+        // live docs into it; the tombstones live in the .seg ZTB2 section),
+        // and the ZCM1 manifest is required for the family to be complete
+        // enough to pack.
+        if self.is_object_store_mode() {
+            if let Err(error) = self.write_ids_sidecar_v3(meta.id.as_str(), &[]) {
+                return Err(error.into());
+            }
+            if let Err(error) = self.write_flush_completion_manifest(&meta) {
+                return Err(error.into());
+            }
+            self.upload_segment_bundle(&meta)?;
+        }
+
         // Segment is durable — repoint the tombstones onto it (guarded:
         // a doc re-indexed since collection keeps its newer live entry).
         let seg_arc: std::sync::Arc<str> = std::sync::Arc::from(meta.id.as_str());
@@ -2593,6 +2713,18 @@ impl IndexStore {
         // #871 — a tombstone-only segment is a segment-set change (and a
         // merge candidate: merges are what fold tombstones away).
         self.notify_segments_changed();
+
+        // #965 — the bucket catalog must name the tombstone segment before
+        // the caller's WAL maintenance prunes the Delete entries it carries.
+        // On failure we return Err AFTER the local rcu: the local snapshot
+        // is ahead of the bucket, which `object_store_boot` resolves in
+        // favour of the local generation (and backfills the bundle), but a
+        // WAL prune now would let a fresh node — stale catalog + pruned WAL
+        // — resurrect every deleted doc. The caller defers maintenance on
+        // this error; retention, not loss.
+        if self.is_object_store_mode() {
+            self.publish_catalog_to_backend()?;
+        }
 
         info!(
             segment_id = meta.id.as_str(),
@@ -2928,7 +3060,15 @@ impl IndexStore {
     pub fn force_wal_maintenance(&self) -> Result<()> {
         // RC4 W2 #14 — see the gated call site: segment-persist acked
         // deletes so their WAL pins can be released by the prune below.
+        // #965 — object-store mode defers on publication failure for the
+        // same reason the gated path does: a prune ahead of the bucket
+        // catalog would resurrect the deletes on a fresh node.
         if let Err(e) = self.persist_pending_tombstones() {
+            if self.is_object_store_mode() {
+                warn!(error = %e,
+                    "tombstone bucket publication failed — forced WAL maintenance aborted");
+                return Err(e);
+            }
             warn!(error = %e, "tombstone persistence failed — deletes stay WAL-pinned");
         }
         // P2.3 — persist the (possibly debounced) snapshot before pruning
@@ -3059,30 +3199,40 @@ impl IndexStore {
 
         let local_path = self.data_dir.join("segments").join(&seg_path);
 
-        // For object-store mode: check local cache; fetch from backend on miss.
-        let reader = if let StorageMode::ObjectStore { backend, cache_dir } =
-            &self.config.storage_mode
-        {
-            let cache_path = cache_dir.join(&seg_path);
-            if cache_path.exists() {
-                crate::segment::SegmentReader::open(cache_path)?
-            } else {
-                let object_key = format!("segments/{seg_path}");
-                let backend_clone = std::sync::Arc::clone(backend);
-                let key_clone = object_key.clone();
-                let data = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async move {
-                        backend_clone.read_range(&key_clone, 0, u64::MAX).await
-                    })
-                })
-                .map_err(|e| StorageError::Backend(format!("object-store fetch failed: {e}")))?;
-
-                if let Some(parent) = cache_path.parent() {
-                    std::fs::create_dir_all(parent)?;
+        // #965 — object-store mode: the bundle is the durable copy and the
+        // family materializes into `data_dir/segments` (the same directory,
+        // the same names, the same `.complete`-validated recovery evidence
+        // as a post-flush family — byte-identical by construction, because
+        // the packer synthesizes the manifest the flush path wrote). Local
+        // family present → open it. Absent (a fresh node, or an evicted
+        // one) → fetch the bundle, verify EVERY per-file CRC, unpack, then
+        // open. The old path here fetched a lone `.seg` by an object key no
+        // writer ever produced (pre-#965 flush uploaded only the `.seg`,
+        // under this very key, with no `.sidx`/side-cars beside it) and
+        // wrote it to `cache_dir` — a reader family that could not answer a
+        // query. `cache_dir` is dormant/reserved (see `StorageMode`).
+        let reader = if self.is_object_store_mode() {
+            match crate::segment::SegmentReader::open(&local_path) {
+                Ok(r) => r,
+                Err(StorageError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                    self.fetch_and_hydrate_segment(segment_id)
+                        .map_err(|error| {
+                            match error {
+                                // Preserve the typed contract (RC4 W2 #15): a
+                                // genuinely retired/unknown segment is
+                                // SegmentNotFound, not an internal error — the
+                                // merge-race fallback path above relies on it.
+                                StorageError::Backend(reason)
+                                    if reason.starts_with("bundle object not found") =>
+                                {
+                                    StorageError::SegmentNotFound(segment_id.to_owned())
+                                }
+                                other => other,
+                            }
+                        })?;
+                    crate::segment::SegmentReader::open(&local_path)?
                 }
-                std::fs::write(&cache_path, &data)?;
-                debug!(segment_id, ?cache_path, "segment cached from object store");
-                crate::segment::SegmentReader::open(cache_path)?
+                Err(e) => return Err(e),
             }
         } else {
             match crate::segment::SegmentReader::open(local_path) {
@@ -3224,6 +3374,445 @@ impl IndexStore {
                 path.display()
             ))),
         }
+    }
+
+    // ── Object-store boot & publication (issue #965) ─────────────────────────
+
+    /// Durable local write of `snapshot.json` outside a store instance.
+    ///
+    /// Same discipline as `save_snapshot` (unique tmp + fsync + rename +
+    /// dir fsync); used by the boot path, where the store does not exist yet.
+    fn persist_snapshot_file(data_dir: &Path, snap: &IndexSnapshot) -> Result<()> {
+        let bytes = serde_json::to_vec(snap)?;
+        let path = Self::snapshot_path(data_dir);
+        let nonce = format!(
+            "{}-{:?}",
+            Uuid::new_v4().simple(),
+            std::thread::current().id(),
+        );
+        let tmp = path.with_extension(format!("tmp.{nonce}"));
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp, &path)?;
+        xerj_common::fsio::fsync_dir(data_dir)?;
+        Ok(())
+    }
+
+    /// Object-store-mode boot: catalogue selection, one-time adoption
+    /// backfill, and family hydration. Runs BEFORE `rebuild_version_map_from_segments`
+    /// (it reads `.ids`) and before either local GC pass. Returns the
+    /// selected snapshot and the set of segment ids known to have durable
+    /// bundles in the bucket.
+    ///
+    /// Selection rules (single-writer contract):
+    /// - bucket catalog present + local present → the higher GENERATION wins
+    ///   (ties go to the bucket, the durable copy);
+    /// - bucket absent + local snapshot has segments → ONE-TIME ADOPTION
+    ///   BACKFILL: upload a bundle per snapshot-listed local family, then
+    ///   publish the catalogue. Local files are NOT removed — the node keeps
+    ///   operating from `data_dir/segments`; the bucket is now the durable
+    ///   copy. Segments absent from the snapshot stay under today's local
+    ///   orphan rules and are never uploaded;
+    /// - both absent → empty (fresh index).
+    ///
+    /// A present-but-unparseable bucket catalogue refuses the open — the
+    /// same rule `load_snapshot` applies locally, for the same reason.
+    fn object_store_boot(
+        data_dir: &Path,
+        backend: &std::sync::Arc<dyn StorageBackend>,
+    ) -> Result<(IndexSnapshot, std::collections::HashSet<SegmentId>)> {
+        let local = Self::load_snapshot(data_dir)?;
+        let bucket = Self::fetch_catalog(backend)?;
+        let listed = block_on_backend({
+            let backend = std::sync::Arc::clone(backend);
+            async move { backend.list("segments/").await }
+        })?;
+        let mut durable: std::collections::HashSet<SegmentId> = listed
+            .iter()
+            .filter_map(|key| {
+                key.strip_prefix("segments/")?
+                    .strip_suffix(".bundle")
+                    .map(str::to_owned)
+            })
+            .collect();
+
+        let segments_dir = data_dir.join("segments");
+        std::fs::create_dir_all(&segments_dir)?;
+
+        let (selected, selected_from_local) = match (&local, &bucket) {
+            (Some(local_snap), Some(bucket_snap)) => {
+                if local_snap.generation > bucket_snap.generation {
+                    (local_snap.clone(), true)
+                } else {
+                    (bucket_snap.clone(), false)
+                }
+            }
+            (Some(local_snap), None) => (local_snap.clone(), true),
+            (None, Some(bucket_snap)) => (bucket_snap.clone(), false),
+            (None, None) => (IndexSnapshot::empty(), false),
+        };
+        if selected_from_local && !selected.segments.is_empty() {
+            tracing::info!(
+                generation = selected.generation,
+                segments = selected.segments.len(),
+                "object-store boot selected the newer LOCAL snapshot; adopting it into the bucket"
+            );
+        }
+
+        // Converge the local manifest with the selection so the GC passes in
+        // `open` judge the same segment set the bucket will. `IndexSnapshot`
+        // has no `PartialEq`; the generation (monotonic per publish) is the
+        // identity that matters here — an equal generation means the local
+        // file already names the same view.
+        if bucket.is_some()
+            && local.as_ref().map(|snap| snap.generation) != Some(selected.generation)
+        {
+            Self::persist_snapshot_file(data_dir, &selected)?;
+        }
+
+        // Hydrate every catalogued family that is not on local disk yet.
+        for meta in &selected.segments {
+            let seg_local = segments_dir.join(&meta.seg_path);
+            if seg_local.exists() {
+                continue;
+            }
+            let key = segment_bundle_key(&meta.id);
+            if !durable.contains(&meta.id) {
+                return Err(StorageError::Backend(format!(
+                    "bucket catalog references segment {} but no bundle {} exists in the \
+                     bucket; refusing to open a view that would silently lose it",
+                    meta.id, key
+                )));
+            }
+            let bytes = block_on_backend({
+                let backend = std::sync::Arc::clone(backend);
+                let key = key.clone();
+                async move { backend.read_range(&key, 0, u64::MAX).await }
+            })?
+            .to_vec();
+            crate::bundle::unpack(&bytes, &segments_dir).map_err(|error| {
+                StorageError::Backend(format!(
+                    "bundle {} failed validation while hydrating segment {}: {error}",
+                    key, meta.id
+                ))
+            })?;
+            tracing::info!(segment_id = %meta.id, "segment family hydrated from object store");
+        }
+
+        // Adoption / self-heal: upload bundles for catalogued segments that
+        // are local but not yet durable in the bucket.
+        for meta in &selected.segments {
+            if durable.contains(&meta.id) {
+                continue;
+            }
+            let bytes = crate::bundle::pack(&segments_dir, meta)?;
+            let key = segment_bundle_key(&meta.id);
+            block_on_backend({
+                let backend = std::sync::Arc::clone(backend);
+                async move { backend.write(&key, &bytes).await }
+            })?;
+            durable.insert(meta.id.clone());
+            tracing::info!(segment_id = %meta.id, "segment bundle uploaded (adoption backfill)");
+        }
+
+        // First publication for an adopted directory: every catalogued
+        // segment now has a durable bundle, so the catalog can safely name
+        // them all.
+        if bucket.is_none()
+            && !selected.segments.is_empty()
+            && selected.segments.iter().all(|m| durable.contains(&m.id))
+        {
+            let bytes = serde_json::to_vec(&selected)?;
+            block_on_backend({
+                let backend = std::sync::Arc::clone(backend);
+                async move { backend.write(crate::bundle::CATALOG_KEY, &bytes).await }
+            })?;
+            tracing::info!("bucket catalog published (adoption)");
+        }
+
+        Ok((selected, durable))
+    }
+
+    /// Fetch and parse the bucket catalogue. `Ok(None)` = genuinely absent.
+    /// A PRESENT-but-unparseable catalogue is a refuse-to-open error.
+    fn fetch_catalog(
+        backend: &std::sync::Arc<dyn StorageBackend>,
+    ) -> Result<Option<IndexSnapshot>> {
+        let bytes = match block_on_backend({
+            let backend = std::sync::Arc::clone(backend);
+            async move {
+                backend
+                    .read_range(crate::bundle::CATALOG_KEY, 0, u64::MAX)
+                    .await
+            }
+        }) {
+            Ok(bytes) => bytes,
+            Err(StorageError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None)
+            }
+            Err(e) => {
+                return Err(StorageError::Backend(format!(
+                    "fetching the bucket catalog {} failed: {e}",
+                    crate::bundle::CATALOG_KEY
+                )))
+            }
+        };
+        match serde_json::from_slice::<IndexSnapshot>(&bytes) {
+            Ok(snap) => Ok(Some(snap)),
+            Err(e) => Err(StorageError::IncompatibleDataDir(format!(
+                "bucket catalog {} is present but could not be parsed ({e}). Refusing \
+                 to open: treating it as empty would make every bucket-resident \
+                 segment invisible.",
+                crate::bundle::CATALOG_KEY
+            ))),
+        }
+    }
+
+    /// True when this store publishes to an object-storage backend.
+    pub fn is_object_store_mode(&self) -> bool {
+        matches!(self.config.storage_mode, StorageMode::ObjectStore { .. })
+    }
+
+    fn backend(&self) -> Option<std::sync::Arc<dyn StorageBackend>> {
+        match &self.config.storage_mode {
+            StorageMode::ObjectStore { backend, .. } => Some(std::sync::Arc::clone(backend)),
+            StorageMode::Local => None,
+        }
+    }
+
+    /// Pack one segment family and PUT it as a single bundle object, then
+    /// record the id as durable. Caller holds no snapshot locks; the
+    /// publication lock serializes pack→PUT against concurrent publishers.
+    fn upload_segment_bundle(&self, meta: &SegmentMeta) -> Result<()> {
+        let Some(backend) = self.backend() else {
+            return Ok(());
+        };
+        let _guard = self.object_publish_lock.lock().unwrap();
+        let bytes = crate::bundle::pack(&self.data_dir.join("segments"), meta)?;
+        let key = segment_bundle_key(&meta.id);
+        block_on_backend({
+            let backend = std::sync::Arc::clone(&backend);
+            let key = key.clone();
+            async move { backend.write(&key, &bytes).await }
+        })?;
+        self.durable_bundles.lock().unwrap().insert(meta.id.clone());
+        info!(segment_id = %meta.id, key = %key, "segment bundle uploaded");
+        Ok(())
+    }
+
+    /// Upload bundles for every snapshot-referenced segment that lacks one.
+    ///
+    /// This is the self-healing half of the durability order: a catalog PUT
+    /// may only reference bundles that are already durable, so a segment that
+    /// is snapshot-listed with a complete local family but no bundle (crash
+    /// between local flush and bundle PUT, orphan recovery) is uploaded here
+    /// rather than blocking publication forever.
+    ///
+    /// Caller holds `object_publish_lock`.
+    fn ensure_bundles_for_snapshot_locked(&self) -> Result<()> {
+        let Some(backend) = self.backend() else {
+            return Ok(());
+        };
+        let metas: Vec<SegmentMeta> = self
+            .snapshot
+            .load()
+            .segments
+            .iter()
+            .filter(|meta| !self.durable_bundles.lock().unwrap().contains(&meta.id))
+            .cloned()
+            .collect();
+        for meta in &metas {
+            let bytes = crate::bundle::pack(&self.data_dir.join("segments"), meta)?;
+            let key = segment_bundle_key(&meta.id);
+            let backend = std::sync::Arc::clone(&backend);
+            block_on_backend(async move { backend.write(&key, &bytes).await })?;
+            self.durable_bundles.lock().unwrap().insert(meta.id.clone());
+        }
+        Ok(())
+    }
+
+    /// Boot-time / post-recovery backfill of local-only snapshot segments.
+    fn backfill_missing_bundles(&self) -> Result<()> {
+        if self.backend().is_none() {
+            return Ok(());
+        }
+        let _guard = self.object_publish_lock.lock().unwrap();
+        self.ensure_bundles_for_snapshot_locked()
+    }
+
+    /// Publish the bucket catalogue: the serialized current `IndexSnapshot`.
+    ///
+    /// Durability order (issue #965): a segment bundle is durable in the
+    /// bucket BEFORE any catalogue that references it. Under the v1
+    /// single-writer contract the one mutable key is sufficient — the backend
+    /// `write` is whole-object atomic and the generation guards staleness.
+    /// The designated multi-writer evolution (immutable gen-N catalogues plus
+    /// a CURRENT pointer) is recorded in docs/OBJECT_STORAGE.md, not shipped.
+    fn publish_catalog_to_backend(&self) -> Result<()> {
+        let Some(backend) = self.backend() else {
+            return Ok(());
+        };
+        let _guard = self.object_publish_lock.lock().unwrap();
+        // Never publish a catalogue that references a bundle we cannot prove
+        // is in the bucket; heal what we can from local families first.
+        self.ensure_bundles_for_snapshot_locked()?;
+        {
+            let snap = self.snapshot.load();
+            let durable = self.durable_bundles.lock().unwrap();
+            for meta in &snap.segments {
+                if !durable.contains(&meta.id) {
+                    return Err(StorageError::Backend(format!(
+                        "segment {} is snapshot-referenced but has no durable bundle; \
+                         deferring catalog publication",
+                        meta.id
+                    )));
+                }
+            }
+        }
+        let bytes = serde_json::to_vec(&**self.snapshot.load())?;
+        block_on_backend(async move { backend.write(crate::bundle::CATALOG_KEY, &bytes).await })?;
+        debug!(
+            generation = self.snapshot.load().generation,
+            "bucket catalog published"
+        );
+        Ok(())
+    }
+
+    /// Publish one auxiliary index meta file (settings, schema) as an object.
+    ///
+    /// Best-effort by design: the meta objects are what make a fresh node a
+    /// complete reader, but a failed PUT must not fail a write that has
+    /// already committed locally — the next mutation re-publishes.
+    pub fn publish_aux_object(&self, name: &str, local_path: &Path) -> Result<()> {
+        let Some(backend) = self.backend() else {
+            return Ok(());
+        };
+        let bytes = std::fs::read(local_path)?;
+        let key = crate::bundle::aux_key(name);
+        block_on_backend(async move { backend.write(&key, &bytes).await })
+    }
+
+    /// Fetch one auxiliary meta object into `local_path` when it is locally
+    /// absent. `Ok(false)` = absent everywhere or nothing to do.
+    pub fn fetch_aux_object_if_absent(&self, name: &str, local_path: &Path) -> Result<bool> {
+        let Some(backend) = self.backend() else {
+            return Ok(false);
+        };
+        Self::fetch_aux_object_from_backend(&backend, name, local_path)
+    }
+
+    /// Standalone form of [`Self::fetch_aux_object_if_absent`] for callers
+    /// that hold the backend but no store yet (`Index::open` fetches
+    /// settings/schema from the bucket BEFORE `IndexStore::open`, because
+    /// the store config itself depends on the persisted settings).
+    pub fn fetch_aux_object_from_backend(
+        backend: &std::sync::Arc<dyn StorageBackend>,
+        name: &str,
+        local_path: &Path,
+    ) -> Result<bool> {
+        if local_path.exists() {
+            return Ok(false);
+        }
+        let key = crate::bundle::aux_key(name);
+        let bytes = match block_on_backend({
+            let backend = std::sync::Arc::clone(backend);
+            let key = key.clone();
+            async move { backend.read_range(&key, 0, u64::MAX).await }
+        }) {
+            Ok(bytes) => bytes.to_vec(),
+            Err(StorageError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(false)
+            }
+            Err(e) => {
+                return Err(StorageError::Backend(format!(
+                    "fetching aux object {key} failed: {e}"
+                )))
+            }
+        };
+        if let Some(parent) = local_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        xerj_common::fsio::write_file_durable(local_path, &bytes)?;
+        Ok(true)
+    }
+
+    /// Fetch a segment bundle and materialize the family into
+    /// `data_dir/segments` (every per-file CRC re-verified; a flipped byte is
+    /// a typed checksum error, never silently wrong data).
+    fn fetch_and_hydrate_segment(&self, segment_id: &str) -> Result<()> {
+        let Some(backend) = self.backend() else {
+            return Ok(());
+        };
+        let key = segment_bundle_key(segment_id);
+        let bytes = match block_on_backend({
+            let backend = std::sync::Arc::clone(&backend);
+            let key = key.clone();
+            async move { backend.read_range(&key, 0, u64::MAX).await }
+        }) {
+            Ok(bytes) => bytes.to_vec(),
+            // Typed miss: `open_segment_arc` maps this to SegmentNotFound so
+            // a retired/unknown id keeps its "skip / stale snapshot"
+            // contract (RC4 W2 #15) instead of surfacing as a 500.
+            Err(StorageError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StorageError::Backend(format!(
+                    "bundle object not found: {key}"
+                )));
+            }
+            Err(e) => {
+                return Err(StorageError::Backend(format!(
+                    "fetching bundle {key} for segment {segment_id} failed: {e}"
+                )));
+            }
+        };
+        let segments_dir = self.data_dir.join("segments");
+        crate::bundle::unpack(&bytes, &segments_dir).map_err(|error| {
+            StorageError::Backend(format!(
+                "bundle {key} failed validation while hydrating segment {segment_id}: {error}"
+            ))
+        })?;
+        debug!(segment_id, "segment family hydrated from object store");
+        Ok(())
+    }
+
+    /// Finalize a merged segment's durable artifacts (issue #965).
+    ///
+    /// - Local mode: exactly today's `.ids` side-car write — merged families
+    ///   keep getting no `.complete` on local disk, zero behaviour delta.
+    /// - ObjectStore mode: `.ids`, then a SYNTHESIZED ZCM1 manifest (merged
+    ///   outputs get none from the flush path — `write_flush_completion_manifest`
+    ///   is only production-called there), then the family packed into ONE
+    ///   bundle object, then the catalogue. Bundle before catalogue, so a
+    ///   crash between the two leaves a harmless bucket orphan, never a
+    ///   catalog entry whose bytes are missing.
+    ///
+    /// Call AFTER the merge is published (`apply_merge_with_repoints`) and
+    /// BEFORE retiring the inputs: the engine must skip input retirement
+    /// when this fails in object mode, or the bucket could keep a catalog
+    /// whose replacement bundle was never written.
+    pub fn finalize_merge_output(
+        &self,
+        meta: &SegmentMeta,
+        pairs: &[(u64, &str)],
+    ) -> std::io::Result<()> {
+        self.write_ids_sidecar(meta.id.as_str(), pairs)?;
+        if self.backend().is_some() {
+            self.write_flush_completion_manifest(meta)?;
+            if let Err(error) = self.upload_segment_bundle(meta) {
+                return Err(std::io::Error::other(format!(
+                    "merged segment bundle upload failed: {error}"
+                )));
+            }
+            if let Err(error) = self.publish_catalog_to_backend() {
+                return Err(std::io::Error::other(format!(
+                    "bucket catalog publication after merge failed: {error}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Path of the data-dir format marker.
@@ -5811,236 +6400,661 @@ mod tests {
         assert_eq!(reader.header().doc_count, 1);
     }
 
-    // ── Object-store backed flush tests ───────────────────────────────────────
+    // ── Object-store backed flush tests (issue #965) ──────────────────────────
+    //
+    // Every test here uses `SimulatedObjectStore`: a directory that mirrors
+    // the key hierarchy a real bucket would hold. No cloud credential is
+    // ever involved (the same rule as `XERJ_TEST_OBJECT_STORE_DIR` on the
+    // engine side).
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn object_store_flush_uploads_segment() {
-        use crate::backend::SimulatedObjectStore;
-        use std::sync::Arc;
-
-        let data_dir = tempfile::tempdir().unwrap();
-        let s3_dir = tempfile::tempdir().unwrap();
-        let cache_dir = tempfile::tempdir().unwrap();
-
-        let backend: Arc<dyn StorageBackend> = Arc::new(SimulatedObjectStore::new(
-            s3_dir.path(),
-            "test-bucket",
-            "xerj/",
-        ));
-
-        let store = IndexStore::open(
-            data_dir.path(),
+    /// Open an object-store-mode store over `data_dir` backed by `backend`.
+    /// The `cache_dir` is throwaway and DORMANT (#965): families materialize
+    /// in `data_dir/segments`.
+    fn open_object_store(data_dir: &Path, backend: &Arc<dyn StorageBackend>) -> Arc<IndexStore> {
+        let cache = tempfile::tempdir().unwrap();
+        IndexStore::open(
+            data_dir,
             IndexStoreConfig {
                 sync_mode: SyncMode::Batched,
                 storage_mode: StorageMode::ObjectStore {
-                    backend: Arc::clone(&backend),
-                    cache_dir: cache_dir.path().to_path_buf(),
+                    backend: Arc::clone(backend),
+                    cache_dir: cache.keep(),
                 },
                 ..Default::default()
             },
         )
-        .unwrap();
+        .unwrap()
+    }
 
+    /// The concrete simulated store plus its `dyn` handle, so tests can both
+    /// assert on bucket contents by key and tamper with the bytes on disk.
+    fn simulated_backend(
+        s3_dir: &Path,
+    ) -> (
+        crate::backend::SimulatedObjectStore,
+        Arc<dyn StorageBackend>,
+    ) {
+        let sim = crate::backend::SimulatedObjectStore::new(s3_dir, "test-bucket", "xerj/");
+        let backend: Arc<dyn StorageBackend> = Arc::new(sim.clone());
+        (sim, backend)
+    }
+
+    /// Every local file of one segment's family (anything named
+    /// `{segment_id}.*`), for wiping the local copy to force hydration.
+    fn local_family_files(data_dir: &Path, segment_id: &str) -> Vec<PathBuf> {
+        std::fs::read_dir(data_dir.join("segments"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(segment_id))
+            })
+            .collect()
+    }
+
+    /// A flush in object-store mode must leave the bucket holding exactly
+    /// ONE segment object — the whole family as a ZBM1 bundle, `.complete`
+    /// included — plus the catalogue that names it. Before #965 this path
+    /// uploaded only the `.seg` while a family is many files, which is the
+    /// gap the old pinning test recorded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_store_flush_uploads_one_bundle_and_the_catalog() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let s3_dir = tempfile::tempdir().unwrap();
+        let (_sim, backend) = simulated_backend(s3_dir.path());
+
+        let store = open_object_store(data_dir.path(), &backend);
         store
             .index("doc-1", serde_json::json!({"title": "hello s3"}))
             .unwrap();
         let meta = store.flush().unwrap().expect("should produce a segment");
 
-        // Segment must exist in the simulated S3 bucket.
-        let object_key = format!("segments/{}", meta.seg_path);
+        // One bundle object per segment, under the reserved key.
+        let bundle_key = crate::bundle::bundle_key(meta.id.as_str());
         assert!(
-            backend.exists(&object_key).await.unwrap(),
-            "segment not found in object store: {object_key}"
+            backend.exists(&bundle_key).await.unwrap(),
+            "segment bundle not found in object store: {bundle_key}"
+        );
+        let uploaded = backend.list("segments/").await.unwrap();
+        assert_eq!(
+            uploaded,
+            vec![bundle_key.clone()],
+            "a one-segment flush must upload exactly one object, got {uploaded:?}"
         );
 
-        // Segment should also be in local cache.
-        let cached = cache_dir.path().join(&meta.seg_path);
-        assert!(cached.exists(), "segment not cached locally: {:?}", cached);
+        // The bundle carries the ENTIRE family: every local file the flush
+        // wrote, plus the synthesized `.complete` manifest. That is what
+        // makes a hydrated directory byte-identical to a post-flush one.
+        // (`footer.files` is the raw file table; `artifact_set()` excludes
+        // `.complete` because ZCM1 never lists itself.)
+        let object_bytes = backend.read_range(&bundle_key, 0, u64::MAX).await.unwrap();
+        let (footer, _footer_start) = crate::bundle::parse_footer(&object_bytes).unwrap();
+        let bundled: std::collections::HashSet<&str> =
+            footer.files.iter().map(|f| f.name.as_str()).collect();
+        let local: std::collections::HashSet<String> =
+            local_family_files(data_dir.path(), meta.id.as_str())
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+        for file in &local {
+            assert!(
+                bundled.contains(file.as_str()),
+                "local family file {file} is not inside the bundle: {:?}",
+                bundled
+            );
+        }
+        assert!(
+            bundled.contains(format!("{}.complete", meta.id).as_str()),
+            "the bundle must carry the .complete manifest: {:?}",
+            bundled
+        );
+
+        // And the catalogue — the thing a fresh node boots from — is there
+        // the moment the flush returns, naming exactly this segment.
+        assert!(
+            backend.exists(crate::bundle::CATALOG_KEY).await.unwrap(),
+            "snapshot.json must be published to the bucket by the flush"
+        );
+        let catalog = backend
+            .read_range(crate::bundle::CATALOG_KEY, 0, u64::MAX)
+            .await
+            .unwrap();
+        let snapshot: IndexSnapshot = serde_json::from_slice(&catalog).unwrap();
+        assert_eq!(snapshot.segments.len(), 1);
+        assert_eq!(snapshot.segments[0].id, meta.id);
+        assert_eq!(snapshot.segments[0].doc_count, 1);
     }
 
+    /// Deleting the local family and re-opening the segment must fetch the
+    /// bundle from the bucket and materialize the WHOLE family back into
+    /// `data_dir/segments` — not a lone `.seg` in a cache directory.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn object_store_read_through_cache() {
-        use crate::backend::SimulatedObjectStore;
-        use std::sync::Arc;
-
+    async fn object_store_read_path_hydrates_the_whole_family() {
         let data_dir = tempfile::tempdir().unwrap();
         let s3_dir = tempfile::tempdir().unwrap();
-        let cache_dir = tempfile::tempdir().unwrap();
+        let (_sim, backend) = simulated_backend(s3_dir.path());
 
-        let backend: Arc<dyn StorageBackend> = Arc::new(SimulatedObjectStore::new(
-            s3_dir.path(),
-            "test-bucket",
-            "xerj/",
-        ));
-
-        let store = IndexStore::open(
-            data_dir.path(),
-            IndexStoreConfig {
-                sync_mode: SyncMode::Batched,
-                storage_mode: StorageMode::ObjectStore {
-                    backend: Arc::clone(&backend),
-                    cache_dir: cache_dir.path().to_path_buf(),
-                },
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
+        let store = open_object_store(data_dir.path(), &backend);
         store
             .index("doc-1", serde_json::json!({"title": "cache test"}))
             .unwrap();
         let meta = store.flush().unwrap().unwrap();
 
-        // Remove local segment file to force a cache miss on first open.
-        let local_seg = data_dir.path().join("segments").join(&meta.seg_path);
-        std::fs::remove_file(&local_seg).ok();
-        // Also clear the warm cache so the read-through path is exercised.
-        let cached = cache_dir.path().join(&meta.seg_path);
-        std::fs::remove_file(&cached).ok();
+        // Wipe every local family file: the next open must come from the bucket.
+        let family = local_family_files(data_dir.path(), meta.id.as_str());
+        assert!(
+            family.len() >= 2,
+            "a flush writes at least .seg and .ids locally: {family:?}"
+        );
+        for path in &family {
+            std::fs::remove_file(path).unwrap();
+        }
 
-        // open_segment should fetch from the object store and cache locally.
         let reader = store.open_segment(&meta.id).unwrap();
         assert_eq!(reader.header().doc_count, 1);
 
-        // Subsequent open should be served from cache.
+        // The family is back — the sidecars a query path needs (.ids for
+        // doc-id lookup, .sidx for skipping) materialize with the .seg.
+        let rehydrated = local_family_files(data_dir.path(), meta.id.as_str());
+        let names: Vec<String> = rehydrated
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            rehydrated.len(),
+            family.len(),
+            "hydration must restore every family file, got {names:?} had {family:?}"
+        );
+        assert!(names.iter().any(|n| n.ends_with(".ids")));
+        assert!(names.iter().any(|n| n.ends_with(".sidx")));
+
+        // A second open is served from the local copy (no re-fetch needed,
+        // and the reader still agrees).
         let reader2 = store.open_segment(&meta.id).unwrap();
         assert_eq!(reader2.header().doc_count, 1);
     }
 
-    /// The gap this PR does **not** close, pinned down so nobody has to guess.
+    /// THE #965 pinning test, flipped from its pre-wiring form
+    /// (`object_store_mode_does_not_yet_make_an_index_stateless`, which
+    /// asserted the gap: only the `.seg` uploaded, no `snapshot.json`, a
+    /// fresh node seeing zero segments).
     ///
-    /// `StorageMode::ObjectStore` uploads the freshly written `.seg` and
-    /// nothing else. An index is therefore *not* stateless: point a fresh node
-    /// with an empty data directory at the same bucket and it finds no
-    /// documents, because the thing that says which segments exist —
-    /// `snapshot.json` — never left the local disk.
-    ///
-    /// This test asserts the gap on purpose. When the segment path is properly
-    /// wired it will start failing, which is the point: the failure is the
-    /// reminder to update the claim in `docs/OBJECT_STORAGE.md` and to lift the
-    /// `storage.backend` guard in `xerj-common/src/config.rs`.
+    /// A node that indexes, flushes and dies leaves a bucket a fresh node
+    /// with an EMPTY data directory can boot from alone: the catalogue names
+    /// the segment, its bundle is durable, and the family hydrates on
+    /// demand. That is single-writer compute-storage separation — one node
+    /// per index at a time, which is the v1 contract in docs/OBJECT_STORAGE.md.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn object_store_mode_does_not_yet_make_an_index_stateless() {
-        use crate::backend::SimulatedObjectStore;
-        use std::sync::Arc;
-
+    async fn object_store_mode_makes_a_single_writer_index_stateless() {
         let s3_dir = tempfile::tempdir().unwrap();
-        let backend: Arc<dyn StorageBackend> = Arc::new(SimulatedObjectStore::new(
-            s3_dir.path(),
-            "test-bucket",
-            "xerj/",
-        ));
+        let (_sim, backend) = simulated_backend(s3_dir.path());
 
         // ── A node indexes, flushes, and dies. ───────────────────────────────
         let first_data_dir = tempfile::tempdir().unwrap();
-        let first_cache = tempfile::tempdir().unwrap();
         let meta = {
-            let store = IndexStore::open(
-                first_data_dir.path(),
-                IndexStoreConfig {
-                    sync_mode: SyncMode::Batched,
-                    storage_mode: StorageMode::ObjectStore {
-                        backend: Arc::clone(&backend),
-                        cache_dir: first_cache.path().to_path_buf(),
-                    },
-                    ..Default::default()
-                },
-            )
-            .unwrap();
+            let store = open_object_store(first_data_dir.path(), &backend);
             store
                 .index("doc-1", serde_json::json!({"title": "stateless?"}))
                 .unwrap();
             store
-                .index("doc-2", serde_json::json!({"title": "no"}))
+                .index("doc-2", serde_json::json!({"title": "yes"}))
                 .unwrap();
             let meta = store.flush().unwrap().expect("a segment");
             assert_eq!(store.snapshot().segments.len(), 1);
             meta
         };
 
-        // The .seg did reach the bucket.
-        let seg_key = format!("segments/{}", meta.seg_path);
-        assert!(
-            backend.exists(&seg_key).await.unwrap(),
-            "the segment data file must be uploaded"
-        );
-
-        // But the local directory holds more than the bucket does. Count both,
-        // so the assertion names the actual size of the gap rather than
-        // asserting a number someone has to trust.
-        let local_files: Vec<String> = std::fs::read_dir(first_data_dir.path().join("segments"))
-            .unwrap()
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
+        // The bucket holds the whole family as ONE object per segment…
+        let bundle_key = crate::bundle::bundle_key(meta.id.as_str());
         let uploaded = backend.list("segments/").await.unwrap();
-        assert!(
-            local_files.len() > uploaded.len(),
-            "expected the bucket to hold fewer files than the local segments \
-             directory; local: {local_files:?}, uploaded: {uploaded:?}"
+        assert_eq!(
+            uploaded,
+            vec![bundle_key.clone()],
+            "one segment in the snapshot means one bundle object: {uploaded:?}"
         );
-        // The skip index is the concrete example inside this crate. In the
-        // running engine there are many more: a hand count of one real
-        // 25-field segment came to 104 files (.seg, .sidx, .dv, .ids, and
-        // .fst/.meta/.norms/.post per indexed field), of which this path
-        // uploads exactly one. This test asserts the inequality below, not the
-        // number 104 — see docs/OBJECT_STORAGE.md, which says the same.
+        // …and the catalogue that makes it findable.
         assert!(
-            local_files.iter().any(|f| f.ends_with(".sidx")),
-            "a flush writes a .sidx skip index locally: {local_files:?}"
-        );
-        assert!(
-            !uploaded.iter().any(|k| k.ends_with(".sidx")),
-            "and it is NOT uploaded — if this starts failing the wiring has \
-             progressed and this test's claim needs updating: {uploaded:?}"
-        );
-        // Nor is the snapshot, which is what makes the index unrecoverable.
-        assert!(
-            !backend.exists("snapshot.json").await.unwrap(),
-            "snapshot.json is not uploaded"
+            backend.exists(crate::bundle::CATALOG_KEY).await.unwrap(),
+            "snapshot.json must be in the bucket the moment the flush returns"
         );
 
         // ── A fresh node, empty disk, same bucket. ───────────────────────────
         let second_data_dir = tempfile::tempdir().unwrap();
-        let second_cache = tempfile::tempdir().unwrap();
-        let revived = IndexStore::open(
+        let revived = open_object_store(second_data_dir.path(), &backend);
+
+        assert_eq!(
+            revived.snapshot().segments.len(),
+            1,
+            "a fresh node must see the dead node's segment: the catalogue is \
+             in the bucket and the boot path selects it"
+        );
+        assert_eq!(revived.snapshot().segments[0].doc_count, 2);
+        let reader = revived
+            .open_segment(meta.id.as_str())
+            .expect("the family must hydrate from the bundle on first open");
+        assert_eq!(reader.header().doc_count, 2);
+        let family = local_family_files(second_data_dir.path(), meta.id.as_str());
+        assert!(
+            family.len() >= 2,
+            "hydration materializes the family in data_dir/segments: {family:?}"
+        );
+
+        // A second flush on the fresh node republishes a strictly newer
+        // catalogue — the generation is the single-writer staleness guard.
+        revived
+            .index("doc-3", serde_json::json!({"title": "again"}))
+            .unwrap();
+        revived.flush().unwrap().unwrap();
+        let catalog = backend
+            .read_range(crate::bundle::CATALOG_KEY, 0, u64::MAX)
+            .await
+            .unwrap();
+        let snapshot: IndexSnapshot = serde_json::from_slice(&catalog).unwrap();
+        assert_eq!(
+            snapshot.segments.len(),
+            2,
+            "the catalogue must now name both segments"
+        );
+        assert!(
+            snapshot.generation > 1,
+            "generation must advance past the adopted catalogue's"
+        );
+    }
+
+    /// Durability order, failure half: a bundle that landed without its
+    /// catalogue (crash between the two PUTs, or the catalog PUT failing)
+    /// must leave a fresh node on the OLD view — not an error, and not a
+    /// half-open index. The bundle is a harmless orphan until GC exists.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bundle_without_catalog_leaves_a_fresh_node_on_the_old_view() {
+        let s3_dir = tempfile::tempdir().unwrap();
+        let (_sim, backend) = simulated_backend(s3_dir.path());
+
+        let first_data_dir = tempfile::tempdir().unwrap();
+        let meta = {
+            let store = open_object_store(first_data_dir.path(), &backend);
+            store
+                .index("doc-1", serde_json::json!({"title": "orphan"}))
+                .unwrap();
+            store.flush().unwrap().unwrap()
+        };
+
+        // Simulate the crash window: keep the bundle, lose the catalogue.
+        backend.delete(crate::bundle::CATALOG_KEY).await.unwrap();
+
+        let second_data_dir = tempfile::tempdir().unwrap();
+        let revived = open_object_store(second_data_dir.path(), &backend);
+        assert_eq!(
+            revived.snapshot().segments.len(),
+            0,
+            "no catalogue means the old (empty) view — the bundle is an orphan, \
+             not a half-open index"
+        );
+        // And the local snapshot the fresh node just persisted (empty) is a
+        // LOWER generation than nothing at all: it must not have re-published
+        // an empty catalogue over anything.
+        let still_gone = !backend.exists(crate::bundle::CATALOG_KEY).await.unwrap() || {
+            // If the empty view was published, it must not reference the
+            // orphaned bundle (it cannot — it has no segments).
+            let bytes = backend
+                .read_range(crate::bundle::CATALOG_KEY, 0, u64::MAX)
+                .await
+                .unwrap();
+            let snap: IndexSnapshot = serde_json::from_slice(&bytes).unwrap();
+            snap.segments.iter().all(|m| m.id != meta.id)
+        };
+        assert!(
+            still_gone,
+            "the orphaned bundle must never be re-named by a catalogue it did not come from"
+        );
+    }
+
+    /// The refuse-to-open half of the boot contract: a catalogue that names a
+    /// segment whose bundle is missing would silently lose that segment's
+    /// documents on every query — open must fail instead of shrinking the
+    /// view.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn catalog_referencing_a_missing_bundle_refuses_to_open() {
+        let s3_dir = tempfile::tempdir().unwrap();
+        let (_sim, backend) = simulated_backend(s3_dir.path());
+
+        let first_data_dir = tempfile::tempdir().unwrap();
+        let meta = {
+            let store = open_object_store(first_data_dir.path(), &backend);
+            store
+                .index("doc-1", serde_json::json!({"title": "lost"}))
+                .unwrap();
+            store.flush().unwrap().unwrap()
+        };
+
+        // Delete the bundle but keep the catalogue that names it.
+        backend
+            .delete(&crate::bundle::bundle_key(meta.id.as_str()))
+            .await
+            .unwrap();
+
+        let second_data_dir = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let opened = IndexStore::open(
             second_data_dir.path(),
             IndexStoreConfig {
                 sync_mode: SyncMode::Batched,
                 storage_mode: StorageMode::ObjectStore {
                     backend: Arc::clone(&backend),
-                    cache_dir: second_cache.path().to_path_buf(),
+                    cache_dir: cache.path().to_path_buf(),
                 },
                 ..Default::default()
             },
-        )
-        .unwrap();
-
-        assert_eq!(
-            revived.snapshot().segments.len(),
-            0,
-            "THIS is the gap: the segment bytes are in the bucket, but a fresh \
-             node cannot see them because the snapshot that lists them is not. \
-             Do not claim compute-storage separation until this is non-zero."
         );
+        let err = match opened {
+            Err(err) => err,
+            Ok(_) => panic!("a catalogue naming a missing bundle must refuse to open"),
+        };
+        assert!(
+            err.to_string().contains("no bundle"),
+            "the error must say which bundle is missing: {err}"
+        );
+    }
 
-        // The half that *does* work, and it is the useful half: asked for the
-        // segment by id, a fresh node with an empty disk fetches it out of the
-        // bucket, caches it locally and reads it correctly. So the backend and
-        // the read-through cache genuinely survive losing the node — what is
-        // missing is the catalogue that would let the node ask in the first
-        // place, not the ability to get the bytes back.
-        let reader = revived
-            .open_segment(meta.id.as_str())
-            .expect("a fresh node can fetch a segment from the bucket by id");
-        assert_eq!(
-            reader.header().doc_count,
-            2,
-            "and the bytes it fetched are the bytes that were written"
+    /// Corruption: one flipped BODY byte in the bucket. Hydration must fail
+    /// with a typed checksum error and write NOTHING — a partial family is
+    /// worse than an error, because a later open would treat it as complete.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn corrupted_bundle_body_writes_nothing() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let s3_dir = tempfile::tempdir().unwrap();
+        let (sim, backend) = simulated_backend(s3_dir.path());
+
+        let store = open_object_store(data_dir.path(), &backend);
+        store
+            .index("doc-1", serde_json::json!({"title": "bit rot"}))
+            .unwrap();
+        let meta = store.flush().unwrap().unwrap();
+
+        // Wipe the local copy so the read path must fetch the bundle.
+        for path in local_family_files(data_dir.path(), meta.id.as_str()) {
+            std::fs::remove_file(&path).unwrap();
+        }
+
+        // Flip one byte in the middle of the BODY (before the footer).
+        let bundle_path = s3_dir
+            .path()
+            .join(sim.object_key(&crate::bundle::bundle_key(meta.id.as_str())));
+        let mut bytes = std::fs::read(&bundle_path).unwrap();
+        let (footer, footer_start) = crate::bundle::parse_footer(&bytes).unwrap();
+        let _ = footer;
+        let body_mid = footer_start / 2;
+        bytes[body_mid] ^= 0x01;
+        std::fs::write(&bundle_path, &bytes).unwrap();
+
+        let err = match store.open_segment(&meta.id) {
+            Err(err) => err,
+            Ok(_) => panic!("a corrupted bundle must fail the open"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("checksum"),
+            "a flipped body byte is a checksum error, got: {msg}"
         );
         assert!(
-            second_cache.path().join(&meta.seg_path).exists(),
-            "the fetched segment must land in the new node's local cache"
+            local_family_files(data_dir.path(), meta.id.as_str()).is_empty(),
+            "no partial family may be written on a failed hydration"
+        );
+    }
+
+    /// Corruption: a flipped trailer magic is a typed invalid-magic error,
+    /// not a mysterious parse failure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn corrupted_bundle_trailer_magic_is_a_typed_error() {
+        let msg = tamper_trailer(|trailer| trailer[15] ^= 0x01).await;
+        assert!(
+            msg.contains("Invalid magic"),
+            "a flipped trailer magic is an invalid-magic error, got: {msg}"
+        );
+    }
+
+    /// Corruption: an unknown trailer version is a typed unsupported-version
+    /// error — the reader of a future format says so instead of guessing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn corrupted_bundle_version_is_a_typed_error() {
+        let msg = tamper_trailer(|trailer| {
+            trailer[8..12].copy_from_slice(&99u32.to_le_bytes());
+        })
+        .await;
+        assert!(
+            msg.contains("Unsupported format version"),
+            "an unknown trailer version is an unsupported-version error, got: {msg}"
+        );
+    }
+
+    /// Shared body of the two trailer-tamper tests above: flush, wipe the
+    /// local family, corrupt the trailer, and return the open error's
+    /// message for the caller's typed assertion.
+    async fn tamper_trailer<F: FnOnce(&mut [u8])>(edit: F) -> String {
+        let data_dir = tempfile::tempdir().unwrap();
+        let s3_dir = tempfile::tempdir().unwrap();
+        let (sim, backend) = simulated_backend(s3_dir.path());
+
+        let store = open_object_store(data_dir.path(), &backend);
+        store
+            .index("doc-1", serde_json::json!({"title": "trailer"}))
+            .unwrap();
+        let meta = store.flush().unwrap().unwrap();
+
+        for path in local_family_files(data_dir.path(), meta.id.as_str()) {
+            std::fs::remove_file(&path).unwrap();
+        }
+
+        let bundle_path = s3_dir
+            .path()
+            .join(sim.object_key(&crate::bundle::bundle_key(meta.id.as_str())));
+        let mut bytes = std::fs::read(&bundle_path).unwrap();
+        let total = bytes.len();
+        edit(&mut bytes[total - crate::bundle::BUNDLE_TRAILER_LEN..]);
+        std::fs::write(&bundle_path, &bytes).unwrap();
+
+        let err = match store.open_segment(&meta.id) {
+            Err(err) => err,
+            Ok(_) => panic!("a tampered trailer must fail the open"),
+        };
+        assert!(
+            !matches!(err, StorageError::SegmentNotFound(_)),
+            "a present-but-corrupt bundle is not a miss: {err}"
+        );
+        assert!(
+            local_family_files(data_dir.path(), meta.id.as_str()).is_empty(),
+            "no partial family may be written on a failed hydration"
+        );
+        err.to_string()
+    }
+
+    /// A merged segment follows the same publish-then-retire order as a
+    /// flush: after `finalize_merge_output` and retirement the bucket holds
+    /// ONE bundle (the merged one), the inputs' bundles are deleted, and a
+    /// fresh node sees the merged view.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn merge_in_object_mode_publishes_output_and_retires_inputs() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let s3_dir = tempfile::tempdir().unwrap();
+        let (_sim, backend) = simulated_backend(s3_dir.path());
+
+        let store = open_object_store(data_dir.path(), &backend);
+        store.index("doc-1", serde_json::json!({"v": 1})).unwrap();
+        store.flush().unwrap().unwrap();
+        store.index("doc-2", serde_json::json!({"v": 2})).unwrap();
+        store.flush().unwrap().unwrap();
+
+        let ids: Vec<SegmentId> = store
+            .snapshot()
+            .segments
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
+        assert_eq!(ids.len(), 2);
+
+        // The engine's sequence: execute → apply (snapshot swap) → finalize
+        // (ids + ZCM1 + bundle + catalog) → retire the inputs.
+        let executor = crate::merge::MergeExecutor::new(
+            Arc::clone(&store),
+            crate::merge::MergeConfig {
+                io_rate_mb_per_sec: 0,
+                ..Default::default()
+            },
+        );
+        // `execute_merge` applies the merge itself (snapshot swapped, inputs
+        // repointed) — the engine then runs the #965 finalize step and retires.
+        let merged = executor.execute_merge(&ids).unwrap();
+        let mut id_pairs: Vec<(u64, String)> = Vec::new();
+        for doc in ["doc-1", "doc-2"] {
+            if let Some(entry) = store.version_map.get(doc) {
+                id_pairs.push((entry.seq_no, doc.to_string()));
+            }
+        }
+        let pairs: Vec<(u64, &str)> = id_pairs
+            .iter()
+            .map(|(seq, doc)| (*seq, doc.as_str()))
+            .collect();
+        store.finalize_merge_output(&merged, &pairs).unwrap();
+        store.retire_segment_files(&ids).unwrap();
+
+        let uploaded = backend.list("segments/").await.unwrap();
+        assert_eq!(
+            uploaded,
+            vec![crate::bundle::bundle_key(merged.id.as_str())],
+            "after the merge only the output bundle may remain: {uploaded:?}"
+        );
+
+        // A fresh node sees the merged view — one segment, both documents.
+        let fresh_dir = tempfile::tempdir().unwrap();
+        let fresh = open_object_store(fresh_dir.path(), &backend);
+        assert_eq!(fresh.snapshot().segments.len(), 1);
+        assert_eq!(fresh.snapshot().segments[0].doc_count, 2);
+        let reader = fresh.open_segment(&merged.id).unwrap();
+        assert_eq!(reader.header().doc_count, 2);
+    }
+
+    /// Migration: an existing LOCAL data directory pointed at an empty
+    /// bucket is adopted on boot — its segments' bundles are backfilled and
+    /// the first catalogue published — so a fresh node recovers from the
+    /// bucket alone. This is the no-downtime migration path for #965.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_directory_is_adopted_into_an_empty_bucket() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let s3_dir = tempfile::tempdir().unwrap();
+        let (_sim, backend) = simulated_backend(s3_dir.path());
+
+        // Phase 1: a purely local index (the pre-#965 world).
+        let meta = {
+            let store = open_test_store(data_dir.path());
+            store
+                .index("doc-1", serde_json::json!({"title": "adopt me"}))
+                .unwrap();
+            store
+                .index("doc-2", serde_json::json!({"title": "please"}))
+                .unwrap();
+            let meta = store.flush().unwrap().unwrap();
+            assert!(
+                !backend.exists(crate::bundle::CATALOG_KEY).await.unwrap(),
+                "nothing is in the bucket yet"
+            );
+            meta
+        };
+
+        // Phase 2: reboot the SAME directory in object-store mode with the
+        // empty bucket. Adoption must upload the bundle and publish the
+        // catalogue without losing or duplicating anything.
+        {
+            let adopted = open_object_store(data_dir.path(), &backend);
+            assert_eq!(adopted.snapshot().segments.len(), 1);
+            assert!(
+                backend
+                    .exists(&crate::bundle::bundle_key(meta.id.as_str()))
+                    .await
+                    .unwrap(),
+                "adoption backfills the segment bundle"
+            );
+            assert!(
+                backend.exists(crate::bundle::CATALOG_KEY).await.unwrap(),
+                "adoption publishes the first catalogue"
+            );
+        }
+
+        // Phase 3: a fresh node with an empty directory recovers from the
+        // bucket alone — the adoption actually completed.
+        let fresh_dir = tempfile::tempdir().unwrap();
+        let fresh = open_object_store(fresh_dir.path(), &backend);
+        assert_eq!(fresh.snapshot().segments.len(), 1);
+        assert_eq!(fresh.snapshot().segments[0].doc_count, 2);
+        let reader = fresh.open_segment(&meta.id).unwrap();
+        assert_eq!(reader.header().doc_count, 2);
+    }
+
+    /// An upload failure must fail the flush loudly: no bundle key in the
+    /// bucket, no segment in the snapshot. The data stays in WAL+memtable
+    /// (retention, not loss) and a later flush retries.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upload_failure_fails_the_flush() {
+        use async_trait::async_trait;
+
+        /// Wraps the simulated store; `write` always fails while armed.
+        struct FailingBackend {
+            inner: crate::backend::SimulatedObjectStore,
+        }
+
+        #[async_trait]
+        impl StorageBackend for FailingBackend {
+            async fn read_range(
+                &self,
+                path: &str,
+                offset: u64,
+                length: u64,
+            ) -> Result<bytes::Bytes> {
+                self.inner.read_range(path, offset, length).await
+            }
+            async fn write(&self, _path: &str, _data: &[u8]) -> Result<()> {
+                Err(StorageError::Backend("injected upload failure".into()))
+            }
+            async fn delete(&self, path: &str) -> Result<()> {
+                self.inner.delete(path).await
+            }
+            async fn exists(&self, path: &str) -> Result<bool> {
+                self.inner.exists(path).await
+            }
+            async fn list(&self, prefix: &str) -> Result<Vec<String>> {
+                self.inner.list(prefix).await
+            }
+            async fn metadata(&self, path: &str) -> Result<crate::backend::FileMetadata> {
+                self.inner.metadata(path).await
+            }
+        }
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let s3_dir = tempfile::tempdir().unwrap();
+        let (sim, _real) = simulated_backend(s3_dir.path());
+        let backend: Arc<dyn StorageBackend> = Arc::new(FailingBackend { inner: sim });
+
+        let store = open_object_store(data_dir.path(), &backend);
+        store
+            .index("doc-1", serde_json::json!({"title": "do not lose me"}))
+            .unwrap();
+        let err = store
+            .flush()
+            .expect_err("a failed bundle upload must fail the flush");
+        assert!(
+            err.to_string().contains("injected upload failure"),
+            "the flush error must carry the backend failure: {err}"
+        );
+        assert!(
+            store.snapshot().segments.is_empty(),
+            "the segment must not be published to a snapshot whose bundle never landed"
+        );
+        // …and the real (non-failing) view of the same directory confirms no
+        // bundle object was left behind.
+        assert!(
+            _real.list("segments/").await.unwrap().is_empty(),
+            "no bundle key may exist after a failed upload"
         );
     }
 
