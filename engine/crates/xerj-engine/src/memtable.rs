@@ -62,7 +62,7 @@ mod ingest_memory_drain_tests {
     #[test]
     fn authoritative_active_moves_to_drained_through_blocked_finalize_success_and_error() {
         for inject_error in [false, true] {
-            let mem = ShardedFtsMemtable::new();
+            let mem = Arc::new(ShardedFtsMemtable::new());
             mem.insert(
                 "doc-1".to_string(),
                 &serde_json::json!({"body": "retained"}),
@@ -76,26 +76,51 @@ mod ingest_memory_drain_tests {
                 .unwrap()
                 .0;
             let ledger = Ledger::new();
-            ledger.observe(Category::MemtableActive, mem.size_bytes());
-            assert!(
-                ledger
-                    .gauge(Category::MemtableActive, Measurement::Estimated)
-                    .current
-                    > 0
-            );
+            let charged_at_freeze = mem.size_bytes() as u64;
+            ledger.observe(Category::MemtableActive, charged_at_freeze as usize);
+            assert!(charged_at_freeze > 0);
 
             let ledger: &'static Ledger = Box::leak(Box::new(ledger));
-            let (_entries, guard) = mem.drain_shard_accounted_for_test(shard, false, ledger);
+            let (_entries, claim) = mem.freeze_shard_accounted_for_test(shard, false, ledger);
+            // #1015 — the freeze claims the generations for the flush but
+            // moves NO bytes: the docs stay reader-visible (and charged to
+            // the memtable aggregate) for the whole segment build.  The
+            // pre-#1015 drain zeroed this gauge immediately and parked the
+            // bytes in FlushDrained for the build's duration instead.
             ledger.observe(Category::MemtableActive, mem.size_bytes());
+            assert_eq!(
+                ledger
+                    .gauge(Category::MemtableActive, Measurement::Estimated)
+                    .current,
+                charged_at_freeze,
+                "frozen generations stay charged through the build"
+            );
+            assert_eq!(
+                ledger
+                    .gauge(Category::FlushDrained, Measurement::Estimated)
+                    .current,
+                0,
+                "no flush-pipeline charge until retire"
+            );
             let entered = Arc::new(Barrier::new(2));
             let release = Arc::new(Barrier::new(2));
             std::thread::scope(|scope| {
                 let entered_worker = Arc::clone(&entered);
                 let release_worker = Arc::clone(&release);
                 let handle = scope.spawn(move || -> Result<(), &'static str> {
-                    let _guard = guard;
+                    // Mirror do_flush_shard's publish-side disposition: retire
+                    // (bytes leave the aggregate; the Retained guard parks
+                    // them in FlushDrained) on success, release (bytes never
+                    // move) on failure.
+                    let retained = if inject_error {
+                        claim.release();
+                        None
+                    } else {
+                        claim.retire()
+                    };
                     entered_worker.wait();
                     release_worker.wait();
+                    drop(retained);
                     if inject_error {
                         Err("injected finalizer error")
                     } else {
@@ -103,28 +128,225 @@ mod ingest_memory_drain_tests {
                     }
                 });
                 entered.wait();
-                assert_eq!(
-                    ledger
-                        .gauge(Category::MemtableActive, Measurement::Estimated)
-                        .current,
-                    0
-                );
-                assert!(
-                    ledger
-                        .gauge(Category::FlushDrained, Measurement::Estimated)
-                        .current
-                        > 0
-                );
+                ledger.observe(Category::MemtableActive, mem.size_bytes());
+                if inject_error {
+                    // Released: the failed flush keeps its bytes charged to
+                    // the memtable — the docs are still reader-visible and
+                    // the next flush recycles the generations.
+                    assert_eq!(
+                        ledger
+                            .gauge(Category::MemtableActive, Measurement::Estimated)
+                            .current,
+                        charged_at_freeze,
+                        "released claim keeps its bytes charged"
+                    );
+                    assert_eq!(
+                        ledger
+                            .gauge(Category::FlushDrained, Measurement::Estimated)
+                            .current,
+                        0
+                    );
+                } else {
+                    // Retired: the bytes left the aggregate and sit in
+                    // FlushDrained exactly as long as the Retained guard
+                    // lives.
+                    assert_eq!(
+                        ledger
+                            .gauge(Category::MemtableActive, Measurement::Estimated)
+                            .current,
+                        0
+                    );
+                    assert!(
+                        ledger
+                            .gauge(Category::FlushDrained, Measurement::Estimated)
+                            .current
+                            > 0
+                    );
+                }
                 release.wait();
                 assert_eq!(handle.join().unwrap().is_err(), inject_error);
             });
+            ledger.observe(Category::MemtableActive, mem.size_bytes());
             assert_eq!(
                 ledger
                     .gauge(Category::FlushDrained, Measurement::Estimated)
                     .current,
-                0
+                0,
+                "Retained dropped — the flush pipeline no longer holds the bytes"
             );
+            if inject_error {
+                assert_eq!(
+                    ledger
+                        .gauge(Category::MemtableActive, Measurement::Estimated)
+                        .current,
+                    charged_at_freeze,
+                    "a released claim's docs stay charged until a later flush retires them"
+                );
+            }
         }
+    }
+}
+
+/// #1015 acceptance coverage for the frozen-generation contract.  The freeze
+/// moves the active generation behind a claimed `FrozenGen` and returns the
+/// flush snapshot; the docs NEVER leave the reader-visible set until
+/// `retire()`.  These tests pin the three properties the design claims:
+/// visibility through the (multi-second) segment build, deletes applied to a
+/// mid-build doc, and recycle-not-stack on a failed flush's retry.
+#[cfg(test)]
+mod frozen_generation_tests {
+    use super::*;
+    use crate::ingest_memory::Ledger;
+    use serde_json::json;
+
+    fn test_ledger() -> &'static Ledger {
+        Box::leak(Box::new(Ledger::new()))
+    }
+
+    fn insert(mem: &ShardedFtsMemtable, id: &str, body: &str, seq: u64) {
+        mem.insert(
+            id.to_string(),
+            &json!({ "body": body }),
+            &Schema::default(),
+            seq,
+        );
+    }
+
+    fn shard_of(mem: &ShardedFtsMemtable, id: &str) -> usize {
+        let s = mem.shard_for_dynamic(id);
+        assert!(
+            mem.shards[s].read().active.contains(id),
+            "test setup: {id} must sit in shard {s}'s active generation"
+        );
+        s
+    }
+
+    fn hit_ids(mem: &ShardedFtsMemtable, term: &str) -> Vec<String> {
+        let mut ids: Vec<String> = mem
+            .search_text(term, &["body"], 32)
+            .into_iter()
+            .map(|h| h.doc_id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    fn entry_ids(entries: &[(u64, String, Arc<Value>, Arc<[u8]>)]) -> Vec<String> {
+        let mut ids: Vec<String> = entries.iter().map(|(_, id, _, _)| id.clone()).collect();
+        ids.sort();
+        ids
+    }
+
+    /// The core #1015 claim: between freeze and retire — the window the
+    /// segment build runs in — the frozen docs stay queryable, and ingest into
+    /// the same shard continues.  Pre-#1015 the drain removed them from the
+    /// view for the whole build, which is what forced the publication guard to
+    /// span it.
+    #[test]
+    fn frozen_generation_stays_visible_through_the_claim() {
+        let mem = Arc::new(ShardedFtsMemtable::new());
+        insert(&mem, "doc-frozen", "quokka frozen", 1);
+        let shard = shard_of(&mem, "doc-frozen");
+        let bytes_at_freeze = mem.size_bytes();
+        assert!(bytes_at_freeze > 0);
+
+        let (entries, claim) = mem.freeze_shard_accounted_for_test(shard, false, test_ledger());
+        assert_eq!(entry_ids(&entries), vec!["doc-frozen"]);
+        // The claim moved NO bytes: the aggregate still carries the frozen
+        // generation until retire.
+        assert_eq!(mem.size_bytes(), bytes_at_freeze);
+
+        // Ingest continues into the shard while the (hypothetical) build runs.
+        insert(&mem, "doc-active", "wallaby active", 2);
+
+        assert!(
+            mem.contains("doc-frozen"),
+            "frozen doc left the view at freeze"
+        );
+        assert!(mem.contains("doc-active"));
+        assert_eq!(hit_ids(&mem, "quokka"), vec!["doc-frozen"]);
+        assert_eq!(hit_ids(&mem, "wallaby"), vec!["doc-active"]);
+        assert_eq!(
+            mem.all_doc_ids().len(),
+            2,
+            "the view is frozen + active, not active alone"
+        );
+
+        drop(claim.retire());
+        assert!(
+            !mem.contains("doc-frozen"),
+            "retire is what removes the frozen docs"
+        );
+        assert!(!hit_ids(&mem, "quokka").contains(&"doc-frozen".to_string()));
+        assert!(
+            mem.contains("doc-active"),
+            "retire must not touch the active generation"
+        );
+    }
+
+    /// A delete landing on a doc mid-build is applied to the frozen generation
+    /// it lives in, so the view drops the doc immediately.  The flush SNAPSHOT
+    /// was taken at freeze and still carries it — pinned here explicitly: the
+    /// publish-time version-map repoint owns that tombstone, exactly as it did
+    /// for a delete racing the pre-#1015 drain (the race window is unchanged,
+    /// only its length shrank).
+    #[test]
+    fn delete_during_the_claim_removes_the_doc_from_the_view() {
+        let mem = Arc::new(ShardedFtsMemtable::new());
+        insert(&mem, "doc-doomed", "numbat delete", 1);
+        let shard = shard_of(&mem, "doc-doomed");
+
+        let (entries, claim) = mem.freeze_shard_accounted_for_test(shard, false, test_ledger());
+        mem.remove("doc-doomed");
+
+        assert!(!mem.contains("doc-doomed"));
+        assert!(
+            hit_ids(&mem, "numbat").is_empty(),
+            "the delete reaches the frozen generation"
+        );
+        assert_eq!(
+            entry_ids(&entries),
+            vec!["doc-doomed"],
+            "the snapshot predates the delete by construction — the version-map \
+             repoint at publish resolves it (same window as the pre-#1015 drain)"
+        );
+
+        drop(claim.retire());
+        assert!(!mem.contains("doc-doomed"));
+    }
+
+    /// A failed flush releases its claim; the generation stays in the shard
+    /// unclaimed, reader-visible, byte-accounted.  The NEXT freeze must recycle
+    /// that generation rather than stack a second one beside it — otherwise a
+    /// flaky object store turns every retry into another frozen generation and
+    /// the query fan-out grows without bound.
+    #[test]
+    fn released_claim_is_recycled_not_stacked() {
+        let mem = Arc::new(ShardedFtsMemtable::new());
+        insert(&mem, "doc-retry", "potoroo retry", 1);
+        let shard = shard_of(&mem, "doc-retry");
+        let bytes_at_freeze = mem.size_bytes();
+
+        let (_first, claim) = mem.freeze_shard_accounted_for_test(shard, false, test_ledger());
+        claim.release();
+        assert!(
+            mem.contains("doc-retry"),
+            "release keeps the docs in the view"
+        );
+        assert_eq!(mem.size_bytes(), bytes_at_freeze);
+
+        let (entries, claim) = mem.freeze_shard_accounted_for_test(shard, false, test_ledger());
+        assert_eq!(entry_ids(&entries), vec!["doc-retry"]);
+        assert_eq!(
+            mem.shards[shard].read().frozen.len(),
+            1,
+            "the retry recycled the released generation"
+        );
+
+        drop(claim.retire());
+        assert!(!mem.contains("doc-retry"));
+        assert!(mem.shards[shard].read().frozen.is_empty());
+        assert_eq!(mem.size_bytes(), 0, "retire returns the generation's bytes");
     }
 }
 
@@ -790,11 +1012,73 @@ const DEFAULT_ENGINE_MEMTABLE_SHARDS: usize = 16;
 /// even though different shards saw pushes at different wall-clock
 /// instants.
 pub struct ShardedFtsMemtable {
-    shards: Vec<parking_lot::RwLock<FtsMemtable>>,
+    shards: Vec<parking_lot::RwLock<ShardGenerations>>,
     shard_mask: usize,
     /// Shared aggregate of all shards' `total_bytes` for this index — every
     /// shard mirrors its deltas here so the sampler reads one atomic.
     aggregate_bytes: Arc<AtomicUsize>,
+}
+
+/// One shard's reader-visible generations (#1015).
+///
+/// `active` receives every new write.  A flush FREEZES the active generation
+/// (moves it into `frozen`, O(1) pointer move) and installs a fresh `active`,
+/// so ingest continues on an empty memtable while the segment is being built —
+/// but the frozen docs stay reader-visible until the flush PUBLISHES, when the
+/// frozen generation is retired inside the same publication bracket that
+/// swaps the segment into the snapshot.  This removes the drain→install
+/// invisibility window that previously forced the flush to hold the
+/// collection-publication guard across its whole finalize.
+///
+/// Readers hold the shard's outer read lock across ALL generations of that
+/// shard, so a freeze or retire can never split their view.  A freeze does
+/// not change the visible doc set (the docs move, the reader still sees
+/// them), so it needs no publication bracket; a retire does, and the
+/// capture-boundary validation from #1014 makes a straddled reader retry.
+///
+/// Frozen generations are individually locked (not immutable) so that
+/// `remove` of a doc sitting in one behaves exactly as it does on the active
+/// generation — tombstone the version map, strip the live structures, keep
+/// the ghost accumulators.  A flush that fails leaves its frozen generations
+/// in place; the shard's next flush drains them again (see
+/// [`ShardedFtsMemtable::freeze_shard_accounted`]).
+pub(crate) struct ShardGenerations {
+    /// The generation new writes land in.  Replaced (O(1)) by each freeze.
+    pub(crate) active: FtsMemtable,
+    /// Former actives being flushed, oldest first.  Retired at publish.
+    pub(crate) frozen: Vec<FrozenGen>,
+    /// Ingredients for installing a fresh active generation at each freeze
+    /// (every generation of a shard shares the same registry and byte
+    /// aggregate — see [`FtsMemtable::with_registry_and_aggregate`]).
+    registry: Arc<AnalyzerRegistry>,
+    aggregate: Arc<AtomicUsize>,
+}
+
+/// One frozen generation plus its ownership state.
+pub(crate) struct FrozenGen {
+    pub(crate) gen: Arc<parking_lot::RwLock<FtsMemtable>>,
+    /// `true` while the flush that drained this generation is in flight.
+    /// Unclaimed generations are leftovers of a failed flush and join the
+    /// next freeze's drain set.
+    pub(crate) claimed: bool,
+}
+
+/// The flush's handle on the generations it drained (#1015).
+///
+/// Produced by [`ShardedFtsMemtable::freeze_shard_accounted`].  The flush
+/// holds the claim across the segment build; `retire` (inside the
+/// publication bracket, alongside the snapshot swap) drops the generations
+/// from the reader view, and `release` (failure) leaves them visible and
+/// recyclable.  A claim that is simply dropped releases — the safe failure
+/// mode keeps the docs reader-visible.
+pub(crate) struct FrozenClaim {
+    memtable: Arc<ShardedFtsMemtable>,
+    shard_idx: usize,
+    gens: Vec<Arc<parking_lot::RwLock<FtsMemtable>>>,
+    finished: bool,
+    /// Where `retire` charges the freed bytes.  Defaults to the thread's
+    /// active ingest ledger; tests override it to assert attribution.
+    ledger: Option<&'static crate::ingest_memory::Ledger>,
 }
 
 impl Default for ShardedFtsMemtable {
@@ -818,10 +1102,15 @@ impl ShardedFtsMemtable {
         let aggregate_bytes = Arc::new(AtomicUsize::new(0));
         let shards = (0..n)
             .map(|_| {
-                parking_lot::RwLock::new(FtsMemtable::with_registry_and_aggregate(
-                    Arc::clone(&registry),
-                    Arc::clone(&aggregate_bytes),
-                ))
+                parking_lot::RwLock::new(ShardGenerations {
+                    active: FtsMemtable::with_registry_and_aggregate(
+                        Arc::clone(&registry),
+                        Arc::clone(&aggregate_bytes),
+                    ),
+                    frozen: Vec::new(),
+                    registry: Arc::clone(&registry),
+                    aggregate: Arc::clone(&aggregate_bytes),
+                })
             })
             .collect();
         Self {
@@ -841,19 +1130,23 @@ impl ShardedFtsMemtable {
         self.shards.len()
     }
 
-    /// Run `f` with exclusive access to a specific shard's
+    /// Run `f` with exclusive access to a specific shard's ACTIVE
     /// `FtsMemtable`.  Used by the turbo ingest hot path to hold one
     /// shard's lock for the entire bulk batch so all docs of a batch
-    /// see each other's state consistently.
+    /// see each other's state consistently.  New writes always target
+    /// the active generation — frozen ones belong to in-flight flushes.
     pub fn with_shard_mut<R>(&self, shard: usize, f: impl FnOnce(&mut FtsMemtable) -> R) -> R {
         let mut g = self.shards[shard].write();
-        f(&mut g)
+        f(&mut g.active)
     }
 
-    /// Run `f` with shared (read-only) access to a specific shard.
+    /// Run `f` with shared (read-only) access to a specific shard's ACTIVE
+    /// generation only.  Reads that must see EVERY buffered doc of the shard
+    /// (the search path) fold across generations inside the per-shard read
+    /// accessors instead — see [`ShardGenerations`].
     pub fn with_shard<R>(&self, shard: usize, f: impl FnOnce(&FtsMemtable) -> R) -> R {
         let g = self.shards[shard].read();
-        f(&g)
+        f(&g.active)
     }
 
     /// The analyzer `FtsMemtable::insert` uses for text fields: the
@@ -864,14 +1157,47 @@ impl ShardedFtsMemtable {
     /// shard write locks via [`analyze_doc`].
     pub fn default_analyzer(&self) -> Option<Arc<AnalyzerPipeline>> {
         let g = self.shards[0].read();
-        g.registry
+        g.active
+            .registry
             .get_analyzer("default")
-            .or_else(|| g.registry.get_analyzer("standard"))
+            .or_else(|| g.active.registry.get_analyzer("standard"))
     }
 
-    /// Total document count across all shards.
+    /// Total document count across all shards and all generations — the
+    /// reader-visible buffered count, frozen generations included (their
+    /// docs stay visible until the flush publishes).
     pub fn doc_count(&self) -> usize {
-        self.shards.iter().map(|s| s.read().doc_count()).sum()
+        let mut n = 0;
+        for s in &self.shards {
+            let g = s.read();
+            n += g.active.doc_count();
+            for fz in &g.frozen {
+                n += fz.gen.read().doc_count();
+            }
+        }
+        n
+    }
+
+    /// Number of frozen generations across all shards — the test-observable
+    /// signal that a flush has claimed buffered docs without retiring them
+    /// yet (#1015: the drain is a freeze; `doc_count()` cannot signal it
+    /// because frozen docs stay counted until the publish retires them).
+    #[cfg(test)]
+    pub(crate) fn frozen_generation_count(&self) -> usize {
+        self.shards.iter().map(|s| s.read().frozen.len()).sum()
+    }
+
+    /// Frozen generations still HELD by an in-flight flush claim — the
+    /// test-observable counterpart of [`Self::frozen_generation_count`]:
+    /// a released claim flips `claimed` back without changing either the
+    /// generation count or `doc_count()`, so this is the only way to wait
+    /// out a detached finalizer's failure path.
+    #[cfg(test)]
+    pub(crate) fn claimed_frozen_generation_count(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|s| s.read().frozen.iter().filter(|fg| fg.claimed).count())
+            .sum()
     }
 
     /// Total approximate byte size across all shards.  Lock-free: a single
@@ -881,34 +1207,66 @@ impl ShardedFtsMemtable {
         self.aggregate_bytes.load(Ordering::Relaxed)
     }
 
-    /// Drop a doc from whichever shard owns it.
+    /// Drop a doc from whichever shard owns it.  A doc can sit in a frozen
+    /// generation (its flush is mid-build); removing it there keeps today's
+    /// live-shard semantics — strip live structures, keep ghost stats, and
+    /// the guarded version-map repoint at publish resolves the rest.
     pub fn remove(&self, doc_id: &str) {
         let s = self.shard_for_dynamic(doc_id);
-        self.shards[s].write().remove(doc_id);
+        let mut g = self.shards[s].write();
+        if g.active.contains(doc_id) {
+            g.active.remove(doc_id);
+            return;
+        }
+        for fz in &g.frozen {
+            let mut m = fz.gen.write();
+            if m.contains(doc_id) {
+                m.remove(doc_id);
+                return;
+            }
+        }
     }
 
     /// Return `true` if any shard holds the doc.  Picks the
     /// correct shard directly — no need to scan others.
     pub fn contains(&self, doc_id: &str) -> bool {
         let s = self.shard_for_dynamic(doc_id);
-        self.shards[s].read().contains(doc_id)
+        let g = self.shards[s].read();
+        if g.active.contains(doc_id) {
+            return true;
+        }
+        g.frozen.iter().any(|fz| fz.gen.read().contains(doc_id))
     }
 
     pub fn get_doc_source_as_value(&self, doc_id: &str) -> Option<Value> {
         let s = self.shard_for_dynamic(doc_id);
-        self.shards[s].read().get_doc_source_as_value(doc_id)
+        let g = self.shards[s].read();
+        g.active.get_doc_source_as_value(doc_id).or_else(|| {
+            g.frozen
+                .iter()
+                .find_map(|fz| fz.gen.read().get_doc_source_as_value(doc_id))
+        })
     }
 
     pub fn get_doc_source_arc(&self, doc_id: &str) -> Option<Arc<Value>> {
         let s = self.shard_for_dynamic(doc_id);
-        self.shards[s].read().get_doc_source_arc(doc_id)
+        let g = self.shards[s].read();
+        g.active.get_doc_source_arc(doc_id).or_else(|| {
+            g.frozen
+                .iter()
+                .find_map(|fz| fz.gen.read().get_doc_source_arc(doc_id))
+        })
     }
 
     /// Return every doc id in every shard (unordered).
     pub fn all_doc_ids(&self) -> Vec<String> {
         let mut out = Vec::new();
         for s in &self.shards {
-            out.extend(s.read().all_doc_ids());
+            let g = s.read();
+            out.extend(g.active.all_doc_ids());
+            for fz in &g.frozen {
+                out.extend(fz.gen.read().all_doc_ids());
+            }
         }
         out
     }
@@ -949,19 +1307,26 @@ impl ShardedFtsMemtable {
         for s in &self.shards {
             // Step 4: READ lock — sort_candidates_cached now folds new docs
             // into the interior-mutable cache without an exclusive shard lock.
+            // Frozen generations join the fold under the SAME shard read
+            // hold: their caches are per-generation and their doc sets are
+            // frozen, so the incremental fold stays exact for each.
             let g = s.read();
-            let n = g.doc_count();
-            total += n as u64;
-            if n == 0 {
-                continue;
-            }
-            let (mut top, miss, _) = g.sort_candidates_cached(field, desc, cap, normalize)?;
-            cands.append(&mut top);
-            for m in miss {
-                if missing.len() < cap {
-                    missing.push(m);
-                } else {
-                    break;
+            let frozen: Vec<parking_lot::RwLockReadGuard<'_, FtsMemtable>> =
+                g.frozen.iter().map(|fz| fz.gen.read()).collect();
+            for gen in std::iter::once(&g.active).chain(frozen.iter().map(|rd| &**rd)) {
+                let n = gen.doc_count();
+                total += n as u64;
+                if n == 0 {
+                    continue;
+                }
+                let (mut top, miss, _) = gen.sort_candidates_cached(field, desc, cap, normalize)?;
+                cands.append(&mut top);
+                for m in miss {
+                    if missing.len() < cap {
+                        missing.push(m);
+                    } else {
+                        break;
+                    }
                 }
             }
         }
@@ -1024,13 +1389,17 @@ impl ShardedFtsMemtable {
         let mut cutoff = u64::MAX;
         for s in &self.shards {
             let g = s.read();
-            total += g.doc_count() as u64;
-            cands.extend(
-                g.ranked_ids_up_to(limit, cutoff)
-                    .into_iter()
-                    .map(|(q, id)| (q, id, ())),
-            );
-            cutoff = Self::narrow_to_page(&mut cands, limit);
+            let frozen: Vec<parking_lot::RwLockReadGuard<'_, FtsMemtable>> =
+                g.frozen.iter().map(|fz| fz.gen.read()).collect();
+            for gen in std::iter::once(&g.active).chain(frozen.iter().map(|rd| &**rd)) {
+                total += gen.doc_count() as u64;
+                cands.extend(
+                    gen.ranked_ids_up_to(limit, cutoff)
+                        .into_iter()
+                        .map(|(q, id)| (q, id, ())),
+                );
+                cutoff = Self::narrow_to_page(&mut cands, limit);
+            }
         }
         (cands.into_iter().map(|(_, id, ())| id).collect(), total)
     }
@@ -1042,7 +1411,11 @@ impl ShardedFtsMemtable {
     pub fn all_docs_with_sources(&self) -> Vec<(String, Value)> {
         let mut out = Vec::new();
         for s in &self.shards {
-            out.extend(s.read().all_docs_with_sources());
+            let g = s.read();
+            out.extend(g.active.all_docs_with_sources());
+            for fz in &g.frozen {
+                out.extend(fz.gen.read().all_docs_with_sources());
+            }
         }
         out
     }
@@ -1051,7 +1424,11 @@ impl ShardedFtsMemtable {
     pub fn all_docs_with_sources_arc(&self) -> Vec<(String, Arc<Value>)> {
         let mut out = Vec::new();
         for s in &self.shards {
-            out.extend(s.read().all_docs_with_sources_arc());
+            let g = s.read();
+            out.extend(g.active.all_docs_with_sources_arc());
+            for fz in &g.frozen {
+                out.extend(fz.gen.read().all_docs_with_sources_arc());
+            }
         }
         out
     }
@@ -1067,7 +1444,11 @@ impl ShardedFtsMemtable {
     pub fn all_docs_with_seq_arc(&self) -> Vec<(u64, String, Arc<Value>)> {
         let mut out = Vec::new();
         for s in &self.shards {
-            out.extend(s.read().all_docs_with_seq_arc());
+            let g = s.read();
+            out.extend(g.active.all_docs_with_seq_arc());
+            for fz in &g.frozen {
+                out.extend(fz.gen.read().all_docs_with_seq_arc());
+            }
         }
         out
     }
@@ -1091,36 +1472,45 @@ impl ShardedFtsMemtable {
         let mut out: Vec<(String, Arc<Value>)> = Vec::new();
         for s in &self.shards {
             let g = s.read();
-            if g.doc_count() == 0 {
-                continue;
+            let frozen: Vec<parking_lot::RwLockReadGuard<'_, FtsMemtable>> =
+                g.frozen.iter().map(|fz| fz.gen.read()).collect();
+            for gen in std::iter::once(&g.active).chain(frozen.iter().map(|rd| &**rd)) {
+                if gen.doc_count() == 0 {
+                    continue;
+                }
+                gen.filtered_docs_arc_into(preds, &mut out)?;
             }
-            g.filtered_docs_arc_into(preds, &mut out)?;
         }
         Some(out)
     }
 
-    /// Drain every shard, merge-sort by seq_no, and return the
-    /// combined (doc_id, text_fields, source) stream.  This is the
-    /// single entry point used by the flush path — the sort
-    /// canonicalises global WAL order across the independent shards.
+    /// Whole-memtable drain, merge-sort by seq_no.  Test-facing since #1015:
+    /// the flush path uses `freeze_shard_accounted` (generations stay
+    /// reader-visible); this legacy shape survives for tests that need a
+    /// fully-empty memtable, and drains every generation of every shard.
     pub fn drain_with_sources(&self) -> Vec<(String, HashMap<String, String>, Value)> {
         let mut all: Vec<(u64, (String, HashMap<String, String>, Value))> = Vec::new();
         for s in &self.shards {
             let mut g = s.write();
-            let rows = g.drain_with_sources_raw();
-            all.extend(rows);
+            all.extend(g.active.drain_with_sources_raw());
+            for fz in &mut g.frozen {
+                all.extend(fz.gen.write().drain_with_sources_raw());
+            }
         }
         all.sort_by_key(|(seq, _)| *seq);
         all.into_iter().map(|(_, t)| t).collect()
     }
 
     /// Drain every shard (deletes tombstones only), merge by seq_no.
+    /// Test-facing, like `drain_with_sources`.
     pub fn drain(&self) -> Vec<(String, HashMap<String, String>)> {
         let mut all: Vec<(u64, (String, HashMap<String, String>))> = Vec::new();
         for s in &self.shards {
             let mut g = s.write();
-            let rows = g.drain_raw();
-            all.extend(rows);
+            all.extend(g.active.drain_raw());
+            for fz in &mut g.frozen {
+                all.extend(fz.gen.write().drain_raw());
+            }
         }
         all.sort_by_key(|(seq, _)| *seq);
         all.into_iter().map(|(_, t)| t).collect()
@@ -1129,7 +1519,12 @@ impl ShardedFtsMemtable {
     /// Per-doc field-length getter used by memtable BM25 scoring.
     pub fn get_source(&self, doc_id: &str) -> Option<HashMap<String, String>> {
         let s = self.shard_for_dynamic(doc_id);
-        self.shards[s].read().get_source(doc_id)
+        let g = self.shards[s].read();
+        g.active.get_source(doc_id).or_else(|| {
+            g.frozen
+                .iter()
+                .find_map(|fz| fz.gen.read().get_source(doc_id))
+        })
     }
 
     /// Combined numeric doc-values column — concatenates per-shard
@@ -1141,8 +1536,13 @@ impl ShardedFtsMemtable {
         let mut out = Vec::new();
         for s in &self.shards {
             let g = s.read();
-            if let Some(col) = g.doc_values_numeric_column(field) {
+            if let Some(col) = g.active.doc_values_numeric_column(field) {
                 out.extend_from_slice(col);
+            }
+            for fz in &g.frozen {
+                if let Some(col) = fz.gen.read().doc_values_numeric_column(field) {
+                    out.extend_from_slice(col);
+                }
             }
         }
         out
@@ -1152,8 +1552,13 @@ impl ShardedFtsMemtable {
         let mut out = Vec::new();
         for s in &self.shards {
             let g = s.read();
-            if let Some(col) = g.doc_values_keyword_column(field) {
+            if let Some(col) = g.active.doc_values_keyword_column(field) {
                 out.extend(col.iter().cloned());
+            }
+            for fz in &g.frozen {
+                if let Some(col) = fz.gen.read().doc_values_keyword_column(field) {
+                    out.extend(col.iter().cloned());
+                }
             }
         }
         out
@@ -1166,17 +1571,35 @@ impl ShardedFtsMemtable {
     /// so this holds only the shard **READ** lock — concurrent term-count
     /// queries no longer serialise against each other or the writer.
     pub fn doc_values_keyword_count(&self, field: &str, value: &str) -> u32 {
-        self.shards
-            .iter()
-            .map(|s| s.read().doc_values_keyword_count(field, value).unwrap_or(0))
-            .sum()
+        let mut n = 0;
+        for s in &self.shards {
+            let g = s.read();
+            n += g.active.doc_values_keyword_count(field, value).unwrap_or(0);
+            for fz in &g.frozen {
+                n += fz
+                    .gen
+                    .read()
+                    .doc_values_keyword_count(field, value)
+                    .unwrap_or(0);
+            }
+        }
+        n
     }
 
     pub fn doc_values_numeric_count(&self, field: &str, value: f64) -> u32 {
-        self.shards
-            .iter()
-            .map(|s| s.read().doc_values_numeric_count(field, value).unwrap_or(0))
-            .sum()
+        let mut n = 0;
+        for s in &self.shards {
+            let g = s.read();
+            n += g.active.doc_values_numeric_count(field, value).unwrap_or(0);
+            for fz in &g.frozen {
+                n += fz
+                    .gen
+                    .read()
+                    .doc_values_numeric_count(field, value)
+                    .unwrap_or(0);
+            }
+        }
+        n
     }
 
     /// Aggregate all terms + counts for a field across shards.
@@ -1184,8 +1607,13 @@ impl ShardedFtsMemtable {
         let mut acc: HashMap<String, usize> = HashMap::new();
         for s in &self.shards {
             let g = s.read();
-            for (term, count) in g.all_terms_for_field(field) {
+            for (term, count) in g.active.all_terms_for_field(field) {
                 *acc.entry(term).or_insert(0) += count;
+            }
+            for fz in &g.frozen {
+                for (term, count) in fz.gen.read().all_terms_for_field(field) {
+                    *acc.entry(term).or_insert(0) += count;
+                }
             }
         }
         acc.into_iter().collect()
@@ -1195,8 +1623,13 @@ impl ShardedFtsMemtable {
         let mut acc: HashMap<String, usize> = HashMap::new();
         for s in &self.shards {
             let g = s.read();
-            for (v, c) in g.all_keyword_values_for_field(field) {
+            for (v, c) in g.active.all_keyword_values_for_field(field) {
                 *acc.entry(v).or_insert(0) += c;
+            }
+            for fz in &g.frozen {
+                for (v, c) in fz.gen.read().all_keyword_values_for_field(field) {
+                    *acc.entry(v).or_insert(0) += c;
+                }
             }
         }
         acc.into_iter().collect()
@@ -1354,9 +1787,10 @@ impl ShardedFtsMemtable {
     ) -> Option<xerj_fts::CollectionStats> {
         let analyzer = self.shards.iter().find_map(|s| {
             let g = s.read();
-            g.registry
+            g.active
+                .registry
                 .get_analyzer("default")
-                .or_else(|| g.registry.get_analyzer("standard"))
+                .or_else(|| g.active.registry.get_analyzer("standard"))
         })?;
         let q_tokens = analyzer.analyze(query);
         if q_tokens.is_empty() {
@@ -1396,41 +1830,45 @@ impl ShardedFtsMemtable {
             std::collections::HashMap::new();
         for shard in &self.shards {
             let g = shard.read();
-            // Field length sums (live).
-            for (fname, (sum, n)) in &g.avg_field_lengths {
-                let entry = field_total_len.entry(fname.clone()).or_insert((0.0, 0));
-                entry.0 += sum;
-                entry.1 += n;
-            }
-            // Field length sums (tombstoned versions retained for avgdl).
-            for (fname, (sum, n)) in &g.ghost_field_len {
-                let entry = field_total_len.entry(fname.clone()).or_insert((0.0, 0));
-                entry.0 += sum;
-                entry.1 += n;
-            }
-            // Per-term doc_freq across shards (live postings).
-            for (fname, postings) in &g.index {
-                if !fields.is_empty() && !fields.iter().any(|f| f == fname) {
-                    continue;
+            let frozen: Vec<parking_lot::RwLockReadGuard<'_, FtsMemtable>> =
+                g.frozen.iter().map(|fz| fz.gen.read()).collect();
+            for gen in std::iter::once(&g.active).chain(frozen.iter().map(|rd| &**rd)) {
+                // Field length sums (live).
+                for (fname, (sum, n)) in &gen.avg_field_lengths {
+                    let entry = field_total_len.entry(fname.clone()).or_insert((0.0, 0));
+                    entry.0 += sum;
+                    entry.1 += n;
                 }
-                for token in q_tokens {
-                    if let Some(pl) = postings.get(&token.text) {
-                        *term_df
-                            .entry((fname.clone(), token.text.clone()))
-                            .or_insert(0) += pl.len() as u64;
+                // Field length sums (tombstoned versions retained for avgdl).
+                for (fname, (sum, n)) in &gen.ghost_field_len {
+                    let entry = field_total_len.entry(fname.clone()).or_insert((0.0, 0));
+                    entry.0 += sum;
+                    entry.1 += n;
+                }
+                // Per-term doc_freq across shards (live postings).
+                for (fname, postings) in &gen.index {
+                    if !fields.is_empty() && !fields.iter().any(|f| f == fname) {
+                        continue;
+                    }
+                    for token in q_tokens {
+                        if let Some(pl) = postings.get(&token.text) {
+                            *term_df
+                                .entry((fname.clone(), token.text.clone()))
+                                .or_insert(0) += pl.len() as u64;
+                        }
                     }
                 }
-            }
-            // Per-term doc_freq from tombstoned versions (delete-aware df).
-            for (fname, terms) in &g.ghost_doc_freq {
-                if !fields.is_empty() && !fields.iter().any(|f| f == fname) {
-                    continue;
-                }
-                for token in q_tokens {
-                    if let Some(df) = terms.get(&token.text) {
-                        *term_df
-                            .entry((fname.clone(), token.text.clone()))
-                            .or_insert(0) += *df;
+                // Per-term doc_freq from tombstoned versions (delete-aware df).
+                for (fname, terms) in &gen.ghost_doc_freq {
+                    if !fields.is_empty() && !fields.iter().any(|f| f == fname) {
+                        continue;
+                    }
+                    for token in q_tokens {
+                        if let Some(df) = terms.get(&token.text) {
+                            *term_df
+                                .entry((fname.clone(), token.text.clone()))
+                                .or_insert(0) += *df;
+                        }
                     }
                 }
             }
@@ -1455,9 +1893,10 @@ impl ShardedFtsMemtable {
         // global doc_freq + per-field global stats.
         let analyzer = self.shards.iter().find_map(|s| {
             let g = s.read();
-            g.registry
+            g.active
+                .registry
                 .get_analyzer("default")
-                .or_else(|| g.registry.get_analyzer("standard"))
+                .or_else(|| g.active.registry.get_analyzer("standard"))
         });
         let analyzer = match analyzer {
             Some(a) => a,
@@ -1502,7 +1941,11 @@ impl ShardedFtsMemtable {
         let ghost_inclusive_n: u64 = {
             let mut n: u64 = self.doc_count() as u64;
             for shard in &self.shards {
-                n += shard.read().ghost_docs;
+                let g = shard.read();
+                n += g.active.ghost_docs;
+                for fz in &g.frozen {
+                    n += fz.gen.read().ghost_docs;
+                }
             }
             n
         };
@@ -1550,16 +1993,21 @@ impl ShardedFtsMemtable {
 
         let mut all: Vec<MemtableHit> = Vec::new();
         for s in &self.shards {
-            all.extend(s.read().search_text_with_global_stats(
-                query,
-                fields,
-                shard_limit,
-                global_doc_count,
-                &global_field_doc_count,
-                &global_avg_field_len,
-                &term_global_df,
-                field_boosts,
-            ));
+            let g = s.read();
+            let frozen: Vec<parking_lot::RwLockReadGuard<'_, FtsMemtable>> =
+                g.frozen.iter().map(|fz| fz.gen.read()).collect();
+            for gen in std::iter::once(&g.active).chain(frozen.iter().map(|rd| &**rd)) {
+                all.extend(gen.search_text_with_global_stats(
+                    query,
+                    fields,
+                    shard_limit,
+                    global_doc_count,
+                    &global_field_doc_count,
+                    &global_avg_field_len,
+                    &term_global_df,
+                    field_boosts,
+                ));
+            }
         }
         // #191 — the cross-shard merge sorts by the FULL page key, not by score
         // alone.  Score alone leaves ties in shard-concatenation order, so
@@ -1579,8 +2027,11 @@ impl ShardedFtsMemtable {
     /// the `IndexStore::index()` single-doc path.
     pub fn insert(&self, doc_id: String, source: &Value, schema: &Schema, seq_no: u64) {
         let s = self.shard_for_dynamic(&doc_id);
+        // New writes always land in the ACTIVE generation — frozen ones are
+        // immutable snapshots held for an in-flight flush (#1015).
         self.shards[s]
             .write()
+            .active
             .insert(doc_id, source, schema, seq_no);
     }
 
@@ -1597,6 +2048,7 @@ impl ShardedFtsMemtable {
         let s = self.shard_for_dynamic(&doc_id);
         self.shards[s]
             .write()
+            .active
             .insert_pretokenized_with_seq(seq_no, doc_id, source, tokens);
     }
 
@@ -1605,62 +2057,8 @@ impl ShardedFtsMemtable {
         let s = self.shard_for_dynamic(&doc_id);
         self.shards[s]
             .write()
+            .active
             .insert_raw_bytes_with_seq(seq_no, doc_id, source_bytes);
-    }
-
-    /// Restore documents drained by a flush whose pre-publication finalizer
-    /// failed. The caller supplies the exact text fields captured during the
-    /// original drain, avoiding schema re-inference on this rare recovery
-    /// path. Newer writes must be filtered by the caller before restoration.
-    pub(crate) fn restore_failed_flush(
-        &self,
-        entries: Vec<(
-            u64,
-            String,
-            HashMap<String, xerj_fts::index::FieldValues>,
-            Arc<Value>,
-        )>,
-        version_map: &xerj_storage::version_map::VersionMap,
-    ) {
-        for (seq_no, doc_id, fields, source) in entries {
-            let shard_idx = self.shard_for_dynamic(&doc_id);
-            let mut shard = self.shards[shard_idx].write();
-            // This check deliberately happens while holding the owning shard
-            // lock. A concurrent PUT/DELETE publishes its version before it
-            // mutates this shard; checking outside the lock would allow a
-            // stale drained copy to overwrite the newer doc_id_index entry.
-            let Some(current) = version_map.get(&doc_id) else {
-                continue;
-            };
-            if current.seq_no != seq_no
-                || current.segment_id.as_ref() != xerj_storage::version_map::IN_MEMORY_SEGMENT_ID
-                || current.deleted
-            {
-                continue;
-            }
-            let analyzer = shard
-                .registry
-                .get_analyzer("default")
-                .or_else(|| shard.registry.get_analyzer("standard"))
-                .expect("standard analyzer always present");
-            // Each value of a multi-valued field is analyzed on its own and the
-            // token streams concatenated (#332). The memtable's postings carry
-            // term frequencies only — no positions — so no position gap is
-            // needed here; the gap lives in the segment writer, which is where
-            // positions exist.
-            let analyzed: Vec<(String, Vec<Token>)> = fields
-                .into_iter()
-                .map(|(field, values)| {
-                    let tokens = values
-                        .iter()
-                        .flat_map(|value| analyzer.analyze(value))
-                        .collect();
-                    (field, tokens)
-                })
-                .collect();
-            let size = (source.to_string().len() + doc_id.len()) * 3 + 64;
-            shard.insert_analyzed(seq_no, doc_id, source, &analyzed, size);
-        }
     }
 
     /// Iterate every document in every shard as `(doc_id, Value)`.
@@ -1670,7 +2068,10 @@ impl ShardedFtsMemtable {
         let mut out = Vec::new();
         for s in &self.shards {
             let g = s.read();
-            out.extend(g.all_docs());
+            out.extend(g.active.all_docs());
+            for fz in &g.frozen {
+                out.extend(fz.gen.read().all_docs());
+            }
         }
         out
     }
@@ -1681,8 +2082,13 @@ impl ShardedFtsMemtable {
     pub fn for_each_doc<F: FnMut(&str, &Value)>(&self, mut f: F) {
         for s in &self.shards {
             let g = s.read();
-            for (doc_id, val) in g.all_docs() {
+            for (doc_id, val) in g.active.all_docs() {
                 f(&doc_id, &val);
+            }
+            for fz in &g.frozen {
+                for (doc_id, val) in fz.gen.read().all_docs() {
+                    f(&doc_id, &val);
+                }
             }
         }
     }
@@ -1695,9 +2101,16 @@ impl ShardedFtsMemtable {
     pub fn for_each_numeric_value<F: FnMut(f64)>(&self, field: &str, mut f: F) {
         for s in &self.shards {
             let g = s.read();
-            if let Some(col) = g.doc_values_numeric_column(field) {
+            if let Some(col) = g.active.doc_values_numeric_column(field) {
                 for v in col.iter().flatten() {
                     f(*v);
+                }
+            }
+            for fz in &g.frozen {
+                if let Some(col) = fz.gen.read().doc_values_numeric_column(field) {
+                    for v in col.iter().flatten() {
+                        f(*v);
+                    }
                 }
             }
         }
@@ -1708,9 +2121,16 @@ impl ShardedFtsMemtable {
     pub fn for_each_keyword_value<F: FnMut(&str)>(&self, field: &str, mut f: F) {
         for s in &self.shards {
             let g = s.read();
-            if let Some(col) = g.doc_values_keyword_column(field) {
+            if let Some(col) = g.active.doc_values_keyword_column(field) {
                 for v in col.iter().flatten() {
                     f(v);
+                }
+            }
+            for fz in &g.frozen {
+                if let Some(col) = fz.gen.read().doc_values_keyword_column(field) {
+                    for v in col.iter().flatten() {
+                        f(v);
+                    }
                 }
             }
         }
@@ -1722,8 +2142,13 @@ impl ShardedFtsMemtable {
         let mut n: u64 = 0;
         for s in &self.shards {
             let g = s.read();
-            if let Some(col) = g.doc_values_numeric_column(field) {
+            if let Some(col) = g.active.doc_values_numeric_column(field) {
                 n += col.iter().filter(|v| v.is_some()).count() as u64;
+            }
+            for fz in &g.frozen {
+                if let Some(col) = fz.gen.read().doc_values_numeric_column(field) {
+                    n += col.iter().filter(|v| v.is_some()).count() as u64;
+                }
             }
         }
         n
@@ -1734,8 +2159,13 @@ impl ShardedFtsMemtable {
         let mut n: u64 = 0;
         for s in &self.shards {
             let g = s.read();
-            if let Some(col) = g.doc_values_keyword_column(field) {
+            if let Some(col) = g.active.doc_values_keyword_column(field) {
                 n += col.iter().filter(|v| v.is_some()).count() as u64;
+            }
+            for fz in &g.frozen {
+                if let Some(col) = fz.gen.read().doc_values_keyword_column(field) {
+                    n += col.iter().filter(|v| v.is_some()).count() as u64;
+                }
             }
         }
         n
@@ -1773,16 +2203,20 @@ impl ShardedFtsMemtable {
         let mut total: u64 = 0;
         for s in &self.shards {
             let g = s.read();
-            if g.doc_count() == 0 {
-                continue;
+            let frozen: Vec<parking_lot::RwLockReadGuard<'_, FtsMemtable>> =
+                g.frozen.iter().map(|fz| fz.gen.read()).collect();
+            for gen in std::iter::once(&g.active).chain(frozen.iter().map(|rd| &**rd)) {
+                if gen.doc_count() == 0 {
+                    continue;
+                }
+                let (hits, t) = gen.doc_values_bool_hits(preds, limit)?;
+                cands.extend(
+                    hits.into_iter()
+                        .map(|(id, pos)| (gen.seq_no_at(pos), id, pos)),
+                );
+                total += t;
+                Self::narrow_to_page(&mut cands, limit);
             }
-            let (hits, t) = g.doc_values_bool_hits(preds, limit)?;
-            cands.extend(
-                hits.into_iter()
-                    .map(|(id, pos)| (g.seq_no_at(pos), id, pos)),
-            );
-            total += t;
-            Self::narrow_to_page(&mut cands, limit);
         }
         Some((
             cands.into_iter().map(|(_, id, pos)| (id, pos)).collect(),
@@ -1829,34 +2263,47 @@ impl ShardedFtsMemtable {
             .par_iter()
             .map(|s| {
                 let g = s.read();
-                let n = g.doc_count();
-                if n == 0 {
-                    return Some((std::collections::HashMap::new(), 0u64));
-                }
-                if g.doc_values.array_fields.contains(field)
-                    || g.doc_values.numeric.contains_key("_doc_count")
-                    || g.doc_values.keyword.contains_key("_doc_count")
-                {
-                    return None;
-                }
-                Some(g.doc_values.with_keyword_field(field, |c| {
-                    match c.keyword_counts.get(field) {
-                        None => {
-                            // No doc in this shard carries the field as a scalar.
-                            (std::collections::HashMap::new(), n as u64)
-                        }
-                        Some(m) => {
-                            let mut counts: std::collections::HashMap<String, u64> =
-                                std::collections::HashMap::with_capacity(m.len());
-                            let mut present: u64 = 0;
-                            for (k, &cnt) in m.iter() {
-                                counts.insert(k.clone(), cnt as u64);
-                                present += cnt as u64;
-                            }
-                            (counts, n as u64 - present)
-                        }
+                let frozen: Vec<parking_lot::RwLockReadGuard<'_, FtsMemtable>> =
+                    g.frozen.iter().map(|fz| fz.gen.read()).collect();
+                let mut counts: std::collections::HashMap<String, u64> =
+                    std::collections::HashMap::new();
+                let mut missing: u64 = 0;
+                for gen in std::iter::once(&g.active).chain(frozen.iter().map(|rd| &**rd)) {
+                    let gn = gen.doc_count();
+                    if gn == 0 {
+                        continue;
                     }
-                }))
+                    if gen.doc_values.array_fields.contains(field)
+                        || gen.doc_values.numeric.contains_key("_doc_count")
+                        || gen.doc_values.keyword.contains_key("_doc_count")
+                    {
+                        return None;
+                    }
+                    let gcounts = gen.doc_values.with_keyword_field(field, |c| {
+                        match c.keyword_counts.get(field) {
+                            None => {
+                                // No doc in this generation carries the field
+                                // as a scalar — all of them are "missing".
+                                (std::collections::HashMap::new(), gn as u64)
+                            }
+                            Some(m) => {
+                                let mut gc: std::collections::HashMap<String, u64> =
+                                    std::collections::HashMap::with_capacity(m.len());
+                                let mut present: u64 = 0;
+                                for (k, &cnt) in m.iter() {
+                                    gc.insert(k.clone(), cnt as u64);
+                                    present += cnt as u64;
+                                }
+                                (gc, gn as u64 - present)
+                            }
+                        }
+                    });
+                    missing += gcounts.1;
+                    for (term, cnt) in gcounts.0 {
+                        *counts.entry(term).or_insert(0) += cnt;
+                    }
+                }
+                Some((counts, missing))
             })
             .collect();
         let per_shard = per_shard?;
@@ -1908,8 +2355,14 @@ impl ShardedFtsMemtable {
         }
         self.shards.iter().any(|s| {
             let g = s.read();
-            g.doc_values.array_fields.contains(field)
-                || g.doc_values.keyword_has_whitespace.contains(field)
+            let frozen: Vec<parking_lot::RwLockReadGuard<'_, FtsMemtable>> =
+                g.frozen.iter().map(|fz| fz.gen.read()).collect();
+            std::iter::once(&g.active)
+                .chain(frozen.iter().map(|rd| &**rd))
+                .any(|gen| {
+                    gen.doc_values.array_fields.contains(field)
+                        || gen.doc_values.keyword_has_whitespace.contains(field)
+                })
         })
     }
 
@@ -1948,14 +2401,18 @@ impl ShardedFtsMemtable {
             // per shard.  Mirrors `doc_values_bool_query`.  #191 — the bound
             // used to be the REMAINING global window, which handed the whole
             // page to shard 0.
-            if let Some((hits, t)) = g.doc_values_term_query(field, value, limit) {
-                any_hit = true;
-                cands.extend(
-                    hits.into_iter()
-                        .map(|(id, pos)| (g.seq_no_at(pos), id, pos)),
-                );
-                total += t;
-                Self::narrow_to_page(&mut cands, limit);
+            let frozen: Vec<parking_lot::RwLockReadGuard<'_, FtsMemtable>> =
+                g.frozen.iter().map(|fz| fz.gen.read()).collect();
+            for gen in std::iter::once(&g.active).chain(frozen.iter().map(|rd| &**rd)) {
+                if let Some((hits, t)) = gen.doc_values_term_query(field, value, limit) {
+                    any_hit = true;
+                    cands.extend(
+                        hits.into_iter()
+                            .map(|(id, pos)| (gen.seq_no_at(pos), id, pos)),
+                    );
+                    total += t;
+                    Self::narrow_to_page(&mut cands, limit);
+                }
             }
         }
         if any_hit {
@@ -1986,14 +2443,18 @@ impl ShardedFtsMemtable {
         let mut any_hit = false;
         for s in &self.shards {
             let g = s.read();
-            if let Some((hits, t)) = g.doc_values_terms_query(field, values, limit) {
-                any_hit = true;
-                cands.extend(
-                    hits.into_iter()
-                        .map(|(id, pos)| (g.seq_no_at(pos), id, pos)),
-                );
-                total += t;
-                Self::narrow_to_page(&mut cands, limit);
+            let frozen: Vec<parking_lot::RwLockReadGuard<'_, FtsMemtable>> =
+                g.frozen.iter().map(|fz| fz.gen.read()).collect();
+            for gen in std::iter::once(&g.active).chain(frozen.iter().map(|rd| &**rd)) {
+                if let Some((hits, t)) = gen.doc_values_terms_query(field, values, limit) {
+                    any_hit = true;
+                    cands.extend(
+                        hits.into_iter()
+                            .map(|(id, pos)| (gen.seq_no_at(pos), id, pos)),
+                    );
+                    total += t;
+                    Self::narrow_to_page(&mut cands, limit);
+                }
             }
         }
         if any_hit {
@@ -2036,15 +2497,19 @@ impl ShardedFtsMemtable {
         let mut samples: HashMap<String, Vec<String>> = HashMap::new();
         for s in &self.shards {
             let g = s.read();
-            for (field, col) in g.doc_values.keyword.iter() {
-                let acc = samples.entry(field.clone()).or_default();
-                if acc.len() >= ENCODING_SAMPLE_CAP {
-                    continue;
-                }
-                for v in col.iter().flatten() {
-                    acc.push(v.clone());
+            let frozen: Vec<parking_lot::RwLockReadGuard<'_, FtsMemtable>> =
+                g.frozen.iter().map(|fz| fz.gen.read()).collect();
+            for gen in std::iter::once(&g.active).chain(frozen.iter().map(|rd| &**rd)) {
+                for (field, col) in gen.doc_values.keyword.iter() {
+                    let acc = samples.entry(field.clone()).or_default();
                     if acc.len() >= ENCODING_SAMPLE_CAP {
-                        break;
+                        continue;
+                    }
+                    for v in col.iter().flatten() {
+                        acc.push(v.clone());
+                        if acc.len() >= ENCODING_SAMPLE_CAP {
+                            break;
+                        }
                     }
                 }
             }
@@ -2078,14 +2543,19 @@ impl ShardedFtsMemtable {
         let mut any_hit = false;
         for s in &self.shards {
             let g = s.read();
-            if let Some((hits, t)) = g.doc_values_range_query(field, gte, gt, lte, lt, limit) {
-                any_hit = true;
-                cands.extend(
-                    hits.into_iter()
-                        .map(|(id, pos)| (g.seq_no_at(pos), id, pos)),
-                );
-                total += t;
-                Self::narrow_to_page(&mut cands, limit);
+            let frozen: Vec<parking_lot::RwLockReadGuard<'_, FtsMemtable>> =
+                g.frozen.iter().map(|fz| fz.gen.read()).collect();
+            for gen in std::iter::once(&g.active).chain(frozen.iter().map(|rd| &**rd)) {
+                if let Some((hits, t)) = gen.doc_values_range_query(field, gte, gt, lte, lt, limit)
+                {
+                    any_hit = true;
+                    cands.extend(
+                        hits.into_iter()
+                            .map(|(id, pos)| (gen.seq_no_at(pos), id, pos)),
+                    );
+                    total += t;
+                    Self::narrow_to_page(&mut cands, limit);
+                }
             }
         }
         if any_hit {
@@ -2098,173 +2568,168 @@ impl ShardedFtsMemtable {
         }
     }
 
-    /// Drain every shard and return raw `(seq_no, doc_id, source_arc)`
-    /// triples in WAL-sequence order.  Used by the flush path to
-    /// construct a `DrainedMemtable` for the storage finalizer.
+    /// Freeze ONE shard for flush (#1015): claim the flushable generations
+    /// (the active one, plus any unclaimed frozen leftovers of a FAILED
+    /// flush), install a fresh active generation for new writes, and return
+    /// the drain tuples `(seq_no, doc_id, source_arc, raw_bytes)` in
+    /// WAL-sequence order alongside the [`FrozenClaim`].
+    ///
+    /// Unlike the pre-#1015 drain, the claimed docs REMAIN READER-VISIBLE
+    /// (the generations move to the shard's frozen list, they do not leave
+    /// it), so the flush's segment build runs with NO collection-publication
+    /// guard — only the publish (snapshot swap + generation retire) needs
+    /// one, and it is millisecond-scale.  The drain tuples are a stable
+    /// Arc-sharing snapshot for the segment writer; a doc deleted from a
+    /// frozen generation mid-build keeps today's mid-flush-delete semantics
+    /// (guarded version-map repoint at publish).
+    ///
+    /// The byte aggregate is NOT adjusted here: the frozen generations keep
+    /// mirroring into it exactly as they did as actives, because readers
+    /// still see their docs.  Bytes leave the aggregate at [`FrozenClaim::retire`],
+    /// which is also where the ghost collection stats are purged (flush ==
+    /// merge, at the same point the docs leave the reader view).
     ///
     /// M5.11 — entries with `source = Value::Null` but non-empty
     /// `source_bytes` are lazily parsed here on the flush thread,
     /// keeping the ingest hot path free of `serde_json::from_str`.
-    pub fn drain_for_flush(&self) -> Vec<(u64, String, Arc<Value>, Arc<[u8]>)> {
-        let mut all: Vec<(u64, String, Arc<Value>, Arc<[u8]>)> = Vec::new();
-        for shard_idx in 0..self.shards.len() {
-            let mut shard_entries = self.drain_shard(shard_idx);
-            all.append(&mut shard_entries);
-        }
-        all.sort_by_key(|(seq, _, _, _)| *seq);
-        all
-    }
-
-    /// Drain ONE shard and return `(seq_no, doc_id, source_arc, raw_bytes)`
-    /// tuples in WAL-sequence order.  Raw bytes are passed through to the
-    /// segment writer so it can skip re-serializing the Value.
-    pub fn drain_shard(&self, shard_idx: usize) -> Vec<(u64, String, Arc<Value>, Arc<[u8]>)> {
-        self.drain_shard_inner(shard_idx, false, None).0
-    }
-
-    /// Drain without parsing raw-bytes entries. Returns Value::Null for
-    /// entries that came from insert_raw_bytes_with_seq. Use when neither
-    /// FTS nor DV sidecars will be built (turbo/CLI ingest path).
-    pub fn drain_shard_raw(&self, shard_idx: usize) -> Vec<(u64, String, Arc<Value>, Arc<[u8]>)> {
-        self.drain_shard_inner(shard_idx, true, None).0
-    }
-
-    pub fn drain_shard_accounted(
-        &self,
+    pub(crate) fn freeze_shard_accounted(
+        self: &Arc<Self>,
         shard_idx: usize,
         skip_parse: bool,
-    ) -> (
-        Vec<(u64, String, Arc<Value>, Arc<[u8]>)>,
-        crate::ingest_memory::Retained<'static>,
-    ) {
-        let ledger = crate::ingest_memory::active_ledger();
-        let (entries, guard) = self.drain_shard_inner(shard_idx, skip_parse, ledger);
-        (
-            entries,
-            guard.unwrap_or_else(crate::ingest_memory::Retained::disabled),
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn drain_shard_accounted_for_test(
-        &self,
-        shard_idx: usize,
-        skip_parse: bool,
-        ledger: &'static crate::ingest_memory::Ledger,
-    ) -> (
-        Vec<(u64, String, Arc<Value>, Arc<[u8]>)>,
-        crate::ingest_memory::Retained<'static>,
-    ) {
-        let (entries, guard) = self.drain_shard_inner(shard_idx, skip_parse, Some(ledger));
-        (entries, guard.expect("test ledger always creates guard"))
-    }
-
-    fn drain_shard_inner<'a>(
-        &self,
-        shard_idx: usize,
-        skip_parse: bool,
-        ledger: Option<&'a crate::ingest_memory::Ledger>,
-    ) -> (
-        Vec<(u64, String, Arc<Value>, Arc<[u8]>)>,
-        Option<crate::ingest_memory::Retained<'a>>,
-    ) {
-        // Swap the shard's maps out under the write lock (pointer moves,
-        // O(1)) and deallocate them AFTER the lock is released, on a
-        // detached thread.  Pre-fix the reset assignments freed the
-        // shard's entire inverted index + doc-values (millions of String
-        // entries, ~95 ms at ~30 k docs/shard) while holding the shard
-        // write lock — and because the bulk path fans every request
-        // across ALL shards and joins on the slowest one, each flush
-        // drain stalled every in-flight bulk request.  32 flushes per
-        // 1 M docs × ~95 ms = a fixed ~3 s Amdahl serial term that
-        // capped 8-client ingest at ~3.1× single-client throughput.
-        let (drained, dead, drain_guard) = {
+    ) -> (Vec<(u64, String, Arc<Value>, Arc<[u8]>)>, FrozenClaim) {
+        // Claim phase — one hold of the shard write lock.  Pointer moves
+        // only (O(1) per generation): the old drain's argument for moving
+        // the heavy deallocation off the lock applies unchanged, and here
+        // there is no deallocation at all yet — the maps stay live for
+        // readers until retire.
+        let claimed: Vec<Arc<parking_lot::RwLock<FtsMemtable>>> = {
             let mut g = self.shards[shard_idx].write();
-            let removed_bytes = g.total_bytes;
-            let d: Vec<MemEntry> = std::mem::take(&mut g.docs);
-            let dead_index = std::mem::take(&mut g.index);
-            let dead_dv = std::mem::take(&mut g.doc_values);
-            let dead_fl = std::mem::take(&mut g.field_lengths);
-            let dead_afl = std::mem::take(&mut g.avg_field_lengths);
-            let dead_dii = std::mem::take(&mut g.doc_id_index);
-            g.total_bytes = 0;
-            g.aggregate_bytes
-                .fetch_sub(removed_bytes, Ordering::Relaxed);
-            // Created while the authoritative shard lock is still held so
-            // the drained lifetime includes detached-map handoff and parsing.
-            // Periodic active-vs-drained snapshots remain best-effort because
-            // the two authorities are sampled separately.
-            let drain_guard = ledger.map(|ledger| {
-                crate::ingest_memory::Retained::for_ledger(
-                    ledger,
-                    crate::ingest_memory::Category::FlushDrained,
-                    removed_bytes,
-                )
-            });
-            // Flush == merge: purge delete-aware ghost collection stats.
-            g.ghost_docs = 0;
-            let dead_gfl = std::mem::take(&mut g.ghost_field_len);
-            let dead_gdf = std::mem::take(&mut g.ghost_doc_freq);
-            (
-                d,
-                (
-                    dead_index, dead_dv, dead_fl, dead_afl, dead_dii, dead_gfl, dead_gdf,
-                ),
-                drain_guard,
-            )
+            let mut claimed = Vec::new();
+            // Recycle failed-flush leftovers first: their docs ride THIS
+            // flush (the generation twin of the old `restore_failed_flush`,
+            // which re-inserted drained docs on failure).
+            for fg in &mut g.frozen {
+                if !fg.claimed {
+                    fg.claimed = true;
+                    claimed.push(Arc::clone(&fg.gen));
+                }
+            }
+            if g.active.doc_count() > 0 {
+                let fresh = FtsMemtable::with_registry_and_aggregate(
+                    Arc::clone(&g.registry),
+                    Arc::clone(&g.aggregate),
+                );
+                let frozen_gen = Arc::new(parking_lot::RwLock::new(std::mem::replace(
+                    &mut g.active,
+                    fresh,
+                )));
+                g.frozen.push(FrozenGen {
+                    gen: Arc::clone(&frozen_gen),
+                    claimed: true,
+                });
+                claimed.push(frozen_gen);
+            }
+            claimed
         };
-        // Free the dead maps off the flush critical path too — the
-        // drain result is needed synchronously by the segment writer,
-        // but nobody waits for these deallocations.  If thread spawn
-        // fails (resource exhaustion) the closure — and the bundle it
-        // owns — is dropped right here, inline: same correctness, we
-        // only lose the async-free optimisation.
-        let _ = std::thread::Builder::new()
-            .name("xerj-drain-free".to_string())
-            .spawn(move || drop(dead));
-        let mut out: Vec<(u64, String, Arc<Value>, Arc<[u8]>)> = drained
-            .into_iter()
-            .map(|e| {
+        // Snapshot phase — read each claimed generation under its own read
+        // lock and build the drain tuples.  The generations stay mutable
+        // (deletes land in them during the build), which is why this is a
+        // snapshot by VALUE for the source Arcs, not a borrow of the maps.
+        let mut out: Vec<(u64, String, Arc<Value>, Arc<[u8]>)> = Vec::new();
+        for gen in &claimed {
+            let m = gen.read();
+            for e in &m.docs {
                 let raw = e.source_bytes.clone();
                 let source = if skip_parse {
-                    e.source
+                    Arc::clone(&e.source)
                 } else if e.source.is_null() && !raw.is_empty() {
                     match serde_json::from_slice::<Value>(&raw) {
                         Ok(v) => Arc::new(v),
                         Err(_) => Arc::new(Value::Null),
                     }
                 } else {
-                    e.source
+                    Arc::clone(&e.source)
                 };
-                (e.seq_no, e.doc_id, source, raw)
-            })
-            .collect();
+                out.push((e.seq_no, e.doc_id.clone(), source, raw));
+            }
+        }
         out.sort_by_key(|(seq, _, _, _)| *seq);
-        (out, drain_guard)
+        (
+            out,
+            FrozenClaim {
+                memtable: Arc::clone(self),
+                shard_idx,
+                gens: claimed,
+                finished: false,
+                ledger: crate::ingest_memory::active_ledger(),
+            },
+        )
+    }
+
+    /// Test override for the retire-time ledger (see `FrozenClaim::ledger`)
+    /// — the engine's flush-publisher test hook needs the freed bytes
+    /// attributed to a `Box::leak`ed ledger it can assert against.
+    #[cfg(test)]
+    pub(crate) fn freeze_shard_accounted_for_test(
+        self: &Arc<Self>,
+        shard_idx: usize,
+        skip_parse: bool,
+        ledger: &'static crate::ingest_memory::Ledger,
+    ) -> (Vec<(u64, String, Arc<Value>, Arc<[u8]>)>, FrozenClaim) {
+        let (rows, mut claim) = self.freeze_shard_accounted(shard_idx, skip_parse);
+        claim.ledger = Some(ledger);
+        (rows, claim)
     }
 
     /// Check if a shard's first entry was inserted via the raw-bytes
     /// path (`insert_raw_bytes_with_seq`).  Used by `do_flush_shard`
-    /// to decide whether to build FTS sidecars at flush time.
+    /// to decide whether to build FTS sidecars at flush time.  A recycled
+    /// frozen generation answers for itself too — the flush builds one
+    /// segment for every claimed generation.
     pub fn peek_shard_has_raw_bytes(&self, shard_idx: usize) -> bool {
         let g = self.shards[shard_idx].read();
-        g.docs
+        let active = g
+            .active
+            .docs
             .first()
             .map(|e| !e.source_bytes.is_empty())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if active {
+            return true;
+        }
+        g.frozen.iter().any(|fg| {
+            fg.gen
+                .read()
+                .docs
+                .first()
+                .map(|e| !e.source_bytes.is_empty())
+                .unwrap_or(false)
+        })
     }
 
     /// Return `(shard_idx, doc_count, size_bytes)` triples so the
     /// flush scheduler can pick which shard to drain next.  The
     /// tuple is sampled under each shard's own lock so it's
-    /// point-in-time accurate.
+    /// point-in-time accurate.  Claimed frozen generations (a flush
+    /// already in flight) do NOT count toward the load — their docs
+    /// are being flushed; unclaimed ones (a failed flush's leftovers)
+    /// do.
     pub fn shard_loads(&self) -> Vec<(usize, usize, usize)> {
         self.shards
             .iter()
             .enumerate()
             .map(|(i, s)| {
                 let g = s.read();
-                (i, g.doc_count(), g.size_bytes())
+                let mut docs = g.active.doc_count();
+                let mut bytes = g.active.size_bytes();
+                for fg in &g.frozen {
+                    if !fg.claimed {
+                        let m = fg.gen.read();
+                        docs += m.doc_count();
+                        bytes += m.size_bytes();
+                    }
+                }
+                (i, docs, bytes)
             })
             .collect()
     }
@@ -2272,10 +2737,113 @@ impl ShardedFtsMemtable {
     /// Return `(doc_count, size_bytes)` for a single shard.  Used by
     /// the sync ingest path to decide whether to raise the flush
     /// signal bit for the shard it just wrote to — cheaper than
-    /// iterating all shards via `shard_loads()`.
+    /// iterating all shards via `shard_loads()`.  Frozen generations
+    /// count like `shard_loads` says: unclaimed yes, claimed no.
     pub fn shard_load(&self, shard_idx: usize) -> (usize, usize) {
         let g = self.shards[shard_idx].read();
-        (g.doc_count(), g.size_bytes())
+        let mut docs = g.active.doc_count();
+        let mut bytes = g.active.size_bytes();
+        for fg in &g.frozen {
+            if !fg.claimed {
+                let m = fg.gen.read();
+                docs += m.doc_count();
+                bytes += m.size_bytes();
+            }
+        }
+        (docs, bytes)
+    }
+}
+
+impl FrozenClaim {
+    /// Publish-side retire (#1015): remove the claimed generations from the
+    /// shard's reader-visible list.  MUST run inside the collection
+    /// publication bracket, immediately after the segment snapshot swap —
+    /// the bracket is what makes "the segment is in the snapshot" and "the
+    /// frozen docs left the memtable" atomic for a capturing reader (the
+    /// #1014 evenness check rejects a capture that straddles the two).
+    ///
+    /// Bytes leave the shared aggregate HERE (the docs were reader-visible
+    /// until this point), and the ghost collection stats are purged by the
+    /// same drop — flush == merge, at the moment the docs leave the view.
+    /// The heavy deallocation runs on a detached thread, off the publish
+    /// path, exactly like the old drain's async-free.
+    ///
+    /// Returns the detached-free guard so the caller can hold it for the
+    /// remaining lifetime of its flush task (the ledger keeps the freeing
+    /// bytes attributed until then).
+    pub(crate) fn retire(mut self) -> Option<crate::ingest_memory::Retained<'static>> {
+        self.finished = true;
+        let gens = std::mem::take(&mut self.gens);
+        let mut dead: Vec<Arc<parking_lot::RwLock<FtsMemtable>>> = Vec::new();
+        let mut removed_bytes: usize = 0;
+        {
+            let mut g = self.memtable.shards[self.shard_idx].write();
+            g.frozen.retain(|fg| {
+                if gens.iter().any(|c| Arc::ptr_eq(c, &fg.gen)) {
+                    removed_bytes += fg.gen.read().total_bytes;
+                    dead.push(Arc::clone(&fg.gen));
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        if removed_bytes > 0 {
+            self.memtable
+                .aggregate_bytes
+                .fetch_sub(removed_bytes, Ordering::Relaxed);
+        }
+        // Mirror the pre-#1015 drain accounting: the freeing bytes stay
+        // attributed to the flush pipeline until the flush task finishes.
+        let guard = self.ledger.map(|ledger| {
+            crate::ingest_memory::Retained::for_ledger(
+                ledger,
+                crate::ingest_memory::Category::FlushDrained,
+                removed_bytes,
+            )
+        });
+        // Free the dead generations off the publish critical path.  If
+        // thread spawn fails the Arcs drop inline: same correctness, we
+        // only lose the async-free optimisation.
+        let _ = std::thread::Builder::new()
+            .name("xerj-drain-free".to_string())
+            .spawn(move || drop(dead));
+        guard
+    }
+
+    /// Failure-side release (#1015): keep the claimed generations
+    /// reader-visible and unclaim them, so the shard's next flush drains
+    /// them again.  This is the generation twin of the old
+    /// `restore_failed_flush` — nothing needs re-inserting because the
+    /// docs never left the reader view, and the version-map guard that
+    /// restore enforced (never resurrect an overwritten doc) is not
+    /// needed for the same reason.
+    pub(crate) fn release(mut self) {
+        self.finished = true;
+        let gens = std::mem::take(&mut self.gens);
+        let mut g = self.memtable.shards[self.shard_idx].write();
+        for fg in &mut g.frozen {
+            if gens.iter().any(|c| Arc::ptr_eq(c, &fg.gen)) {
+                fg.claimed = false;
+            }
+        }
+    }
+}
+
+impl Drop for FrozenClaim {
+    /// A claim dropped without an explicit retire/release releases — the
+    /// safe failure mode keeps the docs reader-visible and flushable.
+    fn drop(&mut self) {
+        if !self.finished {
+            self.finished = true;
+            let gens = std::mem::take(&mut self.gens);
+            let mut g = self.memtable.shards[self.shard_idx].write();
+            for fg in &mut g.frozen {
+                if gens.iter().any(|c| Arc::ptr_eq(c, &fg.gen)) {
+                    fg.claimed = false;
+                }
+            }
+        }
     }
 }
 
@@ -5814,16 +6382,28 @@ mod aggregate_bytes_tests {
 
     /// The invariant `#872` rests on: the shared aggregate equals a full
     /// per-shard recount after every mutator that touches `total_bytes`.
+    /// #1015: the recount must fold the FROZEN generations in — freeze
+    /// moves docs behind the reader view without touching their charge,
+    /// so an active-only sum diverges the moment a flush claims a shard.
     fn recount(mem: &ShardedFtsMemtable) -> usize {
         (0..mem.shard_count())
-            .map(|i| mem.with_shard(i, |m| m.size_bytes()))
+            .map(|i| {
+                let g = mem.shards[i].read();
+                g.active.size_bytes()
+                    + g.frozen
+                        .iter()
+                        .map(|fg| fg.gen.read().size_bytes())
+                        .sum::<usize>()
+            })
             .sum()
     }
 
     #[test]
     fn aggregate_bytes_matches_full_recount_after_every_mutator() {
         let registry = Arc::new(AnalyzerRegistry::default());
-        let mem = ShardedFtsMemtable::with_registry_and_shards(registry, 4);
+        // Arc: `freeze_shard_accounted` hands the claim a handle to the
+        // whole memtable so `retire`/`release` can find the shard again.
+        let mem = Arc::new(ShardedFtsMemtable::with_registry_and_shards(registry, 4));
         let schema = Schema::default();
         let check = |step: &str| {
             assert_eq!(
@@ -5873,14 +6453,24 @@ mod aggregate_bytes_tests {
         mem.remove("no-such-doc");
         check("remove of a missing doc");
 
-        let _ = mem.drain_shard(0);
-        check("drain_shard(0)");
-        let _ = mem.drain_shard_raw(1);
-        check("drain_shard_raw(1)");
-        let _ = mem.drain_shard_accounted(2, false);
-        check("drain_shard_accounted(2)");
-        let _ = mem.drain_for_flush();
-        check("drain_for_flush");
+        // #1015 — the flush path freezes a generation (bytes stay charged:
+        // the docs remain reader-visible through the build) and retires it
+        // at publish (bytes leave the aggregate).  A released claim (failed
+        // flush) must keep its bytes charged — release moves nothing.
+        let (_, claim) = mem.freeze_shard_accounted(0, false);
+        check("freeze_shard_accounted(0)");
+        let frozen_bytes = mem.size_bytes();
+        let _retained = claim.retire();
+        assert!(
+            mem.size_bytes() <= frozen_bytes,
+            "retire must not grow the aggregate"
+        );
+        check("retire");
+
+        let (_, claim) = mem.freeze_shard_accounted(1, false);
+        check("freeze_shard_accounted(1)");
+        claim.release();
+        check("release (failed flush keeps its bytes charged)");
 
         (0..4u64).for_each(|i| {
             mem.insert(

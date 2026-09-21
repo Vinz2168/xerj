@@ -564,7 +564,7 @@ mod collection_publication_fail_closed_tests {
         );
     }
 
-    async fn assert_flush_publication_blocks_reader_then_finishes(inject_error: bool) {
+    async fn assert_flush_freeze_keeps_readers_live_then_finishes(inject_error: bool) {
         let dir = tempfile::tempdir().unwrap();
         let mut config = Config::default();
         config.server.data_dir = dir.path().to_string_lossy().into_owned();
@@ -607,7 +607,21 @@ mod collection_publication_fail_closed_tests {
             FLUSH_PUBLISHER_TEST_HOOK.scope(hook, async move { flush_idx.flush().await }),
         );
         await_publication_barrier(entered_rx, "entered").await;
-        assert_eq!(idx.memtable.doc_count(), 0, "flush did not drain first");
+        // #1015: the drain is a FREEZE.  The drained docs stay resident in
+        // the shard's frozen generations — reader-visible and byte-charged —
+        // for the whole segment build; they leave only at `retire()` inside
+        // the millisecond-scale publish bracket.  (Pre-#1015 the drain
+        // removed them from the memtable here and readers waited out the
+        // whole build behind the publication guard.)
+        assert_eq!(
+            idx.memtable.doc_count(),
+            1,
+            "freeze must keep the drained docs resident until retire (#1015)"
+        );
+        assert!(
+            idx.memtable.contains("one"),
+            "frozen doc left the reader view at freeze"
+        );
 
         let attempts_before = idx.collection_publication.reader_admission_attempts();
         let read_idx = Arc::clone(&idx);
@@ -619,22 +633,37 @@ mod collection_publication_fail_closed_tests {
         })
         .await
         .expect("GET did not reach collection publication admission");
-        assert!(!read.is_finished(), "GET crossed active flush publication");
+        // The build holds NO publication bracket, so the GET must run to
+        // completion against the frozen generation instead of waiting —
+        // this is the #1015 acceptance property at unit scale.
+        let read_during_build = tokio::time::timeout(std::time::Duration::from_secs(1), read)
+            .await
+            .expect("GET stayed blocked across the flush build")
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            read_during_build["body"], "alpha",
+            "GET during the build must serve the frozen doc"
+        );
         resume_tx.send(()).unwrap();
 
         let result = flush.await.unwrap();
         assert_eq!(result.is_err(), inject_error);
+        // A fresh read AFTER the flush finished: the commit path serves the
+        // published segment, the failure path serves the still-frozen
+        // generation whose claim was released.
+        let read_after = idx.get_document("one").await.unwrap().unwrap();
         assert_eq!(
-            read.await.unwrap().unwrap().unwrap()["body"],
-            "alpha",
-            "reader did not observe the completed commit or restored rollback"
+            read_after["body"], "alpha",
+            "reader did not observe the completed commit or released rollback"
         );
         assert!(!idx.collection_publication.state().2);
         if inject_error {
             assert_eq!(
                 idx.memtable.doc_count(),
                 1,
-                "rollback did not restore drain"
+                "failed build must release the claim, not drop the docs"
             );
         } else {
             assert_eq!(idx.memtable.doc_count(), 0);
@@ -642,13 +671,13 @@ mod collection_publication_fail_closed_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn flush_drain_to_detached_publication_blocks_readers_until_commit() {
-        assert_flush_publication_blocks_reader_then_finishes(false).await;
+    async fn flush_freeze_keeps_readers_live_through_the_build_until_publish() {
+        assert_flush_freeze_keeps_readers_live_then_finishes(false).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn flush_prepublication_failure_rolls_back_without_poison() {
-        assert_flush_publication_blocks_reader_then_finishes(true).await;
+        assert_flush_freeze_keeps_readers_live_then_finishes(true).await;
     }
 
     #[tokio::test]
@@ -1270,10 +1299,15 @@ mod flush_publication_recovery_tests {
         })
         .await
         .expect("search did not reach collection publication admission");
-        assert!(
-            !read.is_finished(),
-            "search crossed a detached but still-active flush publication"
-        );
+        // #1015: the detached finalizer is parked in the BUILD phase, which
+        // holds no publication bracket — the search must run to completion
+        // against the frozen generation instead of waiting out the flush.
+        let early = tokio::time::timeout(std::time::Duration::from_secs(1), read)
+            .await
+            .expect("search stayed blocked across the detached flush build")
+            .unwrap()
+            .unwrap();
+        assert_eq!(early.hits[0].id, "winner");
         release_tx.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while idx.store.snapshot().segments.is_empty()
@@ -1284,8 +1318,8 @@ mod flush_publication_recovery_tests {
         })
         .await
         .expect("detached finalizer must publish after caller cancellation");
-        let result = read.await.unwrap().unwrap();
-        assert_eq!(result.hits[0].id, "winner");
+        let after_publish = idx.search(&request).await.unwrap();
+        assert_eq!(after_publish.hits[0].id, "winner");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1421,9 +1455,18 @@ mod flush_publication_recovery_tests {
                     FLUSH_PUBLISHER_TEST_HOOK.scope(hook, async move { idx.flush().await }),
                 )
             };
-            while idx.memtable.doc_count() != 0 {
-                tokio::task::yield_now().await;
-            }
+            // #1015: the drain is a freeze, so `doc_count()` stays 1 while
+            // the claimed generation is reader-visible — the drain proof is
+            // the frozen generation appearing.  Bounded: the old unbounded
+            // spin on `doc_count() == 0` livelocked under this contract
+            // (one core at 100 ticks/s, suite hang).
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while idx.memtable.frozen_generation_count() == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("flush never froze the drained shard");
             queued_rx.await.unwrap();
             // The sole blocking thread is occupied, so the finalizer closure
             // (and its worker-owned guard/rollback payload) is queued.
@@ -1431,13 +1474,22 @@ mod flush_publication_recovery_tests {
             assert!(flush.await.unwrap_err().is_cancelled());
             release_tx.send(()).unwrap();
             blocker.await.unwrap();
+            // The queued finalizer's build fails (callback returns true), so
+            // it RELEASES its claim — the docs never left the reader view and
+            // there is no memtable "restore" to observe (doc_count stays 1
+            // either way).  The claim flag is the only release witness; wait
+            // for it so the recycle flush below cannot race the failure path.
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                while idx.memtable.doc_count() != 1 {
+                while idx.memtable.claimed_frozen_generation_count() != 0 {
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .expect("queued finalizer must run and restore after the blocking thread is released");
+            .expect("queued finalizer never released its claim");
+            // The proof that the finalizer really ran after the blocking
+            // thread was released is the NEXT flush: it can only recycle the
+            // frozen generation into a published segment (doc_count -> 0) if
+            // the claim was released.
             let request = xerj_query::parse_request(&json!({
                 "query": {"match": {"body": "alpha"}}, "size": 10
             }))
@@ -1445,6 +1497,20 @@ mod flush_publication_recovery_tests {
             let result = idx.search(&request).await.unwrap();
             assert_eq!(result.hits[0].id, "winner");
             assert_eq!(idx.memtable.doc_count(), 1);
+            // Hook-free direct flush (the scope rode the aborted task only).
+            idx.flush().await.unwrap();
+            assert_eq!(
+                idx.memtable.doc_count(),
+                0,
+                "later flush must recycle the released frozen generation"
+            );
+            assert_eq!(
+                idx.memtable.frozen_generation_count(),
+                0,
+                "recycled generation must retire, not stack"
+            );
+            let result = idx.search(&request).await.unwrap();
+            assert_eq!(result.hits[0].id, "winner");
             assert_eq!(
                 spawn_signals.load(Ordering::Acquire),
                 1,
@@ -1489,7 +1555,7 @@ mod flush_publication_recovery_tests {
         assert_eq!(
             idx.memtable.doc_count(),
             1,
-            "a failed publication must restore the drained live document"
+            "a failed build must leave the drained docs resident (claim released, not retired)"
         );
 
         let request = xerj_query::parse_request(&json!({
@@ -30336,9 +30402,15 @@ async fn do_flush_shard(
     } else {
         crate::flush_finalize_gate().acquire().await.ok()
     };
-    let mut collection_publication_guard = collection_publication
-        .begin()
-        .map_err(|_| collection_publication_interrupted())?;
+    // #1015 — NO collection-publication guard here.  The drain below is a
+    // FREEZE, not a removal: the claimed docs stay reader-visible in the
+    // shard's frozen generations for the whole segment build, so there is
+    // no reader-visible state change to guard against yet.  The bracket is
+    // opened (in the finalize worker) only around the publish phase —
+    // version-map repoint + snapshot swap + generation retire — which is
+    // millisecond-scale.  Pre-#1015 the guard spanned drain → build →
+    // publish (~600 ms/flush), and every capture-boundary retry under a
+    // flush storm paid that window.
     // V4 M4.5: no outer flush_lock — concurrent flushes are allowed.  The
     // memtable write lock below is the only atomicity point we need for
     // correctness (each concurrent flush drains a disjoint set of docs
@@ -30389,7 +30461,7 @@ async fn do_flush_shard(
             std::sync::Arc<serde_json::Value>,
         )>,
         xerj_storage::index_store::DrainedMemtable,
-        crate::ingest_memory::Retained<'static>,
+        crate::memtable::FrozenClaim,
     )> = {
         let t_drain = std::time::Instant::now();
         #[cfg(test)]
@@ -30398,13 +30470,13 @@ async fn do_flush_shard(
             .filter(|hook| hook.target_memtable == test_target)
             .map(|hook| hook.ledger);
         #[cfg(test)]
-        let (raw, _drained_memory) = if let Some(ledger) = test_ledger {
-            memtable.drain_shard_accounted_for_test(shard_idx, is_raw_bytes_path, ledger)
+        let (raw, claim) = if let Some(ledger) = test_ledger {
+            memtable.freeze_shard_accounted_for_test(shard_idx, is_raw_bytes_path, ledger)
         } else {
-            memtable.drain_shard_accounted(shard_idx, is_raw_bytes_path)
+            memtable.freeze_shard_accounted(shard_idx, is_raw_bytes_path)
         };
         #[cfg(not(test))]
-        let (raw, _drained_memory) = memtable.drain_shard_accounted(shard_idx, is_raw_bytes_path);
+        let (raw, claim) = memtable.freeze_shard_accounted(shard_idx, is_raw_bytes_path);
         prof_drain_us = t_drain.elapsed().as_micros();
         let t_prep = std::time::Instant::now();
         let _ = &t_prep;
@@ -30489,7 +30561,7 @@ async fn do_flush_shard(
                 entries: storage_entries,
             };
             prof_prep_us = t_prep.elapsed().as_micros();
-            Some((drained_fts, storage_drained, _drained_memory))
+            Some((drained_fts, storage_drained, claim))
         }
     };
 
@@ -30506,14 +30578,16 @@ async fn do_flush_shard(
     // tmpfs.
     on_drained();
 
-    let (drained_fts, storage_drained, _drained_memory) = match drained_opt {
+    let (drained_fts, storage_drained, claim) = match drained_opt {
         Some(pair) => pair,
         None => {
-            // Another concurrent flush may have drained this shard after the
-            // caller observed it as non-empty. No collection state changed in
-            // this attempt, so this is a clean cancellation rather than a
-            // failed publication.
-            collection_publication_guard.cancel();
+            // Another concurrent flush may have claimed this shard after the
+            // caller observed it as non-empty (or the shard held only
+            // unclaimed leftovers with nothing new). No collection state
+            // changed in this attempt — the claim dropped inside the block
+            // above already released the frozen generations back to
+            // "unclaimed" so the next flush recycles them (#1015), and no
+            // publication bracket was ever opened.
             return Ok(());
         }
     };
@@ -30688,9 +30762,10 @@ async fn do_flush_shard(
     let t_finalize = std::time::Instant::now();
     let store_for_finalize = Arc::clone(&store);
     let storage_drained_for_finalize = Arc::clone(&storage_drained);
-    let memtable_for_finalize = Arc::clone(&memtable);
-    let drained_fts_for_restore = Arc::clone(&drained_fts);
-    let version_map_for_restore = Arc::clone(&store.version_map);
+    // #1015 — the claim rides the coordinator into the worker: the build
+    // holds it (frozen generations stay reader-visible), publish RETIRES it
+    // inside the bracket, and every failure path releases it.
+    let claim_for_finalize = claim;
     // A dedicated async coordinator owns and awaits the queued blocking job.
     // Dropping/cancelling the API caller merely detaches this coordinator;
     // it continues to own the blocking JoinHandle and the worker-captured
@@ -30700,74 +30775,134 @@ async fn do_flush_shard(
         if let Some(callback) = before_blocking_spawn {
             callback();
         }
-        tokio::task::spawn_blocking(move || {
-            let mut collection_publication_guard = collection_publication_guard;
+        let joined = tokio::task::spawn_blocking(move || {
             let _fin_permit = fin_permit;
             // This lease lives in the blocking worker, not either async waiter.
+            // It spans build→publish exactly as before: it tracks the caches
+            // `build_fts` warms so a failed publication can evict them.
             let lease =
                 PrePublicationLease::tracked(failed_warm_caches, Arc::clone(&warmed_segment_id));
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // ── BUILD — NO publication bracket (#1015).  The frozen
+            // generations keep the drained docs fully reader-visible
+            // (postings, doc-values, sources) while the segment and its
+            // side-cars are written; a search racing the build sees the
+            // exact same doc set as before the flush started.  ──
+            let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::background_pool().install(|| {
-                    store_for_finalize
-                        .finalize_flush_with_publisher(&storage_drained_for_finalize, build_fts)
+                    store_for_finalize.build_flush_segment(&storage_drained_for_finalize, build_fts)
                 })
             }));
-            if !matches!(
-                result,
-                Ok(Ok(
-                    xerj_storage::index_store::FlushFinalizeOutcome::Published { .. }
-                ))
-            ) {
-                let restore = storage_drained_for_finalize
-                    .entries
-                    .iter()
-                    .zip(drained_fts_for_restore.iter())
-                    .map(|(stored, (doc_id, fields, source))| {
-                        (
-                            stored.seq_no,
-                            doc_id.clone(),
-                            fields.clone(),
-                            Arc::clone(source),
-                        )
-                    })
-                    .collect();
-                memtable_for_finalize.restore_failed_flush(restore, &version_map_for_restore);
-            }
-            if matches!(
-                result,
-                Ok(Ok(
-                    xerj_storage::index_store::FlushFinalizeOutcome::Published { .. }
-                ))
-            ) {
-                collection_publication_guard.commit();
-            } else {
-                collection_publication_guard.cancel();
-            }
-            let result = match result {
-                Ok(result) => result,
-                Err(payload) => std::panic::resume_unwind(payload),
+            let meta = match built {
+                Ok(Ok(meta)) => meta,
+                Ok(Err(error)) => {
+                    // Build failed before anything reader-visible happened:
+                    // release the claim — the frozen generations stay
+                    // readable and unclaimed, so the next flush of this
+                    // shard recycles them.  This pointer-flag flip replaces
+                    // the old `restore_failed_flush` re-insert entirely
+                    // (the docs never left the view, so there is nothing to
+                    // re-insert and no version-map resurrection guard to
+                    // re-check).
+                    claim_for_finalize.release();
+                    return Ok(Err(error));
+                }
+                Err(payload) => {
+                    claim_for_finalize.release();
+                    std::panic::resume_unwind(payload);
+                }
             };
-            if matches!(
-                result,
-                Ok(xerj_storage::index_store::FlushFinalizeOutcome::Published { .. })
-            ) {
-                // finalize_flush_with_publisher publishes the snapshot before it
-                // returns Some. Commit while still in the worker, with no await.
-                lease.commit();
+            // ── PUBLISH — the ONLY reader-visible instant (#1015).  The
+            // bracket opened here spans: version-map repoint, the snapshot
+            // rcu, the frozen-generation retire, and the guard commit —
+            // millisecond-scale.  A capture that straddles any part of it
+            // fails the #1014 evenness check and retries on the next
+            // instant, instead of retrying against the full drain+build
+            // (~600 ms) window the old pre-drain bracket held.  ──
+            let mut collection_publication_guard = match collection_publication.begin() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    claim_for_finalize.release();
+                    return Err(collection_publication_interrupted());
+                }
+            };
+            let published = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::background_pool().install(|| {
+                    store_for_finalize.publish_flush_segment(&storage_drained_for_finalize, &meta)
+                })
+            }));
+            let outcome = match published {
+                Ok(Ok(
+                    outcome @ xerj_storage::index_store::FlushFinalizeOutcome::Published { .. },
+                )) => {
+                    // Retire INSIDE the bracket, immediately after the
+                    // snapshot swap: "the segment is in the snapshot" and
+                    // "the frozen docs left the memtable" are one atomic
+                    // instant for capturing readers.  The freed bytes leave
+                    // the memtable aggregate here (they were resident — and
+                    // charged — for the whole build).
+                    let _retained = claim_for_finalize.retire();
+                    collection_publication_guard.commit();
+                    // finalize published the snapshot before it returned;
+                    // commit the lease while still in the worker, no await.
+                    lease.commit();
+                    outcome
+                }
+                Ok(Ok(xerj_storage::index_store::FlushFinalizeOutcome::Empty)) => {
+                    // publish_flush_segment never returns Empty on a
+                    // non-empty drain set (build_flush_segment errors
+                    // first); handle it defensively as a failure.
+                    claim_for_finalize.release();
+                    collection_publication_guard.cancel();
+                    xerj_storage::index_store::FlushFinalizeOutcome::Empty
+                }
+                Ok(Err(error)) => {
+                    // Publication failed and was rolled back (failpoints
+                    // included): the segment is abandoned, the version map
+                    // is restored, and the docs must stay visible — release
+                    // the claim so the next flush retries them.
+                    claim_for_finalize.release();
+                    collection_publication_guard.cancel();
+                    return Ok(Err(error));
+                }
+                Err(payload) => {
+                    claim_for_finalize.release();
+                    collection_publication_guard.cancel();
+                    std::panic::resume_unwind(payload);
+                }
+            };
+            // ── POST-publish maintenance — OUTSIDE the bracket (#1015):
+            // the bucket catalog PUT is network I/O and the WAL
+            // checkpoint/prune takes locks; neither belongs between
+            // `begin()` and `commit()`.  Deferred failures are warn-only —
+            // the segment is already published.  ──
+            if let Err(error) =
+                store_for_finalize.after_flush_publish(&storage_drained_for_finalize, &meta)
+            {
+                tracing::warn!(
+                    error = %error,
+                    segment_id = %meta.id,
+                    "flush maintenance deferred after publication"
+                );
             }
-            result
+            Ok(Ok(outcome))
         })
-        .await
+        .await;
+        match joined {
+            Ok(result) => result,
+            Err(join_e) => Err(EngineError::Common(xerj_common::XerjError::internal(
+                format!("flush finalizer task failed before publication: {join_e}"),
+            ))),
+        }
     });
-    let finalize_join = match finalize_coordinator.await {
-        Ok(join) => join,
+    let finalize_outcome = match finalize_coordinator.await {
+        Ok(inner) => inner,
         Err(join_e) => {
             return Err(EngineError::Common(xerj_common::XerjError::internal(
                 format!("flush coordinator task failed: {join_e}"),
             )));
         }
     };
-    let meta = match finalize_join {
+    let meta = match finalize_outcome {
         Ok(Ok(xerj_storage::index_store::FlushFinalizeOutcome::Published { meta, .. })) => meta,
         Ok(Ok(xerj_storage::index_store::FlushFinalizeOutcome::Empty)) => {
             tracing::warn!("storage finalize returned None — unexpected");
@@ -30776,11 +30911,8 @@ async fn do_flush_shard(
         Ok(Err(e)) => {
             return Err(e.into());
         }
-        Err(join_e) => {
-            tracing::warn!("finalize spawn_blocking join failed: {join_e}");
-            return Err(EngineError::Common(xerj_common::XerjError::internal(
-                format!("flush finalizer task failed before publication: {join_e}"),
-            )));
+        Err(e) => {
+            return Err(e);
         }
     };
     // #804: `xerj_bytes_written_total` was registered but nothing ever
@@ -54531,7 +54663,8 @@ mod flush_memory_integration_tests {
         idx.index_document(Some("doc".into()), json!({"body": "retained"}))
             .await
             .unwrap();
-        assert!(idx.memtable_bytes() > 0);
+        let bytes_before_flush = idx.memtable_bytes();
+        assert!(bytes_before_flush > 0);
 
         // `entered` fires from inside the flush finalize's `spawn_blocking`;
         // wait for it on the runtime (see `await_publication_barrier`).
@@ -54558,16 +54691,31 @@ mod flush_memory_integration_tests {
             tokio::spawn(FLUSH_PUBLISHER_TEST_HOOK.scope(hook, async move { idx.flush().await }))
         };
         await_publication_barrier(entered_rx, "entered").await;
-        assert_eq!(idx.memtable_bytes(), 0);
-        assert!(
+        // #1015: the drain is a freeze — the docs stay resident and charged
+        // to the memtable aggregate for the whole build, and the
+        // flush-pipeline gauge stays EMPTY until retire parks the freeing
+        // bytes there (the pre-#1015 drain zeroed the memtable immediately
+        // and charged FlushDrained for the build's duration).
+        assert_eq!(
+            idx.memtable_bytes(),
+            bytes_before_flush,
+            "frozen generations stay charged through the build"
+        );
+        assert_eq!(
             ledger
                 .gauge(Category::FlushDrained, Measurement::Estimated)
-                .current
-                > 0
+                .current,
+            0,
+            "no flush-pipeline charge until retire"
         );
         publisher_release.release();
         let result = flush.await.unwrap();
         assert_eq!(result.is_err(), inject_error);
+        assert_eq!(
+            idx.memtable_bytes(),
+            if inject_error { bytes_before_flush } else { 0 },
+            "retire drops the charge on commit; a failed build keeps it (claim released)"
+        );
         assert_eq!(
             ledger
                 .gauge(Category::FlushDrained, Measurement::Estimated)

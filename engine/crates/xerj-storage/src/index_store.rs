@@ -2044,6 +2044,10 @@ impl IndexStore {
     /// All segment I/O, FTS side-car writes, snapshot publication, and WAL
     /// checkpointing happen here — but no memtable locks are touched, so
     /// callers can release higher-level locks before calling this method.
+    /// Monolithic finalize (build + publish + maintenance in one call), kept
+    /// for the legacy single-shot callers (`flush_with_publisher`, tests).
+    /// The engine flush path (#1015) calls the three phases separately so the
+    /// collection-publication bracket can wrap ONLY the publish phase.
     pub fn finalize_flush_with_publisher<F>(
         &self,
         drained: &DrainedMemtable,
@@ -2062,6 +2066,55 @@ impl IndexStore {
                 );
             }
             return Ok(FlushFinalizeOutcome::Empty);
+        }
+
+        let meta = self.build_flush_segment(drained, post_finish)?;
+        let outcome = self.publish_flush_segment(drained, &meta)?;
+        // A degraded `Published` (panic caught after the snapshot rcu)
+        // already reports maintenance as deferred — the legacy monolithic
+        // finalize returned before reaching maintenance, so the retry
+        // contract here is SKIP, not run-and-overwrite.
+        let maintenance_deferred = match &outcome {
+            FlushFinalizeOutcome::Published {
+                maintenance_deferred: true,
+                ..
+            } => true,
+            _ => self.after_flush_publish(drained, &meta).is_err(),
+        };
+        Ok(match outcome {
+            FlushFinalizeOutcome::Published { meta, .. } => FlushFinalizeOutcome::Published {
+                meta,
+                maintenance_deferred,
+            },
+            other => other,
+        })
+    }
+
+    /// #1015 — BUILD half of the flush finalize: serialization, the segment
+    /// writer, the caller's side-cars (`post_finish`), the ZID3 doc-id
+    /// sidecar, the ZCM1 completion manifest, and (object-store mode) the
+    /// ZBM1 bundle upload.
+    ///
+    /// This phase mutates NO reader-visible state — neither the version map
+    /// nor the snapshot — so the engine runs it with NO collection-publication
+    /// guard: searches race freely with the build, and the drained docs stay
+    /// fully visible through the memtable's frozen generations the whole
+    /// time. Every failure path rolls the family back
+    /// (`abandon_unpublished_segment`); nothing was published, so nothing
+    /// needs un-publishing.
+    pub fn build_flush_segment<F>(
+        &self,
+        drained: &DrainedMemtable,
+        post_finish: F,
+    ) -> Result<SegmentMeta>
+    where
+        F: FnOnce(&SegmentMeta) -> Result<()>,
+    {
+        let entries = &drained.entries;
+        if entries.is_empty() {
+            return Err(StorageError::Io(std::io::Error::other(
+                "build_flush_segment called with an empty drain set",
+            )));
         }
 
         // THROWAWAY prof (XERJ_PROF): finalize phase breakdown.
@@ -2272,6 +2325,43 @@ impl IndexStore {
             }
         }
 
+        if prof {
+            eprintln!(
+                "XERJ_PROF build docs={} ser_us={} encode_us={} writer_finish_us={} post_finish_us={} total_us={}",
+                doc_count,
+                prof_ser_us,
+                prof_encode_us,
+                prof_wfin_us,
+                prof_pf_us,
+                t_fin_start.elapsed().as_micros()
+            );
+        }
+        Ok(meta)
+    }
+
+    /// #1015 — PUBLISH half of the flush finalize: version-map repoint, the
+    /// snapshot `rcu`, and the segment-change notification. Millisecond
+    /// scale by construction (map updates + one ArcSwap).
+    ///
+    /// The caller MUST run this inside its collection-publication bracket:
+    /// this is the instant at which the docs move from "memtable-resident"
+    /// to "segment-resident" for readers, and the bracket is what makes the
+    /// swap atomic against capture-boundary validation (#1014). Every
+    /// failure path (failpoints 1-6 included) rolls the version map back and
+    /// abandons the unpublished segment; a panic AFTER the `rcu` is
+    /// detected and reported as a (maintenance-deferred) success instead of
+    /// a rollback, exactly as in the monolithic finalize.
+    pub fn publish_flush_segment(
+        &self,
+        drained: &DrainedMemtable,
+        meta: &SegmentMeta,
+    ) -> Result<FlushFinalizeOutcome> {
+        let entries = &drained.entries;
+        let segment_id = meta.id.clone();
+        let doc_count = entries.iter().filter(|e| e.source.is_some()).count() as u64;
+        let prof = std::env::var_os("XERJ_PROF").is_some();
+        let t_pub_start = std::time::Instant::now();
+
         // Update version map: point live docs at the new segment.
         //
         // `repoint` (not `set`): the drained entries include superseded
@@ -2284,7 +2374,6 @@ impl IndexStore {
         // only swaps the segment id when the entry still carries exactly
         // this seq_no — same-generation duplicates and post-drain
         // updates/deletes are left untouched.
-        let t_vm = std::time::Instant::now();
         let segment_id_arc: std::sync::Arc<str> = std::sync::Arc::from(segment_id.as_str());
         let rollback_journal: Vec<(String, u64, Option<crate::version_map::VersionEntry>)> =
             entries
@@ -2380,7 +2469,7 @@ impl IndexStore {
                 // must hear about it even on this degraded path.
                 self.notify_segments_changed();
                 return Ok(FlushFinalizeOutcome::Published {
-                    meta,
+                    meta: meta.clone(),
                     maintenance_deferred: true,
                 });
             }
@@ -2398,6 +2487,33 @@ impl IndexStore {
         // the flush-side analogue of Lucene's maybeMerge-on-flush
         // (IndexWriter.java:706, MergeTrigger.FULL_FLUSH).
         self.notify_segments_changed();
+        if prof {
+            eprintln!(
+                "XERJ_PROF publish docs={} total_us={}",
+                doc_count,
+                t_pub_start.elapsed().as_micros()
+            );
+        }
+        Ok(FlushFinalizeOutcome::Published {
+            meta: meta.clone(),
+            maintenance_deferred: false,
+        })
+    }
+
+    /// #1015 — POST-publish maintenance: the bucket catalog PUT (#965), the
+    /// 1 s-gated WAL checkpoint/rotate/prune, and the storage-memtable prune.
+    ///
+    /// Runs OUTSIDE the collection-publication bracket (the catalog PUT is
+    /// network I/O; the WAL loop takes locks) — after the caller has already
+    /// committed the publish. Every failure here defers maintenance without
+    /// un-publishing the segment, so the result is reported as `Err` for the
+    /// caller to WARN on, never as a flush failure.
+    pub fn after_flush_publish(&self, drained: &DrainedMemtable, meta: &SegmentMeta) -> Result<()> {
+        let entries = &drained.entries;
+        let segment_id = meta.id.as_str();
+        let doc_count = entries.iter().filter(|e| e.source.is_some()).count() as u64;
+        let min_seq = entries.iter().map(|e| e.seq_no).min().unwrap_or(0);
+        let max_seq = entries.iter().map(|e| e.seq_no).max().unwrap_or(0);
 
         // Issue #965 — object-store mode: publish the bucket catalog NOW, on
         // every flush (not only on WAL-maintenance ticks), so that a flush
@@ -2414,23 +2530,8 @@ impl IndexStore {
                     "bucket catalog publication deferred; the segment stays local-durable \
                      and the next publish retries"
                 );
-                return Ok(FlushFinalizeOutcome::Published {
-                    meta,
-                    maintenance_deferred: true,
-                });
+                return Err(error);
             }
-        }
-        if prof {
-            eprintln!(
-                "XERJ_PROF finalize docs={} ser_us={} encode_us={} writer_finish_us={} post_finish_us={} vm_us={} total_so_far_us={}",
-                doc_count,
-                prof_ser_us,
-                prof_encode_us,
-                prof_wfin_us,
-                prof_pf_us,
-                t_vm.elapsed().as_micros(),
-                t_fin_start.elapsed().as_micros()
-            );
         }
 
         // Publish the new segment via ArcSwap::rcu so concurrent shard
@@ -2509,10 +2610,7 @@ impl IndexStore {
                     // the next publish retries.
                     warn!(error = %e, segment_id,
                         "tombstone bucket publication failed — WAL maintenance deferred");
-                    return Ok(FlushFinalizeOutcome::Published {
-                        meta,
-                        maintenance_deferred: true,
-                    });
+                    return Err(e);
                 }
                 warn!(error = %e, "tombstone persistence failed — deletes stay WAL-pinned");
             }
@@ -2526,10 +2624,7 @@ impl IndexStore {
                 if pruned > 0 {
                     debug!(pruned, "pruned published storage memtable entries");
                 }
-                return Ok(FlushFinalizeOutcome::Published {
-                    meta,
-                    maintenance_deferred: true,
-                });
+                return Err(error);
             }
             // RC4 W1 #8 — verified maintenance (see
             // `wal_maintain_all_verified`).  The pre-fix loop here
@@ -2560,10 +2655,7 @@ impl IndexStore {
         if pruned > 0 {
             debug!(pruned, "pruned published storage memtable entries");
         }
-        Ok(FlushFinalizeOutcome::Published {
-            meta,
-            maintenance_deferred: false,
-        })
+        Ok(())
     }
 
     /// Flush if the memtable is over the configured threshold.
