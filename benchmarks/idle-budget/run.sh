@@ -166,13 +166,32 @@ node_start() { # $1 = data dir, $2 = log file; sets SERVER_PID
   # whatever freed pages the allocator happens to be retaining at sample
   # time — without them the baseline arm alone wobbled 31-76 MB across runs
   # on this host, which is a 1.5x swing in the per-index subtraction.
-  MALLOC_CONF="thp:never,dirty_decay_ms:0,muzzy_decay_ms:0" \
+  #
+  # BOTH spellings are set: the engine's allocator is tikv-jemalloc-sys,
+  # which builds jemalloc with --with-jemalloc-prefix=_rjem_, and a prefixed
+  # build reads <PREFIX>MALLOC_CONF (_RJEM_MALLOC_CONF), NOT MALLOC_CONF.
+  # The unprefixed MALLOC_CONF was set alone first and silently did nothing
+  # — the second CI run measured the same 1835 kB/idx as the first, with the
+  # pin printed in the log.  Verified on this box: MALLOC_CONF=bogus_opt:1
+  # boots with no allocator comment, _RJEM_MALLOC_CONF=bogus_opt:1 boots with
+  # "<jemalloc>: Invalid conf pair: bogus_opt:1".  The unprefixed spelling
+  # stays for the day the engine links an unprefixed jemalloc.
+  CONF="thp:never,dirty_decay_ms:0,muzzy_decay_ms:0"
+  MALLOC_CONF="$CONF" _RJEM_MALLOC_CONF="$CONF" \
     "$XERJ_BIN" --insecure --port "$PORT" --data-dir "$1" \
     --embed-mode lexical > "$2" 2>&1 &
   SERVER_PID=$!
   sleep 0.4
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
     echo "node failed to start; log:"; tail -20 "$2"; exit 1
+  fi
+  # A rejected pair means the measurement would run uncontrolled — the exact
+  # failure that cost two CI runs.  jemalloc writes the complaint to stderr
+  # at allocator init, well inside the 0.4 s above.
+  if grep -q 'Invalid conf pair' "$2"; then
+    echo "::error::allocator rejected the MALLOC_CONF pin — refusing to measure uncontrolled"
+    grep 'jemalloc' "$2" || true
+    exit 1
   fi
 }
 
@@ -232,6 +251,15 @@ def sample():
     def cnt(path):
         try: return len(os.listdir(f"/proc/{pid}/{path}"))
         except OSError: return -1
+    # AnonHugePages (smaps_rollup): THP-backed anon RSS, straight from the
+    # kernel. Under thp:never it reads ~0 even on a THP=always host; a dead
+    # pin shows up here as hundreds of MB. Printed as evidence, not gated —
+    # the per-index RSS gate is the gate; this line is the one-grep diagnosis.
+    try:
+        thp_kb = next(int(l.split()[1]) for l in open(f"/proc/{pid}/smaps_rollup")
+                      if l.startswith("AnonHugePages:"))
+    except (OSError, StopIteration, IndexError, ValueError):
+        thp_kb = -1
     vol = non = 0
     tasks = {}
     try: tids = os.listdir(f"/proc/{pid}/task")
@@ -254,6 +282,7 @@ def sample():
                 vol=vol, non=non, tasks=tasks,
                 rss_kb=num("VmRSS"), hwm_kb=num("VmHWM"),
                 rss_anon_kb=num("RssAnon"), rss_file_kb=num("RssFile"),
+                anon_hugepages_kb=thp_kb,
                 threads=cnt("task"), fds=cnt("fd"))
 
 a = sample(); time.sleep(secs); b = sample()
@@ -285,6 +314,7 @@ res = dict(
     nonvoluntary_per_s=round(non / elapsed, 1),
     rss_kb=b["rss_kb"], hwm_kb=b["hwm_kb"],
     rss_anon_kb=b["rss_anon_kb"], rss_file_kb=b["rss_file_kb"],
+    anon_hugepages_kb=b["anon_hugepages_kb"],
     threads=b["threads"], fds=b["fds"],
     per_thread_cpu=top_threads,
     loadavg_start=open("/proc/loadavg").read().split()[:3],
@@ -469,6 +499,8 @@ print(f"  wakeups/s, {N:>4} indices           {n['wakeups_per_s']:>8} /s   (volu
 print(f"  wakeups/s, baseline node          {base['wakeups_per_s']:>8} /s")
 print(f"  VmRSS, {N:>4} indices              {n['rss_kb']:>8} kB   (VmHWM {n['hwm_kb']} kB; anon {n['rss_anon_kb']} kB + file {n['rss_file_kb']} kB)")
 print(f"  VmRSS, baseline node              {base['rss_kb']:>8} kB")
+print(f"  AnonHugePages, {N:>4} indices     {n['anon_hugepages_kb']:>8} kB   (~0 = the thp:never pin is live at the kernel, any THP mode)")
+print(f"  AnonHugePages, baseline node      {base['anon_hugepages_kb']:>8} kB")
 print(f"  per-index idle RSS                {per_index_kb:>8.1f} kB   (({n['rss_kb']} - {base['rss_kb']}) / {N})")
 print(f"  threads {n['threads']}, fds {n['fds']}, loadavg {n['loadavg_start']}")
 print(f"  results: {path}")
