@@ -257,6 +257,34 @@ curl localhost:9200/ax-orders/_search -H 'content-type: application/json' -d '{
 Vector and hybrid search use the same `knn` and `semantic` syntax you would send to
 Elasticsearch. Any Elasticsearch client library works if you point it at `localhost:9200`.
 
+## Score results with Jev
+
+A search score tells you which result is above which, but not whether a result really answers
+your question. [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev), a service
+from TypeSafe AI, does that: give it a question and a document and it returns a number from 0
+to 1, how well the document answers. XERJ works with it in two ways.
+
+**1. Reorder your results with Jev (optional).** Add `"rerank": {}` to a `_search` and XERJ sends
+the top results to Jev, then sorts them by the numbers it gets back. On the public FiQA test,
+result quality goes from 0.24 to 0.36 (nDCG@10), for about $0.64 in total for 648 searches.
+Treat the numbers as a way to sort, not as exact percentages: they are not well calibrated.
+**This sends the text of those results to TypeSafe's servers.** It stays off until you set a
+key, and `[rerank] enabled = false` forbids it completely. Read
+[`docs/RERANK.md`](./docs/RERANK.md) before turning it on.
+
+**2. Get the same kind of answer locally.** `POST /v1/systemone` and `POST /_decide` accept the
+same questions in the same format, but XERJ answers them itself, by looking up the most similar
+documents you have already labelled (for example messages already marked spam or not spam).
+Nothing leaves your machine and no key is needed. It only works if you have labelled examples;
+on AG News (120k labelled examples) it picks the right label 92% of the time. The official
+`jev-reranker` Python client works against a XERJ node without changes
+([test](./benchmarks/systemone-gate)). XERJ answers under its own name, `xerj-history-vote-1`;
+it is not Jev.
+
+Measurements and how to reproduce them:
+[`benchmarks/beir-hybrid`](./benchmarks/beir-hybrid/results/2026-09-20-rerank-full-fiqa) and
+[`benchmarks/decisions-as-retrieval`](./benchmarks/decisions-as-retrieval).
+
 ## Connect an agent over MCP
 
 Not every agent can run a shell command. Desktop assistants and function-calling hosts reach
