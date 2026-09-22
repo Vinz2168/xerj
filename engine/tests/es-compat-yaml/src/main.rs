@@ -1170,6 +1170,9 @@ fn resolve_action(action: &str, params: &serde_yaml::Mapping) -> (String, String
             ("POST".into(), path, body)
         }
         "reindex" => ("POST".into(), "/_reindex".into(), body),
+        // #1019 — pins the paginated delete-by-query contract (exact total,
+        // real batch count, max_docs).
+        "delete_by_query" => ("POST".into(), format!("/{}/_delete_by_query", index), body),
         "scroll" => {
             let mut path = "/_search/scroll".to_string();
             let mut qp = Vec::new();

@@ -2645,6 +2645,45 @@ async fn test_delete_by_query() {
     assert_eq!(result.hits[0].id, "q3");
 }
 
+/// #1019: the engine-level `delete_by_query` had the same 10 000-doc
+/// single-shot cap as the HTTP handler — it built one `SearchRequest` with
+/// `size: 10_000` and deleted only the returned page. Over a corpus larger
+/// than `max_result_window` it under-deleted while reporting an exact
+/// `total`, so the `(total, deleted)` pair disagreed and docs survived.
+/// Fails before the fix at `(12000, 10000)`.
+#[tokio::test]
+async fn test_delete_by_query_purges_past_ten_thousand() {
+    let dir = TempDir::new().unwrap();
+    let engine = make_engine(&dir);
+
+    engine.create_index("dbq-12k", Schema::empty()).unwrap();
+    let idx = engine.get_index("dbq-12k").unwrap();
+
+    const N: u64 = 12_000;
+    let width = N.to_string().len();
+    for i in 0..N {
+        idx.index_document(
+            Some(format!("d{i:0width$}", width = width)),
+            json!({"v": i}),
+        )
+        .await
+        .unwrap();
+    }
+
+    let (total, deleted) = idx.delete_by_query(QueryNode::MatchAll).await.unwrap();
+    assert_eq!(total, N, "total is the exact match count");
+    assert_eq!(
+        deleted, N,
+        "every matching doc deleted, not just the first 10k page"
+    );
+
+    let result = idx
+        .search(&make_search(json!({"match_all": {}})))
+        .await
+        .unwrap();
+    assert_eq!(result.total.value, 0, "index must be empty after the purge");
+}
+
 // ── 10. multi_match query ─────────────────────────────────────────────────────
 
 #[tokio::test]

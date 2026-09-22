@@ -26072,6 +26072,17 @@ fn explain_query_node(q: &xerj_query::ast::QueryNode) -> (String, Vec<Value>) {
 #[derive(Debug, Deserialize)]
 pub struct DeleteByQueryBody {
     pub query: Value,
+    /// ES `max_docs`: "The maximum number of documents to process. Defaults
+    /// to all documents." `None` = purge every match.
+    #[serde(default)]
+    pub max_docs: Option<u64>,
+    /// ES `scroll_size`: "The size of the scroll request that powers the
+    /// operation." Default 1 000, clamped to `1..=10_000` (the per-request
+    /// `max_result_window` ceiling — paging is keyset, so a small page never
+    /// hits the deep-paging wall). `max_docs <= scroll_size` naturally
+    /// degenerates to the documented single-batch fast path.
+    #[serde(default)]
+    pub scroll_size: Option<u64>,
 }
 
 /// Resolve a by-query selector to the concrete member indices it must touch and
@@ -26198,14 +26209,22 @@ pub async fn delete_by_query(
             Err(e) => return ApiError::new(e).into_response(),
         };
 
-    // Run a match-all-sized search using the provided query.
-    let search_body_val = json!({ "query": effective_query, "size": 10000, "from": 0 });
-    let search_req = match xerj_query::parse_request(&search_body_val)
-        .map_err(|e| xerj_common::XerjError::invalid_query(e.to_string()))
-    {
-        Ok(r) => r,
-        Err(e) => return ApiError::new(e).into_response(),
-    };
+    // Validate the (alias-filter-ANDed) query once, up front, so a malformed
+    // body is an immediate 400 before a task is registered or any member is
+    // touched — the runner below re-parses per batch as the cursor advances.
+    let scroll_size = body
+        .scroll_size
+        .unwrap_or(DEFAULT_BY_QUERY_SCROLL_SIZE)
+        .clamp(1, 10_000) as usize;
+    let validation_body = json!({
+        "query": effective_query,
+        "size": scroll_size,
+        "from": 0,
+        "sort": [{ "_id": "asc" }],
+    });
+    if let Err(e) = xerj_query::parse_request(&validation_body) {
+        return ApiError::new(xerj_common::XerjError::invalid_query(e.to_string())).into_response();
+    }
 
     // ES defaults `wait_for_completion` to true (synchronous); only an
     // explicit `false` switches to the async `{"task": "node:id"}` form.
@@ -26219,6 +26238,8 @@ pub async fn delete_by_query(
         let task_key = handle.key().to_string();
         let spawned_key = task_key.clone();
         let tasks = state.tasks.clone();
+        let task_query = effective_query.clone();
+        let task_max_docs = body.max_docs;
         // Detached, so no `index_guard` rule — and none is needed: the task
         // owns the already-authorized `Index` handles this request resolved,
         // and an `Index` cannot name another index (it holds no `Engine`). See
@@ -26227,7 +26248,8 @@ pub async fn delete_by_query(
         tokio::spawn(async move {
             let mut results = Vec::with_capacity(indices.len());
             for idx in &indices {
-                results.push(run_delete_by_query(idx, &search_req).await);
+                results
+                    .push(run_delete_by_query(idx, &task_query, task_max_docs, scroll_size).await);
             }
             tasks.complete(&spawned_key, aggregate_by_query_results(results, "deleted"));
             drop(handle);
@@ -26237,7 +26259,7 @@ pub async fn delete_by_query(
 
     let mut results = Vec::with_capacity(indices.len());
     for idx in &indices {
-        results.push(run_delete_by_query(idx, &search_req).await);
+        results.push(run_delete_by_query(idx, &effective_query, body.max_docs, scroll_size).await);
     }
     drop(handle);
     by_query_response(aggregate_by_query_results(results, "deleted"))
@@ -26268,37 +26290,224 @@ fn by_query_response(body: Value) -> Response {
     (status, Json(body)).into_response()
 }
 
+/// ES `scroll_size` default for the by-query write paths ("The size of the
+/// scroll request that powers the operation").
+const DEFAULT_BY_QUERY_SCROLL_SIZE: u64 = 1_000;
+
+/// One member's paginated `_delete_by_query` run (#1019).
+///
+/// Shaped like the `_reindex` loop: flush the member first — `_id`-keyset
+/// paging is only correct over on-disk segments (the memtable's field-sort
+/// path does not order by `_id` reliably, so paging over unflushed docs
+/// could skip or duplicate ids), and a failed flush aborts the delete rather
+/// than under-deleting — then pull `scroll_size` pages sorted `_id: asc`
+/// with a `search_after` cursor until an empty page or `max_docs`, deleting
+/// per id. XERJ has no batch-delete API; per-id is the liveness-authoritative
+/// semantic everywhere else, and ES's per-batch bulk is an internal detail.
+///
+/// Every page runs with the INTERNAL ids-only projection
+/// (`SearchRequest::ids_only`, set here and never deserialisable from the
+/// wire): the runner reads nothing from the hits but `hit.id`, so the search
+/// phase skips `_source` materialisation entirely — previously the single
+/// `size: 10_000` shot hydrated 10 100 full `Value` trees just to read ids,
+/// the dominant RSS transient of a purge (the #950 follow-up headroom).
+///
+/// ES semantics matched: `total` is the exact match count when unlimited
+/// (the collection snapshot / first page's `hits.total`, taken before any
+/// deletion) or the processed count under `max_docs`; `batches` is the real
+/// batch count; `noops`/`version_conflicts` are always 0 for this runner (an
+/// unconditional per-id delete cannot conflict).
+///
+/// Two arms, same counters: `match_all` / `ids` selectors take the
+/// single-pass id-set collection (`Index::matching_ids_sorted`) and delete it
+/// in `scroll_size` batches; every other query shape takes the `_id`-keyset
+/// paged loop below, whose pages run with the ids-only projection.
 async fn run_delete_by_query(
-    idx: &xerj_engine::Index,
-    search_req: &xerj_query::SearchRequest,
+    idx: &std::sync::Arc<xerj_engine::Index>,
+    query: &Value,
+    max_docs: Option<u64>,
+    scroll_size: usize,
 ) -> Value {
     let started = Instant::now();
 
-    let results = match idx.search(search_req).await {
-        Ok(r) => r,
-        Err(e) => return ApiError::new(xerj_common::XerjError::from(e)).into_value(),
-    };
-    // A script resource limit makes matching fail-closed, so the selection is
-    // a subset of what the caller asked to delete. Deleting that subset and
-    // reporting success is both destructive and wrong; refuse instead.
-    if let Some(reason) = &results.script_failure {
-        return script_limit_error_value(reason);
+    // Flush precondition (see doc comment). Propagated, not swallowed, for
+    // the same reason as `reindex`: the flush is a precondition of the
+    // paging being complete, so a failed flush must not be followed by a
+    // purge that reports a `total` over an index it could not read
+    // consistently.
+    if let Err(e) = idx.flush().await {
+        return ApiError::new(xerj_common::XerjError::internal(format!(
+            "delete_by_query was not attempted: flushing the index failed ({e}); the purge \
+             needs a flushed index to page over it without skipping documents"
+        )))
+        .into_value();
     }
 
-    let total = results.hits.len() as u64;
-    let mut deleted = 0u64;
-    let mut failures: Vec<Value> = Vec::new();
+    // Parse once for the fast-path eligibility check below. The handler
+    // already validated the (page-1-shaped) query, so this cannot fail for a
+    // request that got here; the paged arm re-parses per page only because it
+    // rebuilds the body to attach `search_after`.
+    let parsed_query = match xerj_query::parse_request(&json!({ "query": query })) {
+        Ok(r) => r.query,
+        Err(e) => {
+            return ApiError::new(xerj_common::XerjError::invalid_query(e.to_string())).into_value()
+        }
+    };
 
-    for hit in results.hits {
-        match idx.delete_document(&hit.id).await {
-            Ok(_) => deleted += 1,
-            Err(e) => {
-                failures.push(json!({
-                    "id": hit.id,
-                    "cause": { "reason": e.to_string() },
-                }));
+    // #1019 single-pass fast path: for `match_all` / `ids` selectors the
+    // whole live match set is collected once from the cached per-segment
+    // `_id` maps (#950), then deleted in `scroll_size` batches — one O(N)
+    // pass. The paged arm below re-scans every stored section once per page
+    // (252 pages on the 252k-doc measurement corpus at the default
+    // `scroll_size`), which dominated the wall time once per-page `_source`
+    // hydration was gone. `None` — any other query shape, or a segment
+    // without a complete id index — runs the paged arm unchanged.
+    if let Some(mut ids) = idx.matching_ids_sorted(&parsed_query) {
+        // ES `max_docs`: stop after N documents; `total` then reports the
+        // processed count (the same rule the paged arm applies).
+        let matched = ids.len() as u64;
+        if let Some(cap) = max_docs {
+            ids.truncate(cap as usize);
+        }
+        let mut processed: u64 = 0;
+        let mut deleted: u64 = 0;
+        let mut batches: u64 = 0;
+        let mut failures: Vec<Value> = Vec::new();
+        for chunk in ids.chunks(scroll_size) {
+            batches += 1;
+            for id in chunk {
+                processed += 1;
+                match idx.delete_document(id).await {
+                    Ok(_) => deleted += 1,
+                    Err(e) => {
+                        failures.push(json!({
+                            "id": id,
+                            "cause": { "reason": e.to_string() },
+                        }));
+                    }
+                }
             }
         }
+        let total = if max_docs.is_none() {
+            // Never under-report if a concurrent writer extended the match
+            // set past the collection snapshot mid-purge.
+            matched.max(deleted)
+        } else {
+            processed
+        };
+        let took = started.elapsed().as_millis() as u64;
+        return json!({
+            "took": took,
+            "timed_out": false,
+            "total": total,
+            "deleted": deleted,
+            "batches": batches,
+            "version_conflicts": 0,
+            "noops": 0,
+            "failures": failures,
+            "throttled_millis": 0,
+            "requests_per_second": -1,
+            "throttled_until_millis": 0,
+        });
+    }
+
+    let mut total: u64 = 0;
+    let mut processed: u64 = 0;
+    let mut deleted: u64 = 0;
+    let mut batches: u64 = 0;
+    let mut failures: Vec<Value> = Vec::new();
+    // Keyset cursor: the last id of the previous page (the sole sort key is
+    // `_id: asc`). `None` on the first page.
+    let mut search_after: Option<String> = None;
+    // Safety backstop only, mirroring reindex's `max_total`: with keyset
+    // paging every page is a fresh top-N far below `max_result_window`, so
+    // this just bounds a runaway loop.
+    let max_total: u64 = 10_000_000;
+
+    loop {
+        let page = match max_docs {
+            Some(cap) => (scroll_size as u64).min(cap.saturating_sub(processed)) as usize,
+            None => scroll_size,
+        };
+        if page == 0 {
+            break; // max_docs reached
+        }
+
+        let mut search_body_val = json!({
+            "query": query,
+            "size": page,
+            "sort": [{ "_id": "asc" }],
+            // Belt only — the ids-only projection below is the load-bearing
+            // `_source` cut (`_source: false` alone keeps raw sources for
+            // fields/highlight resolution).
+            "_source": false,
+        });
+        if let Some(ref cursor) = search_after {
+            search_body_val["search_after"] = json!([cursor]);
+        }
+        let mut search_req = match xerj_query::parse_request(&search_body_val)
+            .map_err(|e| xerj_common::XerjError::invalid_query(e.to_string()))
+        {
+            Ok(r) => r,
+            Err(e) => return ApiError::new(e).into_value(),
+        };
+        // Internal-only projection hint — `parse_request` can never set it.
+        search_req.ids_only = true;
+
+        let results = match idx.search(&search_req).await {
+            Ok(r) => r,
+            Err(e) => return ApiError::new(xerj_common::XerjError::from(e)).into_value(),
+        };
+        // A script resource limit makes matching fail-closed, so the
+        // selection is a subset of what the caller asked to delete — checked
+        // PER BATCH, before a single id of the page is deleted. Deleting
+        // that subset and reporting success is both destructive and wrong;
+        // refuse instead.
+        if let Some(reason) = &results.script_failure {
+            return script_limit_error_value(reason);
+        }
+
+        if results.hits.is_empty() {
+            break;
+        }
+        batches += 1;
+        // Page 1's `hits.total` is the EXACT pre-delete match count (later
+        // pages run over an already-shrunk live set). Under `max_docs` ES
+        // reports the processed count instead.
+        if max_docs.is_none() && total == 0 {
+            total = results.total.value;
+        }
+
+        // Capture the cursor before the loop consumes `results.hits`.
+        let last_id = results.hits.last().map(|h| h.id.clone());
+        for hit in results.hits {
+            processed += 1;
+            match idx.delete_document(&hit.id).await {
+                Ok(_) => deleted += 1,
+                Err(e) => {
+                    failures.push(json!({
+                        "id": hit.id,
+                        "cause": { "reason": e.to_string() },
+                    }));
+                }
+            }
+        }
+
+        match last_id {
+            Some(id) => search_after = Some(id),
+            None => break,
+        }
+        if processed >= max_total {
+            break;
+        }
+    }
+
+    if max_docs.is_none() {
+        // Never under-report if a concurrent writer extended the match set
+        // past page 1's snapshot count mid-purge.
+        total = total.max(processed);
+    } else {
+        total = processed;
     }
 
     let took = started.elapsed().as_millis() as u64;
@@ -26307,7 +26516,7 @@ async fn run_delete_by_query(
         "timed_out": false,
         "total": total,
         "deleted": deleted,
-        "batches": 1,
+        "batches": batches,
         "version_conflicts": 0,
         "noops": 0,
         "failures": failures,

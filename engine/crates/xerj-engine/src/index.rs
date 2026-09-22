@@ -1656,6 +1656,93 @@ mod flush_publication_recovery_tests {
         drop(engine);
     }
 
+    /// #1019: the delete-by-query search phase must not materialise
+    /// `_source`.  An `ids_only` page (sort confined to `_id`, nothing that
+    /// reads fields) returns hits with `source: Value::Null` — the direct
+    /// observable of the projection, because `_source: false` alone would
+    /// NOT do this (`apply_source_filter_measured` keeps the raw source for
+    /// fields/highlight resolution, so a non-null source here means the page
+    /// hydrated `Value` trees again).  Also pins the keyset contract the
+    /// paginated runners rely on: `search_after` pages over a `_id: asc`
+    /// sort partition the corpus with no gaps, no dupes, exact total.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ids_only_pages_skip_source_materialisation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.server.data_dir = dir.path().to_string_lossy().into_owned();
+        let engine = crate::Engine::new(config).unwrap();
+        engine
+            .create_index("ids-only-pages", slash_field_schema())
+            .unwrap();
+        let idx = engine.get_index("ids-only-pages").unwrap();
+        idx.abort_background_tasks();
+        const N: u64 = 300;
+        for i in 0..N {
+            idx.index_document(
+                Some(format!("d{i:0width$}", width = 4)),
+                json!({"bad/field": "needle"}),
+            )
+            .await
+            .unwrap();
+        }
+        idx.flush().await.unwrap();
+        let mut seen: Vec<String> = Vec::new();
+        let mut first_total: Option<u64> = None;
+        let mut cursor: Option<Vec<Value>> = None;
+        loop {
+            let req = SearchRequest {
+                query: QueryNode::MatchAll,
+                from: 0,
+                size: 50,
+                sort: vec![xerj_query::sort::SortField {
+                    field: "_id".to_string(),
+                    order: xerj_query::sort::SortOrder::Asc,
+                    mode: xerj_query::sort::SortMode::default(),
+                    missing: xerj_query::sort::SortMissing::default(),
+                    format: None,
+                    unmapped_type: None,
+                    numeric_type: None,
+                }],
+                search_after: cursor,
+                ids_only: true,
+                ..SearchRequest::default()
+            };
+            let r = idx.search(&req).await.unwrap();
+            assert!(r.hits.len() <= 50);
+            if r.hits.is_empty() {
+                break;
+            }
+            if first_total.is_none() {
+                first_total = Some(r.total.value);
+            }
+            for h in &r.hits {
+                assert!(
+                    h.source.is_null(),
+                    "#1019: ids-only hit must not carry a hydrated _source"
+                );
+                seen.push(h.id.clone());
+            }
+            let last = r.hits.last().unwrap().id.clone();
+            cursor = Some(vec![Value::String(last)]);
+        }
+        assert_eq!(
+            first_total,
+            Some(N),
+            "page-1 total must be the exact match count"
+        );
+        assert_eq!(seen.len() as u64, N, "pages must cover every doc");
+        let mut sorted = seen.clone();
+        sorted.sort();
+        assert_eq!(
+            seen, sorted,
+            "keyset pages must arrive _id-ascending across the whole scan"
+        );
+        sorted.dedup();
+        assert_eq!(sorted.len() as u64, N, "no duplicate ids across pages");
+        drop(idx);
+        drop(engine);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn slash_field_flush_publishes_and_restarts_searchable() {
         let _fault_test = FLUSH_FAULT_TEST_LOCK.lock().await;
@@ -16275,6 +16362,7 @@ impl Index {
                 profile: false,
                 leaf_ts_field: None,
                 savings: request.savings,
+                ids_only: false,
             })
             .collect();
         let mut leg_outcomes: Vec<Option<Result<SearchResult>>> =
@@ -16448,6 +16536,7 @@ impl Index {
                 min_score: None,
                 leaf_ts_field: None,
                 savings: request.savings,
+                ids_only: false,
             };
             let plain = filter.is_none()
                 && boost.is_none()
@@ -17777,25 +17866,137 @@ impl Index {
         Ok(Some(resp))
     }
 
-    /// Delete all documents matching the given query.
+    /// The complete live `_id` match set for `match_all` / `ids` queries,
+    /// ascending — the #1019 single-pass alternative to paging a purge.
     ///
-    /// Runs a search limited to 10 000 hits, then deletes each matched document.
-    /// Returns `(total_matched, deleted_count)`.
-    pub async fn delete_by_query(&self, query: QueryNode) -> Result<(u64, u64)> {
-        let req = SearchRequest {
-            query,
-            from: 0,
-            size: 10_000,
-            ..SearchRequest::default()
+    /// Reads each flushed segment's cached `_id → position` map (`#950`'s
+    /// `id_pos_map_for`, which decodes the `_id` column alone) and the
+    /// version map, so the whole match set costs one O(N) id
+    /// materialisation (~48 B per match: `String` + vec slot) instead of the
+    /// paged loop's one full stored-section re-scan per page (O(N × pages)
+    /// over the corpus — the dominant cost of a default-size purge once the
+    /// per-page `_source` hydration was gone).
+    ///
+    /// Caller MUST flush first (same precondition as the paged loop): the
+    /// memtable is not represented in any segment's id map.
+    ///
+    /// `None` = this query shape (or a segment without a complete id index)
+    /// is not served here — the caller falls back to the paged keyset loop,
+    /// which answers every query. Liveness and byte-order match that loop
+    /// exactly: a missing version-map entry counts as live, a deleted entry
+    /// is skipped, and ids sort as byte strings (the `_id` sort key's order).
+    pub fn matching_ids_sorted(&self, query: &QueryNode) -> Option<Vec<String>> {
+        // Membership resolved against a set: an `ids` query can carry tens of
+        // thousands of values, and a per-doc linear scan would reintroduce
+        // exactly the O(N × k) blowup this method exists to remove.
+        let values: Option<std::collections::HashSet<&str>> = match query {
+            QueryNode::MatchAll => None,
+            QueryNode::Ids { values } => Some(values.iter().map(String::as_str).collect()),
+            _ => return None,
         };
-        let results = self.search(&req).await?;
-        let total = results.total.value;
-        let mut deleted = 0u64;
-        for hit in results.hits {
-            if self.delete_document(&hit.id).await? {
-                deleted += 1;
+        let snap = self.store.snapshot();
+        let mut ids: Vec<String> =
+            Vec::with_capacity(snap.segments.iter().map(|m| m.doc_count as usize).sum());
+        for meta in snap.segments.iter() {
+            let map = self.id_pos_map_for(meta.id.as_str(), meta.doc_count)?;
+            for id in map.keys() {
+                if let Some(set) = &values {
+                    if !set.contains(id.as_str()) {
+                        continue;
+                    }
+                }
+                if let Some(ver) = self.store.version_map.get(id) {
+                    if ver.deleted {
+                        continue;
+                    }
+                }
+                ids.push(id.clone());
             }
         }
+        ids.sort_unstable();
+        // Same contract as the paged loop's `seen_ids`: an id resolves to one
+        // delete even if a legacy multi-segment layout lists it twice.
+        ids.dedup();
+        Some(ids)
+    }
+
+    /// Delete all documents matching the given query.
+    ///
+    /// Collects the whole match set in one pass (`matching_ids_sorted`) and
+    /// deletes it in `DELETE_BY_QUERY_PAGE` batches when the query shape
+    /// allows; anything else pages `_id`-keyset batches with the internal
+    /// ids-only projection (the `_reindex` loop's shape). Either way a purge
+    /// over more than `max_result_window` documents deletes EVERY match —
+    /// the old single-shot `size: 10_000` search silently truncated at one
+    /// page and returned a `(total, deleted)` pair that disagreed (#1019).
+    /// Returns `(total_matched, deleted_count)`.
+    pub async fn delete_by_query(self: &Arc<Self>, query: QueryNode) -> Result<(u64, u64)> {
+        // Flush first: the single-pass id collection and `_id`-keyset paging
+        // are both only correct over on-disk segments (the memtable's
+        // field-sort path does not order by `_id` reliably, so either path
+        // over unflushed docs could skip or duplicate ids) — the same
+        // precondition `reindex` establishes.
+        self.flush().await?;
+        if let Some(ids) = self.matching_ids_sorted(&query) {
+            let total = ids.len() as u64;
+            let mut deleted = 0u64;
+            for chunk in ids.chunks(DELETE_BY_QUERY_PAGE) {
+                for id in chunk {
+                    if self.delete_document(id).await? {
+                        deleted += 1;
+                    }
+                }
+            }
+            // Never under-report if a concurrent writer extended the match
+            // set past the collection snapshot mid-purge.
+            return Ok((total.max(deleted), deleted));
+        }
+        let mut total = 0u64;
+        let mut deleted = 0u64;
+        // Keyset cursor: `[last_id]` of the previous page (the sole sort key
+        // is `_id: asc`). `None` on the first page.
+        let mut search_after: Option<Vec<Value>> = None;
+        loop {
+            let req = SearchRequest {
+                query: query.clone(),
+                from: 0,
+                size: DELETE_BY_QUERY_PAGE,
+                sort: vec![xerj_query::sort::SortField {
+                    field: "_id".to_string(),
+                    order: xerj_query::sort::SortOrder::Asc,
+                    mode: xerj_query::sort::SortMode::default(),
+                    missing: xerj_query::sort::SortMissing::default(),
+                    format: None,
+                    unmapped_type: None,
+                    numeric_type: None,
+                }],
+                search_after: search_after.clone(),
+                ids_only: true,
+                ..SearchRequest::default()
+            };
+            let results = self.search(&req).await?;
+            if results.hits.is_empty() {
+                break;
+            }
+            // Page 1's `hits.total` is the EXACT pre-delete match count
+            // (later pages run over an already-shrunk live set).
+            if total == 0 {
+                total = results.total.value;
+            }
+            let last_id = results.hits.last().map(|h| h.id.clone());
+            for hit in results.hits {
+                if self.delete_document(&hit.id).await? {
+                    deleted += 1;
+                }
+            }
+            match last_id {
+                Some(id) => search_after = Some(vec![Value::String(id)]),
+                None => break,
+            }
+        }
+        // Never under-report if a concurrent writer extended the match set
+        // past page 1's snapshot count mid-purge.
+        total = total.max(deleted);
         Ok((total, deleted))
     }
 
@@ -18894,6 +19095,36 @@ impl Index {
             || request.aggs.is_some()
             || request.min_score.is_some();
         let count_only: bool = !need_sources_for_post;
+
+        // #1019 — ids-only projection eligibility. `request.ids_only` is set
+        // solely by engine-controlled callers (the `_delete_by_query` runner
+        // and the engine-level purge loop); `parse_request` can never produce
+        // it, so it cannot arrive from the wire. It is honoured only when the
+        // request provably needs nothing beyond hit ids: sort keys confined
+        // to `_id`/`_doc` (a real field sort or a `_score` ordering would
+        // have to read `_source` — via `compute_sort_values` or the per-doc
+        // scorer — to rank), and none of the page post-passes that consume
+        // sources (`fields` / `script_fields` / `highlight` / `explain` /
+        // `collapse` / `rescore` / `aggs` / `min_score`). Any other shape
+        // silently degrades to a full request — correctness first. The
+        // non-empty-sort requirement also means the columnar
+        // `scored_columnar` path (whose `scored_fast_plan` gate demands an
+        // EMPTY sort and no `search_after`) is unreachable in ids-only mode,
+        // so its Phase-5 hydration needs no branch of its own.
+        let ids_only: bool = request.ids_only
+            && !request.sort.is_empty()
+            && request
+                .sort
+                .iter()
+                .all(|sf| sf.field == "_id" || sf.is_doc_order())
+            && request.fields.is_empty()
+            && request.script_fields.is_none()
+            && request.highlight.is_none()
+            && !request.explain
+            && request.collapse.is_none()
+            && request.rescore.is_empty()
+            && request.aggs.is_none()
+            && request.min_score.is_none();
 
         // --- Memtable search ---
         // `all_hits` is the bounded collector of fully-hydrated hits (source +
@@ -21192,6 +21423,7 @@ impl Index {
                                                 &cand,
                                                 query,
                                                 false,
+                                                ids_only,
                                                 sort_topk.as_mut().expect("gated on is_some"),
                                                 &mut seen_ids,
                                                 &mut discard,
@@ -21877,6 +22109,7 @@ impl Index {
                                     sort_cand.as_ref().expect("gated on is_some"),
                                     query,
                                     is_match_all,
+                                    ids_only,
                                     sort_topk.as_mut().expect("gated on is_some"),
                                     &mut seen_ids,
                                     &mut total_count,
@@ -21906,6 +22139,7 @@ impl Index {
                             &cached_bytes,
                             query,
                             is_match_all,
+                            ids_only,
                             count_only,
                             scan_limit,
                             count_authoritative,
@@ -21959,6 +22193,7 @@ impl Index {
                                     pf,
                                     query,
                                     is_match_all,
+                                    ids_only,
                                     count_only,
                                     scan_limit,
                                     count_authoritative,
@@ -21974,6 +22209,7 @@ impl Index {
                                     &warm_slices.bytes,
                                     query,
                                     is_match_all,
+                                    ids_only,
                                     count_only,
                                     scan_limit,
                                     count_authoritative,
@@ -22058,6 +22294,7 @@ impl Index {
                                     &stored_bytes,
                                     query,
                                     is_match_all,
+                                    ids_only,
                                     count_only,
                                     scan_limit,
                                     count_authoritative,
@@ -29441,6 +29678,9 @@ impl Index {
         // score now comes from `scorer` (which closes over the query).
         _query: &QueryNode,
         is_match_all: bool,
+        // #1019 — ids-only projection (delete-by-query pages): see the
+        // admission block below.
+        ids_only: bool,
         topk: &mut SortTopK,
         seen_ids: &mut HashSet<String>,
         total_count: &mut u64,
@@ -29465,6 +29705,58 @@ impl Index {
             let Some(slice) = slices.bytes.get(start as usize..end as usize) else {
                 continue;
             };
+            // #1019 — ids-only hydration. Candidates are guaranteed query
+            // matches by construction (match_all, or positions drawn from
+            // the query's own dv/FTS match set), and the eligibility gate
+            // in `search_inner` confined the sort to `_id`/`_doc`, so
+            // nothing here needs the `_source`: extract the id and offer
+            // it with `source: Value::Null` — no `Value` tree, no clone.
+            // The version-map liveness filter is kept verbatim; the
+            // superseded-copy (`_seq_no`) skip is deliberately dropped (a
+            // stale copy carries the SAME id, and id-set membership is all
+            // this projection may decide). `extract_stored_id` → `None`
+            // (escape-bearing layout) falls through to the full parse.
+            if ids_only {
+                if let Some(id) = extract_stored_id(slice) {
+                    let mut hit_seq_no = None;
+                    let mut hit_version = None;
+                    if let Some(ver) = self.store.version_map.get(&id) {
+                        if ver.deleted {
+                            continue;
+                        }
+                        let (s, v) = self.hit_seq_version(&id, &ver);
+                        hit_seq_no = s;
+                        hit_version = v;
+                    }
+                    *total_count += 1;
+                    if seen_ids.contains(&id) {
+                        continue;
+                    }
+                    let key =
+                        compute_sort_values(&Value::Null, 1.0, &id, topk.fields.as_slice(), self);
+                    if !topk.would_admit(&key) {
+                        continue;
+                    }
+                    seen_ids.insert(id.clone());
+                    let seq = hit_seq_no.unwrap_or(u64::MAX);
+                    topk.offer_keyed(
+                        Hit {
+                            id,
+                            score: 1.0,
+                            source: Value::Null,
+                            seq_no: hit_seq_no,
+                            version: hit_version,
+                            sort: key,
+                            explain: None,
+                            highlight: None,
+                            matched_queries: Vec::new(),
+                            passage: None,
+                        },
+                        seq,
+                    );
+                    continue;
+                }
+            }
             let mut doc_buf = slice.to_vec();
             let doc: Value = match simd_json::serde::from_slice(&mut doc_buf) {
                 Ok(v) => v,
@@ -29498,7 +29790,10 @@ impl Index {
             // Candidates are guaranteed query matches by construction
             // (match_all, or positions drawn from the query's own dv/FTS
             // match set) — only the SCORE needs the per-query path.
-            let score = if is_match_all {
+            // #1019 — under the ids-only projection the score is unused
+            // (sort confined to `_id`/`_doc`), so the scorer is skipped and
+            // the hit carries `source: Value::Null` instead of a clone.
+            let score = if is_match_all || ids_only {
                 1.0
             } else {
                 scorer(source_ref, id_ref)
@@ -29514,7 +29809,11 @@ impl Index {
                 Hit {
                     id,
                     score,
-                    source: source_ref.clone(),
+                    source: if ids_only {
+                        Value::Null
+                    } else {
+                        source_ref.clone()
+                    },
                     seq_no: hit_seq_no,
                     version: hit_version,
                     sort: key,
@@ -29555,6 +29854,14 @@ impl Index {
         pre_filter: &PrefilterSet,
         query: &QueryNode,
         is_match_all: bool,
+        // #1019 — ids-only projection: this arm must still PARSE each
+        // candidate (the pre-filter is only a superset, so the full query
+        // is re-tested against `_source`), but under the projection the
+        // admitted hit carries `source: Value::Null` and skips the scorer.
+        // Unreachable for the delete loops themselves (they sort by `_id`,
+        // which routes them to the sorted-candidate / scan arms); kept
+        // uniform so no ids-only admission can clone a source tree.
+        ids_only: bool,
         count_only: bool,
         materialisation_limit: usize,
         count_authoritative: bool,
@@ -29646,8 +29953,15 @@ impl Index {
             if seen_ids.contains(&id) {
                 continue;
             }
-            let source = doc.get("_source").cloned().unwrap_or_else(|| doc.clone());
-            let score = if is_match_all {
+            // #1019 — ids-only projection: no source clone, no scorer (the
+            // eligibility argument is documented on the sort-topk branch of
+            // `scan_stored_section_into`).
+            let source = if ids_only {
+                Value::Null
+            } else {
+                doc.get("_source").cloned().unwrap_or_else(|| doc.clone())
+            };
+            let score = if is_match_all || ids_only {
                 1.0
             } else {
                 scorer(&source, &id)
@@ -29933,6 +30247,10 @@ impl Index {
         stored_bytes: &[u8],
         query: &QueryNode,
         is_match_all: bool,
+        // #1019 — ids-only projection: the caller reads nothing but `hit.id`
+        // (delete-by-query / engine purge pages); sort keys were gated to
+        // `_id`/`_doc` in `search_inner`. See the admission block below.
+        ids_only: bool,
         count_only: bool,
         materialisation_limit: usize,
         count_authoritative: bool,
@@ -29987,6 +30305,28 @@ impl Index {
         // Computed once for the whole scan, not per doc — see
         // `query_needs_id_injection`'s doc comment.
         let needs_id_injection = query_needs_id_injection(query);
+
+        // #1019 — precomputed cursor for the ids-only fast decline in the
+        // admission block below: `(cursor, ascending)` when the sort is a
+        // sole `_id` key with a string `search_after` (every delete-by-query
+        // page after the first). Any other shape declines through the normal
+        // `would_admit` path.
+        let ids_only_cursor: Option<(String, bool)> = if !ids_only {
+            None
+        } else {
+            sort_topk.as_ref().and_then(|t| {
+                if t.fields.len() == 1 && t.fields[0].field == "_id" {
+                    let asc = t.fields[0].order == xerj_query::sort::SortOrder::Asc;
+                    t.after
+                        .as_ref()
+                        .and_then(|a| a.first())
+                        .and_then(Value::as_str)
+                        .map(|c| (c.to_string(), asc))
+                } else {
+                    None
+                }
+            })
+        };
 
         loop {
             // F1b — IN-SEGMENT early stop.  The between-segment F1 break in
@@ -30124,6 +30464,137 @@ impl Index {
 
             let doc_slice = &bytes[start..end];
 
+            // #1019 — ids-only admission. This scan feeds a caller that
+            // reads nothing but `hit.id`, the sort keys are `_id`/`_doc`
+            // only (gated in `search_inner`), and the query decides
+            // membership without a `_source` (match_all, or an `ids`
+            // clause compared by string). Extract the id straight off the
+            // stored slice — BORROWED, no per-doc allocation — and admit
+            // WITHOUT building the `Value` tree: the full-tree parse of
+            // every stored doc was the dominant RSS transient and wall
+            // time of a whole-corpus purge (issue #1019 — the residual
+            // the #950 fix recorded as follow-up headroom). The version-map
+            // liveness filter is kept verbatim (a tombstoned id must not be
+            // admitted); the superseded-copy (`_seq_no`) skip is
+            // deliberately dropped because a stale copy carries the SAME
+            // id — id-set membership is all this projection may decide.
+            // `extract_stored_id_str` returns `None` for escape-bearing or
+            // unusual layouts; those (and queries that need `_source` to
+            // test membership) fall through to the full parse below, which
+            // admits with the same ids-only source cut.
+            //
+            // Cursor decline comes FIRST, before the liveness lookup and
+            // every allocation: a delete-by-query purge walks this scan
+            // once per `scroll_size` page, and every page after the first
+            // re-visits all previously deleted docs — with the id-ordered
+            // cursor compared as raw bytes up front, a declined doc costs
+            // one prefix scan + one memcmp and nothing else (63.5 M such
+            // visits measured on the 252k-doc purge benchmark before this
+            // ordering). Below-cursor docs are also skipped out of
+            // `total_count`; the only ids-only callers are the delete
+            // loops, which read `hits.total` off page 1 (cursor `None`).
+            let ids_only_admit: Option<&str> = if !ids_only {
+                None
+            } else {
+                extract_stored_id_str(doc_slice)
+            };
+            if let Some(id) = ids_only_admit {
+                if let Some((ref cursor, asc)) = ids_only_cursor {
+                    let ord = id.as_bytes().cmp(cursor.as_bytes());
+                    let at_or_below = if asc {
+                        ord != std::cmp::Ordering::Greater
+                    } else {
+                        ord != std::cmp::Ordering::Less
+                    };
+                    if at_or_below {
+                        continue;
+                    }
+                }
+                // Membership without a `_source`. `None` = this query
+                // needs the full parse to decide → fall through.
+                let member: Option<bool> = match query {
+                    QueryNode::MatchAll => Some(true),
+                    QueryNode::Ids { values } => Some(values.iter().any(|v| v == id)),
+                    _ => None,
+                };
+                if member == Some(false) {
+                    continue;
+                }
+                if member == Some(true) {
+                    let mut hit_seq_no = None;
+                    let mut hit_version = None;
+                    if let Some(ver) = self.store.version_map.get(id) {
+                        if ver.deleted {
+                            continue;
+                        }
+                        let (s, v) = self.hit_seq_version(id, &ver);
+                        hit_seq_no = s;
+                        hit_version = v;
+                    }
+                    *total_count += 1;
+                    *dbg_admitted += 1;
+                    if count_only {
+                        continue;
+                    }
+                    if let Some(topk) = sort_topk.as_deref_mut() {
+                        if seen_ids.contains(id) {
+                            continue;
+                        }
+                        let key = compute_sort_values(
+                            &Value::Null,
+                            1.0,
+                            id,
+                            topk.fields.as_slice(),
+                            self,
+                        );
+                        if !topk.would_admit(&key) {
+                            continue;
+                        }
+                        seen_ids.insert(id.to_string());
+                        let seq = hit_seq_no.unwrap_or(u64::MAX);
+                        topk.offer_keyed(
+                            Hit {
+                                id: id.to_string(),
+                                score: 1.0,
+                                source: Value::Null,
+                                seq_no: hit_seq_no,
+                                version: hit_version,
+                                sort: key,
+                                explain: None,
+                                highlight: None,
+                                matched_queries: Vec::new(),
+                                passage: None,
+                            },
+                            seq,
+                        );
+                        continue;
+                    }
+                    if all_hits.len() >= materialisation_limit {
+                        if count_authoritative {
+                            break;
+                        }
+                        continue;
+                    }
+                    if seen_ids.contains(id) {
+                        continue;
+                    }
+                    seen_ids.insert(id.to_string());
+                    all_hits.push(Hit {
+                        id: id.to_string(),
+                        score: 1.0,
+                        source: Value::Null,
+                        seq_no: hit_seq_no,
+                        version: hit_version,
+                        sort: Vec::new(),
+                        explain: None,
+                        highlight: None,
+                        matched_queries: Vec::new(),
+                        passage: None,
+                    });
+                    continue;
+                }
+            }
+
             let mut doc_buf = doc_slice.to_vec();
             let doc: Value = match simd_json::serde::from_slice(&mut doc_buf) {
                 Ok(v) => v,
@@ -30216,7 +30687,14 @@ impl Index {
                     continue;
                 }
                 let source_ref = doc.get("_source").unwrap_or(&doc);
-                let score = if is_match_all {
+                // #1019 — under the ids-only projection the score is unused
+                // (the eligibility gate confined the sort to `_id`/`_doc`,
+                // neither of which reads `_source` to rank), so the scorer
+                // is skipped and the hit carries `source: Value::Null`
+                // instead of a clone of the parsed tree — the per-hit clone
+                // is what piled up in the bounded heap across a
+                // whole-corpus purge.
+                let score = if is_match_all || ids_only {
                     1.0
                 } else {
                     scorer(source_ref, id_ref)
@@ -30233,7 +30711,11 @@ impl Index {
                     Hit {
                         id,
                         score,
-                        source: source_ref.clone(),
+                        source: if ids_only {
+                            Value::Null
+                        } else {
+                            source_ref.clone()
+                        },
                         seq_no: hit_seq_no,
                         version: hit_version,
                         sort: key,
@@ -30269,8 +30751,14 @@ impl Index {
                 continue;
             }
 
-            let source = doc.get("_source").cloned().unwrap_or_else(|| doc.clone());
-            let score = if is_match_all {
+            // #1019 — ids-only projection: no source clone, no scorer (see
+            // the sort-topk branch above for the eligibility argument).
+            let source = if ids_only {
+                Value::Null
+            } else {
+                doc.get("_source").cloned().unwrap_or_else(|| doc.clone())
+            };
+            let score = if is_match_all || ids_only {
                 1.0
             } else {
                 scorer(&source, &id)
@@ -35775,6 +36263,13 @@ fn wal_shards_override_from_settings(settings: &Value) -> Option<usize> {
 /// is a create-time fd exhaustion — the exact failure this setting exists to
 /// prevent.
 const MAX_PER_INDEX_WAL_SHARDS: u64 = 256;
+
+/// Batch size for the engine-level `Index::delete_by_query` keyset loop
+/// (#1019) — ES's `scroll_size` default ("The size of the scroll request
+/// that powers the operation"). Paging is keyset (`search_after` on a
+/// `_id: asc` sort), so a small page never approaches the
+/// `max_result_window` deep-paging wall.
+const DELETE_BY_QUERY_PAGE: usize = 1_000;
 
 /// A concurrent map that exists **once per index** (#873).
 ///
@@ -45505,13 +46000,14 @@ impl PrefilterSet {
 /// however many complete objects it found (caller compares against the
 /// segment doc count to reject malformed sections).
 /// Extract the `_id` string value from a stored-doc slice
-/// (`{"_id":"<value>",...}`) without a full JSON parse.  Returns `None` when
-/// the slice does not begin with an `_id` string key, or when the value
-/// contains a JSON escape (`\`), in which case the caller falls back to a full
-/// parse.  This is the hot path for building the per-segment id→position map:
+/// (`{"_id":"<value>",...}`) without a full JSON parse, borrowing from the
+/// slice.  Returns `None` when the slice does not begin with an `_id` string
+/// key, or when the value contains a JSON escape (`\`), in which case the
+/// caller falls back to a full parse.  This is the hot path for building the
+/// per-segment id→position map and for the #1019 ids-only scan admission:
 /// the common append-only corpus has escape-free ids, so it stays a cheap
 /// prefix scan.
-fn extract_stored_id(slice: &[u8]) -> Option<String> {
+fn extract_stored_id_str(slice: &[u8]) -> Option<&str> {
     let n = slice.len();
     let mut i = 0usize;
     // Leading whitespace + opening brace.
@@ -45550,14 +46046,17 @@ fn extract_stored_id(slice: &[u8]) -> Option<String> {
         match slice[i] {
             b'\\' => return None, // escape present → let the caller full-parse
             b'"' => {
-                return std::str::from_utf8(&slice[val_start..i])
-                    .ok()
-                    .map(str::to_string)
+                return std::str::from_utf8(&slice[val_start..i]).ok();
             }
             _ => i += 1,
         }
     }
     None
+}
+
+/// Owned form of [`extract_stored_id_str`] for callers that keep the id.
+fn extract_stored_id(slice: &[u8]) -> Option<String> {
+    extract_stored_id_str(slice).map(str::to_string)
 }
 
 /// Exact set of stored positions matching a `term`/`terms` value list in one

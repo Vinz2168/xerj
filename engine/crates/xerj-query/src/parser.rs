@@ -365,6 +365,8 @@ pub fn parse_request(body: &Value) -> Result<SearchRequest> {
         // Never parsed off the wire body: the ES-compat `_search` handler
         // sets this from `?savings=`.
         savings: SavingsMode::Off,
+        // #1019: ids-only is engine-internal and never arrives from the wire.
+        ids_only: false,
     })
 }
 
