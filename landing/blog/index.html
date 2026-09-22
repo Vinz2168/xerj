@@ -4,90 +4,19 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>XERJ.ai — Blog: the engineering log</title>
-<meta name="description" content="Measured results with the losses left in: the JEV verdict, benchmark autopsies, and the Jev wire XERJ answers locally.">
+<meta name="description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, and benchmark autopsies that name the runs behind every number.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@400;700;800;900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%230b0b0d'/><text x='50' y='68' font-size='60' font-family='Big Shoulders Display,sans-serif' font-weight='900' fill='%23ffc400' text-anchor='middle'>X</text></svg>">
 <link rel="stylesheet" href="/style.css?v=if9">
-<style>
-  /* page-local — blog index: dated cards, preview visual left, brand tokens
-     only, 1px lines, no icons, no shadows, no filled shapes. */
-  .blog-hero { padding: var(--sp-6) 0 var(--sp-8); }
-  .blog-hero .uc-eyebrow { margin-bottom: var(--sp-4); }
-
-  ol.blog-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-6); }
-  .bl-card {
-    display: grid;
-    grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
-    gap: var(--sp-6);
-    border: 1px solid var(--z-line);
-    padding: var(--sp-5);
-    text-decoration: none;
-    color: inherit;
-  }
-  .bl-card:hover, .bl-card:focus-visible { border-color: var(--z-accent); }
-
-  /* preview slot — a theme-native miniature scorecard, pure divs; no image
-     file, correct in day and night by construction (site precedent: every
-     chart in the benchmarks pages is CSS bars). */
-  .bl-preview { border: 1px solid var(--z-line); padding: var(--sp-4); align-self: stretch; }
-  .blp-kicker { font-family: var(--font-data); font-size: var(--fs-11); font-weight: 600;
-                letter-spacing: var(--track-label); text-transform: uppercase;
-                color: var(--z-mute); padding-bottom: var(--sp-3);
-                border-bottom: 1px solid var(--z-line); }
-  .blp-row { padding: var(--sp-3) 0; border-bottom: 1px solid var(--z-line); }
-  .blp-row:last-of-type { border-bottom: 0; }
-  .blp-ds { font-family: var(--font-data); font-size: var(--fs-11); font-weight: 600;
-            letter-spacing: var(--track-label); text-transform: uppercase; color: var(--z-mute); }
-  .blp-pair { display: grid; grid-template-columns: minmax(92px, 116px) minmax(0, 1fr);
-              gap: var(--sp-2) var(--sp-3); align-items: center; margin-top: var(--sp-2); }
-  .blp-bar { height: 4px; min-width: 2px; }
-  .blp-bar.a { background: var(--z-accent); }
-  .blp-bar.b { background: var(--z-cmp); }
-  .blp-num { font-family: var(--font-mono); font-size: var(--fs-11); color: var(--z-ink);
-             white-space: nowrap; display: flex; align-items: baseline; gap: 6px; }
-  .blp-num i { font-style: normal; font-family: var(--font-data); font-size: 10px;
-               letter-spacing: .02em; color: var(--z-mute); }
-  .blp-num.b { color: var(--z-cmp); }
-  .blp-chip { color: var(--z-cmp); font-weight: 700; }
-  .blp-foot { margin: var(--sp-3) 0 0; padding-top: var(--sp-3); border-top: 1px solid var(--z-line);
-              font-family: var(--font-mono); font-size: var(--fs-11); line-height: 1.6; color: var(--z-mute); }
-
-  .bl-meta { min-width: 0; }
-  .bl-date { font-family: var(--font-data); font-size: var(--fs-11); font-weight: 600;
-             letter-spacing: var(--track-label); text-transform: uppercase; color: var(--z-mute);
-             font-variant-numeric: tabular-nums; }
-  .bl-title { margin: var(--sp-3) 0 0; font-family: var(--font-display); font-weight: 800;
-              font-size: var(--fs-32); line-height: 1.05; color: var(--z-ink); }
-  .bl-card:hover .bl-title, .bl-card:focus-visible .bl-title { color: var(--z-accent); }
-  .bl-excerpt { margin: var(--sp-3) 0 0; font-family: var(--font-prose); font-size: var(--fs-16);
-                line-height: 1.65; color: var(--z-mute); max-width: 68ch; }
-  .bl-excerpt strong { color: var(--z-ink); }
-  .bl-byline { margin: var(--sp-4) 0 0; font-family: var(--font-data); font-size: var(--fs-11);
-               font-weight: 600; letter-spacing: var(--track-label); text-transform: uppercase;
-               color: var(--z-mute); font-variant-numeric: tabular-nums; }
-  .bl-read { display: inline-block; margin-top: var(--sp-4); font-family: var(--font-data);
-             font-size: var(--fs-11); font-weight: 700; letter-spacing: var(--track-label);
-             text-transform: uppercase; color: var(--z-accent);
-             border-bottom: 1px solid var(--z-accent); padding-bottom: 1px; }
-
-  .blog-archive { margin: var(--sp-8) 0 0; padding-top: var(--sp-4); border-top: 1px solid var(--z-line);
-                  font-family: var(--font-data); font-size: var(--fs-13); color: var(--z-mute); }
-  .blog-archive a { color: var(--z-mute); border-bottom: 1px solid var(--z-line); padding-bottom: 1px; }
-  .blog-archive a:hover, .blog-archive a:focus-visible { color: var(--z-accent); border-color: var(--z-accent); }
-
-  @media (max-width: 720px) {
-    .bl-card { grid-template-columns: minmax(0, 1fr); gap: var(--sp-4); }
-    .bl-title { font-size: var(--fs-20); }
-  }
-</style>
+<link rel="stylesheet" href="/blog.css?v=1">
 <!-- seo:begin — generated by scripts/seo/fix_heads.py · do not hand-edit -->
 <link rel="canonical" href="https://xerj.org/blog/">
 <meta property="og:site_name" content="XERJ.ai">
 <meta property="og:type" content="website">
 <meta property="og:title" content="XERJ.ai — Blog: the engineering log">
-<meta property="og:description" content="Measured results with the losses left in: the JEV verdict, benchmark autopsies, and the Jev wire XERJ answers locally.">
+<meta property="og:description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, and benchmark autopsies that name the runs behind every number.">
 <meta property="og:url" content="https://xerj.org/blog/">
 <meta property="og:image" content="https://xerj.org/og/xerj-card.png">
 <meta property="og:image:width" content="1200">
@@ -96,7 +25,7 @@
 <meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="XERJ.ai — Blog: the engineering log">
-<meta name="twitter:description" content="Measured results with the losses left in: the JEV verdict, benchmark autopsies, and the Jev wire XERJ answers locally.">
+<meta name="twitter:description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, and benchmark autopsies that name the runs behind every number.">
 <meta name="twitter:image" content="https://xerj.org/og/xerj-card.png">
 <script type="application/ld+json">
 {
@@ -130,7 +59,7 @@
   "@context": "https://schema.org",
   "@type": "CollectionPage",
   "name": "XERJ.ai — Blog: the engineering log",
-  "description": "Measured results with the losses left in: the JEV verdict, benchmark autopsies, and the Jev wire XERJ answers locally.",
+  "description": "Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, and benchmark autopsies that name the runs behind every number.",
   "url": "https://xerj.org/blog/",
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
@@ -184,17 +113,63 @@
   <span class="theme"><button type="button" data-theme="day" class="active">DAY</button><span class="dash">·</span><button type="button" data-theme="night">NIGHT</button></span>
 </nav>
 
+<main>
 <div class="uc-hero blog-hero">
   <div class="uc-eyebrow">XERJ · BLOG · THE ENGINEERING LOG</div>
   <h1>MEASURED,<br><span class="accent">WRITTEN DOWN.</span></h1>
-  <p class="uc-lead">Results with the losses left in. Newest first.</p>
-  <p class="uc-lead" style="max-width:760px;">This is where the measurements get written up as they happen — the wins, the losses, and the bill. Every post is dated, cites the runs it came from, and leaves the losing rows in the tables, because a number you cannot trace is marketing. The entry below puts TypeSafe AI's Jev judge model over 1,271 judged BEIR queries against a XERJ first stage, then turns the wire around and answers it from a local node: no tokens, no egress, every figure reproduced from the artifacts it names.</p>
+  <p class="uc-lead">We write up the measurements as they happen, and we leave the losing rows in the
+  tables. Every post is dated and names the runs it came from, because a number you cannot trace back to
+  a run is marketing.</p>
 </div>
 
 <section class="scene-section" style="border-top:0; padding-top:0;">
   <!-- Reverse-chronological by hand while there is one post; new posts PREPEND.
        Move to a generator only past ~10 posts. -->
   <ol class="blog-list">
+    <li>
+      <a class="bl-card" href="/blog/jev-vs-a-bm25-vote">
+        <!-- Bar widths share ONE denominator, 0.9880 (the max across all rows),
+             so lengths compare across rows. Figures verbatim from the post:
+             SMS 0.9840 hybrid / 0.9880 Jev · B77 0.9140 hybrid / 0.8240 Jev ·
+             DBpedia 0.9125 semantic / 0.9800 Jev (the row we lose). -->
+        <div class="bl-preview" aria-hidden="true">
+          <div class="blp-kicker">XERJ vs JEV · ACCURACY · 500 DECISIONS EACH</div>
+          <div class="blp-row">
+            <div class="blp-ds">SMS SPAM</div>
+            <div class="blp-pair">
+              <span class="blp-num">0.9840 <i>hybrid</i></span><span class="blp-bar a" style="width:99.6%"></span>
+              <span class="blp-num b">0.9880 <i>Jev</i></span><span class="blp-bar b" style="width:100%"></span>
+            </div>
+          </div>
+          <div class="blp-row">
+            <div class="blp-ds">BANKING77</div>
+            <div class="blp-pair">
+              <span class="blp-num">0.9140 <i>hybrid</i> <span class="blp-chip">+0.090</span></span><span class="blp-bar a" style="width:92.5%"></span>
+              <span class="blp-num b">0.8240 <i>Jev</i></span><span class="blp-bar b" style="width:83.4%"></span>
+            </div>
+          </div>
+          <div class="blp-row">
+            <div class="blp-ds">DBPEDIA</div>
+            <div class="blp-pair">
+              <span class="blp-num">0.9125 <i>semantic</i></span><span class="blp-bar a" style="width:92.4%"></span>
+              <span class="blp-num b">0.9800 <i>Jev</i></span><span class="blp-bar b" style="width:99.2%"></span>
+            </div>
+          </div>
+          <p class="blp-foot">$0 · 0 tokens (XERJ, local) vs $0.0709 per 1k decisions (Jev, Banking77)</p>
+        </div>
+        <div class="bl-meta">
+          <p class="bl-date"><time datetime="2026-09-22">2026-09-22</time> · BENCHMARKS · DECISIONS</p>
+          <h2 class="bl-title">A BM25 vote ties Jev on spam and beats it on intent</h2>
+          <p class="bl-excerpt">Five hundred decisions each, on two public datasets. On spam the two are
+          statistically indistinguishable (McNemar <strong>p = 0.75</strong>). On 77-way intent a local
+          vote wins by <strong>nine points</strong> at <strong>zero marginal cost</strong>. The crossover
+          is twenty-five labelled examples per class. On DBpedia Jev beats us outright, and that row
+          stays in.</p>
+          <p class="bl-byline">AUTHOR · XERJ ENGINEERING TEAM · PUBLISHED · 2026-09-22</p>
+          <span class="bl-read">READ THE POST →</span>
+        </div>
+      </a>
+    </li>
     <li>
       <a class="bl-card" href="/blog/does-xerj-beat-jev">
         <!-- Preview bar widths are normalized against ONE global denominator,
