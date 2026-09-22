@@ -1,0 +1,108 @@
+{
+ "label": "n150-32cpu",
+ "date_utc": "2026-09-22T01:10:07+00:00",
+ "binary": {
+  "version": "xerj v1.0.0-rc.77",
+  "path": "/root/xerj-874/engine/target/ci-test/xerj"
+ },
+ "corpus": {
+  "shape": "5x30",
+  "indices": 150,
+  "docs_per_index": 3
+ },
+ "port": 9613,
+ "window_s": 120.0,
+ "settle_target_s": 120.0,
+ "boot_ms": {
+  "empty_node": 853,
+  "baseline_arm": 1310,
+  "n_indices": 9
+ },
+ "wal_replay_lines_after_clean_flush": 0,
+ "doc_probe_hits": 3,
+ "baseline": {
+  "pid": 3640851,
+  "window_s": 120.0,
+  "clk_tck": 100,
+  "cpu_ticks": 13,
+  "cpu_percent_of_one_core": 0.1083,
+  "wakeups_per_s": 26.0,
+  "voluntary_per_s": 24.2,
+  "nonvoluntary_per_s": 1.8,
+  "rss_kb": 76572,
+  "hwm_kb": 76572,
+  "rss_anon_kb": 50792,
+  "rss_file_kb": 25780,
+  "anon_hugepages_kb": 0,
+  "threads": 340,
+  "fds": 15,
+  "per_thread_cpu": [
+   {
+    "comm": "xerj-mem-sample",
+    "cpu_ticks": 7,
+    "threads": 1,
+    "cpu_percent_of_one_core": 0.058
+   },
+   {
+    "comm": "xerj-memtable-s",
+    "cpu_ticks": 3,
+    "threads": 1,
+    "cpu_percent_of_one_core": 0.025
+   },
+   {
+    "comm": "xerj-rt",
+    "cpu_ticks": 1,
+    "threads": 1,
+    "cpu_percent_of_one_core": 0.008
+   }
+  ],
+  "loadavg_start": [
+   "30.35",
+   "31.96",
+   "32.67"
+  ]
+ },
+ "measurement": {
+  "pid": 964966,
+  "window_s": 120.0,
+  "clk_tck": 100,
+  "cpu_ticks": 19,
+  "cpu_percent_of_one_core": 0.1583,
+  "wakeups_per_s": 26.6,
+  "voluntary_per_s": 24.2,
+  "nonvoluntary_per_s": 2.4,
+  "rss_kb": 98124,
+  "hwm_kb": 98124,
+  "rss_anon_kb": 70016,
+  "rss_file_kb": 28108,
+  "anon_hugepages_kb": 0,
+  "threads": 336,
+  "fds": 15,
+  "per_thread_cpu": [
+   {
+    "comm": "xerj-memtable-s",
+    "cpu_ticks": 9,
+    "threads": 1,
+    "cpu_percent_of_one_core": 0.075
+   },
+   {
+    "comm": "xerj-mem-sample",
+    "cpu_ticks": 7,
+    "threads": 1,
+    "cpu_percent_of_one_core": 0.058
+   },
+   {
+    "comm": "xerj-rt",
+    "cpu_ticks": 1,
+    "threads": 1,
+    "cpu_percent_of_one_core": 0.008
+   }
+  ],
+  "loadavg_start": [
+   "32.94",
+   "32.46",
+   "32.75"
+  ]
+ },
+ "per_index_rss_kb": 143.7
+}

@@ -40784,47 +40784,51 @@ async fn real_node_search_index_totals(state: &AppState) -> (u64, u64, u64, u64)
     (q_total, q_ms, i_total, i_ms)
 }
 
-/// Refresh the process-level Prometheus gauges from live engine state. Reads
-/// only cheap snapshots (a lock-free store RCU snapshot per index plus a stat
-/// of each WAL dir), so it is safe to call on a short interval.
-async fn refresh_metric_gauges(state: &AppState) {
+/// Refresh the process-level Prometheus gauges from live engine state, on
+/// demand. The `/v1/metrics` handler calls this at scrape time (#874): a
+/// scrape is the only moment these gauges are observable, so paying there
+/// makes them live exactly when they can be read and free the rest of the
+/// time.
+///
+/// This replaced a 10 s background loop whose per-tick work was this same
+/// function running whether anyone read the values or not. That is not
+/// "cheap snapshots" at every scale: `dir_size_bytes` over each index's WAL
+/// subtree is one `read_dir` plus one `metadata()` per WAL file (~16 shards
+/// per index by default), i.e. O(indices x wal shards) of real filesystem
+/// metadata work on an async runtime worker — an idle CPU cost that grows
+/// with index count, measured at ~0.7 % of one core for 450 idle indices on
+/// the at-rest fixture (benchmarks/idle-budget/README.md). The walk now runs
+/// on the blocking pool, never on a runtime worker, and only on scrape.
+pub(crate) async fn refresh_metric_gauges(state: &AppState) {
     let indices = state.engine.list_indices().await;
     let mut total_docs: i64 = 0;
-    let mut total_segments: i64 = 0;
-    let mut wal_bytes: i64 = 0;
+    let mut handles = Vec::with_capacity(indices.len());
     for info in &indices {
         total_docs += info.doc_count as i64;
         if let Ok(idx) = state.engine.get_index(&info.name) {
+            handles.push(idx);
+        }
+    }
+    let (total_segments, wal_bytes) = tokio::task::spawn_blocking(move || {
+        let mut total_segments: i64 = 0;
+        let mut wal_bytes: i64 = 0;
+        for idx in &handles {
             total_segments += idx.store_snapshot().segments.len() as i64;
             // WAL files live under `<index>/wal/*.wal`; sum just that subtree so
             // the gauge tracks WAL growth (the WAL-runaway ticket) and not the
             // segments alongside it.
             wal_bytes += dir_size_bytes(&idx.data_dir().join("wal")) as i64;
         }
-    }
+        (total_segments, wal_bytes)
+    })
+    .await
+    .unwrap_or((0, 0));
     state.metrics.doc_count.set(total_docs);
     state.metrics.segment_count.set(total_segments);
     state.metrics.wal_size_bytes.set(wal_bytes);
     // Real process RSS (the RSS-runaway ticket's key signal).
     if let Some(rss) = read_rss_bytes() {
         state.metrics.memory_usage.set(rss as i64);
-    }
-}
-
-/// Background loop that refreshes the Prometheus gauges
-/// (`doc_count` / `segment_count` / `wal_size_bytes` / `memory_usage`) every
-/// 10 s. These are otherwise never written, so before this task `/metrics`
-/// reported them as a flat zero even at millions of docs — hiding exactly the
-/// RSS-runaway and WAL-growth signals operators need. The server spawns this
-/// once at startup. `tokio::time::interval` fires its first tick immediately,
-/// so the gauges are populated on the first pass rather than reading zero for
-/// the first 10 s.
-pub async fn run_metrics_gauge_loop(state: AppState) {
-    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        ticker.tick().await;
-        refresh_metric_gauges(&state).await;
     }
 }
 

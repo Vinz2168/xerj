@@ -1,0 +1,106 @@
+{
+ "label": "n450indices",
+ "date_utc": "2026-09-21T21:31:23+00:00",
+ "binary": {
+  "version": "xerj v1.0.0-rc.77",
+  "path": "/root/xerj-874/engine/target/release/xerj"
+ },
+ "corpus": {
+  "shape": "15x30",
+  "indices": 450,
+  "docs_per_index": 3
+ },
+ "port": 9610,
+ "window_s": 120.0,
+ "settle_target_s": 120.0,
+ "boot_ms": {
+  "empty_node": 184,
+  "baseline_arm": 1576,
+  "n_indices": 215
+ },
+ "wal_replay_lines_after_clean_flush": 0,
+ "doc_probe_hits": 3,
+ "baseline": {
+  "pid": 450100,
+  "window_s": 120.0,
+  "clk_tck": 100,
+  "cpu_ticks": 12,
+  "cpu_percent_of_one_core": 0.1,
+  "wakeups_per_s": 26.0,
+  "voluntary_per_s": 24.4,
+  "nonvoluntary_per_s": 1.7,
+  "rss_kb": 76240,
+  "hwm_kb": 115132,
+  "rss_anon_kb": 52200,
+  "rss_file_kb": 24040,
+  "threads": 340,
+  "fds": 15,
+  "per_thread_cpu": [
+   {
+    "comm": "xerj-mem-sample",
+    "cpu_ticks": 8,
+    "threads": 1,
+    "cpu_percent_of_one_core": 0.067
+   },
+   {
+    "comm": "xerj-memtable-s",
+    "cpu_ticks": 3,
+    "threads": 1,
+    "cpu_percent_of_one_core": 0.025
+   },
+   {
+    "comm": "xerj-rt",
+    "cpu_ticks": 2,
+    "threads": 1,
+    "cpu_percent_of_one_core": 0.017
+   }
+  ],
+  "loadavg_start": [
+   "44.69",
+   "41.35",
+   "41.16"
+  ]
+ },
+ "measurement": {
+  "pid": 2228862,
+  "window_s": 120.0,
+  "clk_tck": 100,
+  "cpu_ticks": 21,
+  "cpu_percent_of_one_core": 0.175,
+  "wakeups_per_s": 26.6,
+  "voluntary_per_s": 24.2,
+  "nonvoluntary_per_s": 2.4,
+  "rss_kb": 158944,
+  "hwm_kb": 173028,
+  "rss_anon_kb": 134704,
+  "rss_file_kb": 24240,
+  "threads": 336,
+  "fds": 15,
+  "per_thread_cpu": [
+   {
+    "comm": "xerj-memtable-s",
+    "cpu_ticks": 10,
+    "threads": 1,
+    "cpu_percent_of_one_core": 0.083
+   },
+   {
+    "comm": "xerj-mem-sample",
+    "cpu_ticks": 7,
+    "threads": 1,
+    "cpu_percent_of_one_core": 0.058
+   },
+   {
+    "comm": "xerj-rt",
+    "cpu_ticks": 1,
+    "threads": 1,
+    "cpu_percent_of_one_core": 0.008
+   }
+  ],
+  "loadavg_start": [
+   "37.78",
+   "39.23",
+   "40.32"
+  ]
+ },
+ "per_index_rss_kb": 183.8
+}
