@@ -398,7 +398,7 @@
     </div>
   </div>
 
-  <h3 class="scene" style="font-size:var(--fs-24); margin-top:var(--sp-8);">The gate: the pip client, unmodified, on a local node</h3>
+  <h3 class="scene" style="font-size:var(--fs-20); margin-top:var(--sp-8);">The gate: the pip client, unmodified, on a local node</h3>
   <p class="wide">No SDK of ours, no patches, no subclassing. <code class="inline">pip install jev-reranker</code> (0.1.2, MIT), its own listwise template, its own splitting, its own strict response validation, pointed at a XERJ node holding 4,000 labelled SMS messages. The gate ranks through both of the client's entry points — the constructor default, and the documented relevance preset, which since 0.1.2 ships its rubric as an <em>object</em> the vote must acknowledge without reading it as retrieval text. Two environment variables, and one of them is a trap:</p>
 
   <pre class="code"><span class="prompt">$</span> pip install jev-reranker
@@ -424,7 +424,7 @@ GATE PASSED: unmodified jev-reranker ranked from the XERJ node</span></pre>
     <strong>The first gate attempt failed. It is the most useful thing on this page.</strong> The wire puts the query in <code class="inline">state</code>, and the vote text joined it, so query vocabulary took part in retrieval. With a spam-bearing query like "winner claim prize", <em>every</em> document's vote retrieved spam neighbours. The vote measured the query, not the documents: spam 1.000 against ham 0.785. No separation. We first called that "inherent to a retrieval vote". <strong>It was not. It was two defects, and we fixed them.</strong> The vote text used to concatenate the instruction's prose into the retrieval query — wording alone moved accuracy 32 points (0.9867 with an empty instruction, 0.6700 with a criteria-rich one, same 300 held-out messages) — and an object state contributed only its <code class="inline">query</code> field, so <code class="inline">{"message": …}</code> voted on prose at the spam base rate (0.1733 against 0.9667 for the same message as a string). The vote text is now exactly what the question points at: its backtick references, or the state's own string content — never instruction prose, never state the question never named. After the fix, all eight wording/shape arms of the same 300 messages score identically (0.9767). One part <em>is</em> by design, and it is the client's choice, not ours: since 0.1.2 the client's own question references the query in backticks, so the query is named payload — the question being asked is "does this document answer this query". <strong>Pick the query for the history you have</strong> still holds: under the deliberately spammy query the gap narrows from 0.8542 to 0.6087, and the gate asserts both.
   </div>
 
-  <h3 class="scene" style="font-size:var(--fs-24); margin-top:var(--sp-8);">Speed: the Rust side of the same wire</h3>
+  <h3 class="scene" style="font-size:var(--fs-20); margin-top:var(--sp-8);">Speed: the Rust side of the same wire</h3>
   <p class="wide">A full news item against 120,000 labelled AG News examples is a heavy query. About 40 terms, and the match set is most of the index. This is the workload that exposed the waste in our own search loop. The old path built a hit list per term, folded them through hash maps, and sorted the whole match set. All that to return a size-10 page. We replaced it with a WAND-style pruned walk for the one shape every <code class="inline">match</code> query becomes. A document is now scored only when it can still make the page even at its best possible score. The method is the classic one from Broder et al., and the same idea tantivy uses, adapted to our postings format.</p>
 
   <div class="vt-wrap">
@@ -463,7 +463,7 @@ GATE PASSED: unmodified jev-reranker ranked from the XERJ node</span></pre>
     <p class="vc-note">The hosted bar is the Jev API's measured p50 on the FiQA rerank run in §02, 1.23 s per query. Its fastest of the three datasets, so the bar is generous to the hosted side; SciFact and NFCorpus measured 1.49 s and 1.48 s. The local bars are the same wire answered by the vote over 120k AG News history on this engine. Different tools: the hosted judge needs no history, the vote needs this index. This is a speed, cost and egress comparison, not a quality race. No Jev number exists for AG News and we claim none.</p>
   </div>
 
-  <h3 class="scene" style="font-size:var(--fs-24); margin-top:var(--sp-8);">What the vote itself is worth</h3>
+  <h3 class="scene" style="font-size:var(--fs-20); margin-top:var(--sp-8);">What the vote itself is worth</h3>
   <p class="wide">Measured earlier on the same engine (<a href="/benchmarks/">the hub's ranking section</a>), on the vote's home ground: labelled history, in-domain classification. <strong>No judge model was run on these datasets by us, and none of these rows say anything about Jev.</strong></p>
 
   <div class="vt-shell vt-shell--hist">
@@ -537,7 +537,7 @@ GATE PASSED: unmodified jev-reranker ranked from the XERJ node</span></pre>
     <strong>What we claim, and what we do not.</strong> Claimed: every number on this page, from the runs cited beside it, on our node, our shortlists, the pinned model. Not claimed: anything about how Jev scores on Banking77, SMS or AG News. TypeSafe has published no such numbers and we ran none, which is why those tables carry no judge row. Not claimed: any zero-shot ability for the local vote, or that the published hosted-reranker figures and ours compare beyond dataset and metric. TypeSafe AI granted the evaluation key that made §01 and §02 possible. The measurements are of their model, through their documented API, and this project thanks them for the access. The findings are ours, warts published.
   </div>
 
-  <h3 class="scene" style="font-size:var(--fs-24); margin-top:var(--sp-8);">Reproduce the gate</h3>
+  <h3 class="scene" style="font-size:var(--fs-20); margin-top:var(--sp-8);">Reproduce the gate</h3>
   <pre class="code"><span class="prompt">$</span> git clone https://github.com/xerj-org/xerj && cd xerj/engine
 <span class="prompt">$</span> cargo build --release -p xerj-server
 <span class="prompt">$</span> cat &gt; gate.toml &lt;&lt;'EOF'

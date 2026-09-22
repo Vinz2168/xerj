@@ -12,124 +12,6 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%230b0b0d'/><text x='50' y='68' font-size='60' font-family='Big Shoulders Display,sans-serif' font-weight='900' fill='%23ffc400' text-anchor='middle'>X</text></svg>">
 <link rel="stylesheet" href="/style.css?v=if10">
 <style>
-  /* page-local — JEV verdict banner + install card (2026-09-21). All new CSS
-     lives here, not in style.css, so the shared sheet needs no cache-buster
-     bump. Brand rules hold: 1px lines, no icons, no shadows, no filled
-     shapes (the .prompt-card gradient border is the site's sole exception).
-     Figures are verbatim from /blog/does-xerj-beat-jev — the two must not
-     drift; nothing here may tell the broken-then-fixed pilot story (that
-     narrative lives in the post). */
-  .jev-banner {
-    max-width: 880px;
-    margin: var(--sp-8) auto var(--sp-8);
-    padding: var(--sp-5) var(--sp-6) var(--sp-6);
-    border: 1px solid var(--z-line);
-    text-align: left;
-  }
-  .jev-banner .jev-kicker {
-    margin: 0 0 var(--sp-3);
-    font-family: var(--font-data);
-    font-size: var(--fs-11);
-    font-weight: 600;
-    letter-spacing: var(--track-label);
-    text-transform: uppercase;
-    color: var(--z-mute);
-  }
-  .jev-banner h2 {
-    margin: 0 0 var(--sp-2);
-    font-family: var(--font-display);
-    font-weight: 800;
-    font-size: var(--fs-32);
-    line-height: 1.05;
-    color: var(--z-ink);
-  }
-  .jev-banner .jev-sub {
-    margin: 0 0 var(--sp-2);
-    font-family: var(--font-prose);
-    font-size: var(--fs-16);
-    line-height: 1.55;
-    color: var(--z-mute);
-  }
-  .jev-banner .jev-foot {
-    margin: var(--sp-3) 0 0;
-    font-family: var(--font-data);
-    font-size: var(--fs-11);
-    line-height: 1.7;
-    color: var(--z-mute);
-  }
-  .jev-banner .jev-link {
-    font-family: var(--font-data);
-    font-size: var(--fs-11);
-    font-weight: 700;
-    letter-spacing: var(--track-label);
-    text-transform: uppercase;
-    color: var(--z-accent);
-    text-decoration: none;
-    border-bottom: 1px solid var(--z-accent);
-    padding-bottom: 1px;
-  }
-  .jev-banner .jev-link:hover, .jev-banner .jev-link:focus-visible {
-    color: var(--z-ink);
-    border-color: var(--z-ink);
-  }
-  .jev-banner .jev-hub {
-    display: block;
-    margin-top: var(--sp-2);
-    font-family: var(--font-data);
-    font-size: var(--fs-11);
-    color: var(--z-mute);
-  }
-  .jev-banner .jev-hub a { color: var(--z-mute); border-bottom: 1px solid var(--z-line); padding-bottom: 1px; text-decoration: none; }
-  .jev-banner .jev-hub a:hover, .jev-banner .jev-hub a:focus-visible { color: var(--z-accent); border-color: var(--z-accent); }
-  .jev-banner .jev-link-row { margin: var(--sp-4) 0 0; }
-
-  /* comparison series, page-local: XERJ is always .cmp-a (accent); the
-     Jev-in-the-loop series is always --z-cmp — accent never marks a Jev-side
-     win (same recolor rule as the wordpress-security-audit page). */
-  .jev-banner .cmp-b .cmp-bar { background: var(--z-cmp); opacity: 1; }
-  .jev-banner .cmp-bars-head .cmp-b { color: var(--z-cmp); font-weight: 700; }
-  .jev-banner .cmp-b .cmp-num { color: var(--z-cmp); }
-  .jev-banner .cmp-b .cmp-ratio { color: var(--z-cmp); }
-  .jev-banner .cmp-val i {
-    font-style: normal;
-    font-family: var(--font-data);
-    font-size: var(--fs-11);
-    color: var(--z-mute);
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-  .jev-banner .cmp-label .cmp-sub {
-    display: block;
-    white-space: normal;
-    font-family: var(--font-data);
-    font-size: var(--fs-11);
-    color: var(--z-mute);
-  }
-  .cmp-tag {
-    font-family: var(--font-data);
-    font-size: var(--fs-11);
-    font-weight: 700;
-    letter-spacing: var(--track-label);
-    text-transform: uppercase;
-    margin-left: 4px;
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .cmp-tag.x { color: var(--z-accent); }
-  .cmp-tag.j { color: var(--z-cmp); }
-
-  /* Desktop chip line (2026-09-21 fix round): the FIQA verdict chip
-     ("JEV WINS · BIGGEST LIFT WE MEASURED") does not fit its ~337px value
-     cell beside bar + number + delta + arm label — the cell clipped
-     internally (scrollWidth > clientWidth, chip 96px past the cell edge)
-     and the blue bar crushed to its 2px minimum, which reads as a cut-off
-     loss marker. That one cell wraps its chip onto a second line; the bar
-     recovers its measured width. Wrap is NOT applied banner-wide on
-     desktop because wide bars (width:100% cells) would force every number
-     onto a second line — only the cells that carry a long chip need it.
-     The <=720px blocks below already wrap every cell, so this class is a
-     no-op there. */
-  .jev-banner .cmp-val.chip-line { flex-wrap: wrap; row-gap: 2px; }
 
   /* Fold recovery (2026-09-21 fix round): at 1440x900 the banner's title sat
      18px below the fold, 91px at 1280x800 — only the kicker broke it. The
@@ -142,7 +24,7 @@
   @media (min-width: 721px) {
     .hero-center { padding-top: var(--sp-3); }
     .hero-center .hero { font-size: clamp(38px, 7.5vw, 140px); }
-    .hero-center .prompt-stage { margin-top: var(--sp-8); }
+  
     .hero-center .prompt-card { padding: var(--sp-5) var(--sp-6) var(--sp-3); }
   }
 
@@ -160,35 +42,6 @@
   .hero-center .hero-install .hero-install-agent-line { margin-top: var(--sp-4); }
 
   @media (max-width: 720px) {
-    .jev-banner { margin: var(--sp-8) auto var(--sp-6); padding: var(--sp-4); }
-    .jev-banner h2 { font-size: var(--fs-20); }
-    /* Verdict chips must not clip off-screen: the value cell lets them wrap
-       onto their own full-width line (order 9 = after bar+number+arm), and
-       they may wrap internally — a clipped loss marker is an invisible loss
-       marker, which the honesty rules forbid. Numbers and arm labels wrap
-       at spaces only (dataset scores carry no spaces, so no mid-number
-       break is possible); the bill figure needs it at this width. */
-    .jev-banner .cmp-val { flex-wrap: wrap; row-gap: 2px; }
-    .jev-banner .cmp-tag { flex-basis: 100%; order: 9; margin-left: 0; white-space: normal; line-height: 1.5; }
-    .jev-banner .cmp-num, .jev-banner .cmp-val i { flex-shrink: 1; min-width: 0; white-space: normal; }
-  }
-
-  /* Phone layout (≤560px), 2026-09-21 fix round: at 390px the shared
-     3-column grid starves each value column to 62px — the FiQA loss chip
-     wrapped into a six-line sliver and its cell clipped internally
-     (scrollWidth > clientWidth), which reads as a cut-off loss marker.
-     Stack instead: dataset label on its own line, then each arm at full
-     column width (~326px at 390px) so bar, number, arm label and chip sit
-     on one readable line. The head row collapses to its two series names;
-     its empty first cell is hidden. Scoped to .jev-banner on this page —
-     the shared sheet and other pages are untouched. */
-  @media (max-width: 560px) {
-    .jev-banner .cmp-bars-head { grid-template-columns: 1fr; gap: 2px; }
-    .jev-banner .cmp-bars-head span:first-child { display: none; }
-    .jev-banner .cmp-bars-row { grid-template-columns: 1fr; gap: var(--sp-1) 0; padding: var(--sp-3) 0; }
-    .jev-banner .cmp-label { white-space: normal; }
-    .jev-banner .cmp-val { overflow: visible; }
-    .jev-banner .cmp-tag { flex-basis: auto; order: 0; }
   }
   @media (max-width: 720px) {
     .hero-center .hero-install { padding-left: var(--sp-4); }
@@ -199,6 +52,39 @@
       text-align: center;
       padding: 6px 8px;
     }
+  }
+
+  /* One content column for the hero. The install card and the prompt card are
+     alternatives — the same width and the same 1px rule, so they read as a pair
+     rather than as two unrelated widths stacked on top of each other. */
+  .hero-center .hero-col {
+    max-width: 880px;
+    margin: var(--sp-8) auto 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-5);
+    text-align: left;
+  }
+  .hero-center .hero-col > * { margin-left: 0; margin-right: 0; max-width: none; }
+  .hero-eyebrow {
+    font-family: var(--font-data);
+    font-size: var(--fs-11);
+    font-weight: 600;
+    letter-spacing: var(--track-label);
+    text-transform: uppercase;
+    color: var(--z-mute);
+    /* auto, not 0: a max-width from the shared sheet plus margin-left:0 left
+       this sitting at the page gutter while the rest of the hero centred. */
+    margin: 0 auto var(--sp-5);
+    max-width: none;
+  }
+  .hero-proof {
+    font-family: var(--font-prose);
+    font-size: var(--fs-16);
+    line-height: 1.7;
+    color: var(--z-mute);
+    max-width: 880px;
+    margin: var(--sp-6) auto 0;
   }
 </style>
 <!-- seo:begin — generated by scripts/seo/fix_heads.py · do not hand-edit -->
@@ -300,132 +186,49 @@
 <!-- HERO — one job: the prompt ----------------------------->
 <main>
 <section class="hero-center">
-  <h1 class="hero">ONE PROMPT.<br>WORKING PRODUCT.<br><span class="hero-report-tag">USERS REPORT</span><span class="accent">~5× FEWER TOKENS.</span></h1>
+  <p class="hero-eyebrow">AI-NATIVE SEARCH ENGINE · ONE RUST BINARY · APACHE-2.0</p>
 
-  <div class="prompt-stage" id="prompt">
-    <div class="prompt-card">
-      <span class="prompt-label">PASTE THIS TO YOUR AI AGENT — IT DOES THE REST</span>
-      <code>Install XERJ (docs: https://xerj.org/llms.txt), index this project's sources, and set up reference coding: clone and index the open-source repos closest to what we're building, and search how they solved a problem before writing code.</code>
-      <button type="button" class="prompt-copy" data-copy="Install XERJ (docs: https://xerj.org/llms.txt), index this project's sources, and set up reference coding: clone and index the open-source repos closest to what we're building, and search how they solved a problem before writing code.">COPY THE PROMPT</button>
+  <h1 class="hero">SEARCH BUILT<br><span class="accent">FOR AI AGENTS.</span></h1>
+
+  <p class="hero-sub">XERJ indexes your code, documents and data, then answers an agent's
+    questions from the index instead of its context window. It speaks the Elasticsearch
+    API, so the clients you already have connect unchanged.</p>
+
+  <div class="hero-col">
+    <!-- Install first: it is the step a human takes. Commands are VERBATIM from
+         /docs/install (the two must not drift); buttons auto-wire via interact.js. -->
+    <div class="hero-install" id="get">
+      <p class="hero-install-label">INSTALL · ONE LINE · STATIC BINARY · SHA-256 VERIFIED, FAIL-CLOSED</p>
+      <div class="hero-install-cmd">
+        <code>curl -fsSL https://xerj.org/get | sh</code>
+        <button type="button" class="hero-install-copy" data-copy="curl -fsSL https://xerj.org/get | sh">COPY</button>
+      </div>
+      <p class="hero-install-agent-line">Linux, macOS and Windows, on x86_64 and arm64.
+        Static musl by default, so any distro including Alpine.
+        <a href="/docs/install">Windows, glibc and all eight targets →</a></p>
+    </div>
+
+    <!-- The agent path. Same column, same width, same border weight as the
+         install card: the two are alternatives, so they look like alternatives. -->
+    <div class="prompt-stage" id="prompt">
+      <div class="prompt-card">
+        <span class="prompt-label">OR HAND THIS TO YOUR CODING AGENT</span>
+        <code>Install XERJ (docs: https://xerj.org/llms.txt), index this project's sources, and set up reference coding: clone and index the open-source repos closest to what we're building, and search how they solved a problem before writing code.</code>
+        <button type="button" class="prompt-copy" data-copy="Install XERJ (docs: https://xerj.org/llms.txt), index this project's sources, and set up reference coding: clone and index the open-source repos closest to what we're building, and search how they solved a problem before writing code.">COPY THE PROMPT</button>
+      </div>
     </div>
   </div>
 
-  <!-- JEV verdict banner — results only. Every figure is a measured run,
-       verbatim from /blog/does-xerj-beat-jev (the verdict-first write-up).
-       The homepage states results; the broken-then-fixed pilot story lives
-       in the post, not here. nDCG bar widths share ONE global denominator,
-       0.7410 (the max across all rows) — the same convention as the /blog
-       index preview and the og card, so the three visuals are mutually
-       comparable; the judge-bill row is dollars and scales to itself.
-       XERJ is always .cmp-a (accent); the Jev-in-the-loop series is always
-       --z-cmp — accent never marks a Jev-side win. -->
-  <aside class="jev-banner">
-    <p class="jev-kicker">MEASURED · TYPESAFE AI'S JEV JUDGE vs XERJ · 1,271 JUDGED QUERIES · 3 BEIR DATASETS · 3 SHUFFLED REPEATS</p>
-    <h2>DOES XERJ BEAT JEV?</h2>
-    <p class="jev-sub">On the bill, outright. On relevance, the hosted judge keeps two of three datasets — and the zero-API-token hybrid keeps NFCorpus.</p>
-    <div class="cmp-bars">
-      <div class="cmp-bars-head">
-        <span></span>
-        <span class="cmp-a">XERJ · LOCAL, ZERO API TOKENS</span>
-        <span class="cmp-b">OUR BM25 TOP-30 + JEV JUDGE</span>
-      </div>
-      <div class="cmp-bars-row">
-        <span class="cmp-label">SCIFACT · 300 QUERIES</span>
-        <span class="cmp-val cmp-a">
-          <span class="cmp-bar" style="width:94.4%;"></span>
-          <span class="cmp-num">0.6993</span> <i>hybrid RRF</i>
-        </span>
-        <span class="cmp-val cmp-b">
-          <span class="cmp-bar" style="width:100%;"></span>
-          <span class="cmp-num">0.7410</span> <i>BM25+Jev</i>
-          <span class="cmp-tag j">JEV WINS</span>
-        </span>
-      </div>
-      <div class="cmp-bars-row">
-        <span class="cmp-label">NFCORPUS · 323 QUERIES</span>
-        <span class="cmp-val cmp-a">
-          <span class="cmp-bar" style="width:46.5%;"></span>
-          <span class="cmp-num">0.3448</span> <i>hybrid RRF</i>
-          <span class="cmp-tag x">XERJ WINS</span>
-        </span>
-        <span class="cmp-val cmp-b">
-          <span class="cmp-bar" style="width:44.7%;"></span>
-          <span class="cmp-num">0.3312</span> <i>BM25+Jev</i>
-        </span>
-      </div>
-      <div class="cmp-bars-row">
-        <span class="cmp-label">FIQA · 648 QUERIES</span>
-        <span class="cmp-val cmp-a">
-          <span class="cmp-bar" style="width:32.1%;"></span>
-          <span class="cmp-num">0.2382</span> <i>BM25 — hybrid not run</i>
-        </span>
-        <span class="cmp-val cmp-b chip-line">
-          <span class="cmp-bar" style="width:49.1%;"></span>
-          <span class="cmp-num">0.3638 <span class="cmp-ratio">+0.126</span></span> <i>BM25+Jev</i>
-          <span class="cmp-tag j">JEV WINS · BIGGEST LIFT WE MEASURED</span>
-        </span>
-      </div>
-      <div class="cmp-bars-row">
-        <span class="cmp-label">FIQA RUN · JUDGE BILL<span class="cmp-sub">at $0.042/Mtok, input only</span></span>
-        <span class="cmp-val cmp-a">
-          <span class="cmp-bar" style="width:0%;"></span>
-          <span class="cmp-num">$0 · 0 tokens</span>
-          <span class="cmp-tag x">XERJ WINS</span>
-        </span>
-        <span class="cmp-val cmp-b">
-          <span class="cmp-bar" style="width:100%;"></span>
-          <span class="cmp-num">$0.6375 · 15,178,758 tokens</span>
-        </span>
-      </div>
-    </div>
-    <p class="jev-foot">AG News, all 7,600 test items: 0.9182 accuracy with no model and no tokens — no JEV row exists there and none is claimed. Jev's FiQA probabilities order well but calibrate badly (ECE 0.3109). Provider non-determinism: gaps tighter than ±0.01 nDCG@10 are noise. Bars: one shared scale, 0.7410 = full width (the bill row is dollars, its own scale); the XERJ side is our best measured local arm per dataset — hybrid not run on FiQA.</p>
-    <p class="jev-link-row"><a class="jev-link" href="/blog/does-xerj-beat-jev">THE FULL VERDICT — WINS, LOSSES, AND THE BILL &rarr; /blog/does-xerj-beat-jev</a>
-      <span class="jev-hub">Benchmarks hub: <a href="/benchmarks/">/benchmarks</a></span></p>
-  </aside>
-
-  <!-- Install card — the visible one-line install, plus the Windows and
-       glibc variants. Commands are VERBATIM from /docs/install (the two
-       must not drift); every button is auto-wired by interact.js
-       ([data-copy]; the &quot; escaping restores the double quotes). -->
-  <div class="hero-install" id="get">
-    <p class="hero-install-label">GET XERJ · ONE LINE · STATIC MUSL BINARY · SHA-256 VERIFIED, FAIL-CLOSED</p>
-    <div class="hero-install-cmd">
-      <code>curl -fsSL https://xerj.org/get | sh</code>
-      <button type="button" class="hero-install-copy" data-copy="curl -fsSL https://xerj.org/get | sh">COPY</button>
-    </div>
-    <div class="hero-install-alt">
-      <span>Windows (PowerShell):</span>
-      <code>powershell -ExecutionPolicy Bypass -c "irm https://xerj.org/get.ps1 | iex"</code>
-      <button type="button" class="hero-install-copy" data-copy="powershell -ExecutionPolicy Bypass -c &quot;irm https://xerj.org/get.ps1 | iex&quot;">COPY</button>
-    </div>
-    <div class="hero-install-alt">
-      <span>glibc hosts:</span>
-      <code>curl -fsSL https://xerj.org/get | XERJ_LIBC=gnu sh</code>
-      <button type="button" class="hero-install-copy" data-copy="curl -fsSL https://xerj.org/get | XERJ_LIBC=gnu sh">COPY</button>
-    </div>
-    <p class="hero-install-agent-line">Linux/macOS x86_64 + arm64 · Windows x64 + ARM64. Static musl by default, so any distro including Alpine; glibc is the explicit opt-in. Eight release targets, each with a .sha256. Overrides: XERJ_VERSION · XERJ_INSTALL_DIR · XERJ_REPO. <a href="/docs/install">Full install guide →</a></p>
-  </div>
-
-  <p class="hero-sub">One paste. Your agent installs XERJ, indexes your project and
-    the open-source repos worth learning from, then looks implementations up
-    instead of re-deriving them.</p>
-
-  <p class="hero-sub" style="font-size:var(--fs-16); max-width:760px;">
-    Two things the agent has to get right, both stated in
-    <a href="/llms.txt">llms.txt</a>: <strong>indexing needs a running node</strong>, so
-    <code class="inline">xerj --insecure --data-dir ./.xerj-data &amp;</code> comes
-    first or <code class="inline">xerj autoindex</code> exits 1. And
-    <strong>cloning reference repos downloads real data onto your machine</strong>,
-    so have it name the repos and estimate the job before it starts. XERJ's own
-    doctrine is estimate first, ask before long jobs.</p>
-
-
+  <p class="hero-proof">Agents that query an index instead of re-reading files finished the
+    same tasks on <a href="/case-studies/reference-coding">2.7× fewer output tokens</a>.
+    Every number on this site names the run behind it, wins and losses alike, on the
+    <a href="/benchmarks/">benchmarks page</a>.</p>
 </section>
 
 <!-- 01 — REFERENCE CODING ------------------------------------->
 <section class="scene-section">
-  <div class="kicker"><span class="accent">01</span><span class="dash">·</span><span>REFERENCE CODING · THE CODING USE CASE</span></div>
-  <h2 class="scene">GREP RE-READS.<br><span class="accent">XERJ RETRIEVES.</span></h2>
+  <div class="kicker"><span class="accent">01</span><span class="dash">·</span><span>REFERENCE CODING · INDEX THE REPOS YOU LEARN FROM</span></div>
+  <h2 class="scene">CODE YOUR AGENT<br><span class="accent">HASN'T MEMORISED.</span></h2>
 
   <p class="wide">
     A coding agent that hits an API it has not memorised invents method names,
@@ -479,7 +282,7 @@ $ xerj def <span class="accent">"euler_to_rotationmatrix"</span>
     same commits.
   </p>
 
-  <p class="viz-caption"><a class="mono" href="/case-studies/reference-coding" style="color:var(--z-mute);">THE FULL CASE STUDY — EVERY NUMBER, EVERY TASK, THE EXACT PROMPT →</a><span class="dash" style="color:var(--z-mute);">·</span><a class="mono" href="https://github.com/xerj-org/xerj/blob/main/user-feedback/11-reference-coding-field-reports/2026-08-11-token-savings-reports.md" style="color:var(--z-mute);">WHERE THE USERS-REPORT ~5× FIGURE COMES FROM →</a></p>
+  <p class="viz-caption"><a class="mono" href="/case-studies/reference-coding" style="color:var(--z-mute);">THE FULL CASE STUDY — EVERY NUMBER, EVERY TASK, THE EXACT PROMPT →</a><span class="dash" style="color:var(--z-mute);">·</span><a class="mono" href="https://github.com/xerj-org/xerj/blob/main/user-feedback/11-reference-coding-field-reports/2026-08-11-token-savings-reports.md" style="color:var(--z-mute);">THE FIELD REPORTS BEHIND THE TOKEN SAVINGS →</a></p>
 </section>
 
 <!-- 02 — POINT XERJ AT A FOLDER ------------------------------->
@@ -560,8 +363,8 @@ next: `xerj autoindex map --url http://localhost:9280` for the data map; search 
 
 <!-- 03 — BUILT FOR AGENTS ------------------------------------->
 <section class="scene-section">
-  <div class="kicker"><span class="accent">03</span><span class="dash">·</span><span>BUILT FOR AGENTS · MEMORY · RECIPES</span></div>
-  <h2 class="scene">AGENTS ARE<br><span class="accent">THE CUSTOMER.</span></h2>
+  <div class="kicker"><span class="accent">03</span><span class="dash">·</span><span>AGENTS ARE THE CUSTOMER · MEMORY · RECIPES</span></div>
+  <h2 class="scene">ONE HTTP API.<br><span class="accent">NO SDK.</span></h2>
 
   <p class="wide">
     Every operation an agent needs is a plain HTTP call on
@@ -614,8 +417,8 @@ $ curl -sXPOST localhost:9200/_memory/agent-demo/_recall \
 
 <!-- BENCHMARKS — SUPPORTING EVIDENCE -------------------------->
 <section class="scene-section" id="engine">
-  <div class="kicker"><span class="accent">04</span><span class="dash">·</span><span>WHY XERJ · THE COMPETITIVE ADVANTAGE</span></div>
-  <h2 class="scene">THE ADVANTAGE,<br><span class="accent">FEATURE BY FEATURE.</span></h2>
+  <div class="kicker"><span class="accent">04</span><span class="dash">·</span><span>WHY XERJ · WHAT YOU ACTUALLY GET</span></div>
+  <h2 class="scene">FEATURE<br><span class="accent">BY FEATURE.</span></h2>
 
   <p class="wide">
     Every feature exists to cut the thing agents actually spend: context.

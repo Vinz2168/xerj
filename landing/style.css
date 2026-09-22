@@ -36,6 +36,9 @@
   --track-label: 0.08em;
 
   --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px;  --sp-4: 16px;
+  /* --sp-5 was referenced in 6 places but never defined, so every declaration
+     using it was silently dropped (the prompt card rendered with padding:0). */
+  --sp-5: 20px;
   --sp-6: 24px; --sp-8: 32px; --sp-10: 48px; --sp-12: 64px;
   --sp-16: 96px; --sp-20: 128px;
 
@@ -2617,7 +2620,11 @@ svg.chart.is-interactive .ser:focus-visible {
   .hero-marks { font-size: 12px; }
   .prompt-label { font-size: 12px; }
   .prompt-card code { font-size: 15px; }
-  .hero-marks {
+  .hero-alt-install { font-size: 12px; }
+}
+/* .hero-marks was nested INSIDE the 720px media query by a stray brace, so it
+   had no layout at all above 720px. Hoisted 2026-09-22. */
+.hero-marks {
   font-family: var(--font-data);
   font-size: var(--fs-11);
   letter-spacing: var(--track-label);
@@ -2639,8 +2646,6 @@ svg.chart.is-interactive .ser:focus-visible {
   color: var(--z-accent);
   border-color: var(--z-accent);
 }
-.hero-alt-install { font-size: 12px; }
-}
 @media (max-width: 330px) {
   .hero-center .hero { font-size: 36px; }
 }
@@ -2655,33 +2660,11 @@ svg.chart.is-interactive .ser:focus-visible {
 .prompt-stage {
   position: relative;
   max-width: 880px;
-  margin: var(--sp-10) auto var(--sp-6);
+  margin: 0;
 }
-.prompt-stage::before {
-  content: '';
-  position: absolute;
-  inset: -26px;
-  border-radius: 28px;
-  background: linear-gradient(115deg,
-    #ffc400, #ff8a2a, #ff3d81, #8a5cff, #21c6ff, #ffc400);
-  background-size: 320% 320%;
-  filter: blur(34px);
-  opacity: 0.7;
-  animation: prompt-glow 7s ease-in-out infinite;
-  /* -1: without it the ::before joins the root stacking context and
-     washes over .hero-sub/.hero-proof text at its blurred edges. */
-  z-index: -1;
-  pointer-events: none;
-}
-html[data-theme='night'] .prompt-stage::before { opacity: 0.5; }
-@keyframes prompt-glow {
-  0%   { background-position: 0% 50%; }
-  50%  { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .prompt-stage::before { animation: none; }
-}
+/* The animated rainbow halo went against our own brand book, which asks for
+   1px rules, hairlines and negative space. Removed 2026-09-22; the card now
+   carries a single accent rule, like the install card it sits beside. */
 .prompt-card {
   position: relative;
   z-index: 1;
@@ -2689,21 +2672,11 @@ html[data-theme='night'] .prompt-stage::before { opacity: 0.5; }
   flex-direction: column;
   gap: var(--sp-3);
   text-align: left;
-  /* animated gradient border: paint the bg twice — flat card fill in the
-     padding-box, moving gradient in the border-box — sharing the halo's
-     keyframes so the two layers sweep together. */
-  border: 3px solid transparent;
-  background:
-    linear-gradient(var(--z-bg), var(--z-bg)) padding-box,
-    linear-gradient(115deg, #ffc400, #ff8a2a, #ff3d81, #8a5cff, #21c6ff, #ffc400) border-box;
-  background-size: 100% 100%, 320% 320%;
-  animation: prompt-glow 7s ease-in-out infinite;
-  border-radius: 14px;
-  padding: var(--sp-6) var(--sp-6) var(--sp-4);
-  box-shadow: 0 8px 40px rgba(0,0,0,0.10);
-}
-@media (prefers-reduced-motion: reduce) {
-  .prompt-card { animation: none; }
+  background: var(--z-bg);
+  border: 1px solid var(--z-line);
+  border-left: 1px solid var(--z-accent);
+  border-radius: 0;
+  padding: var(--sp-5) var(--sp-6);
 }
 .prompt-label {
   font-family: var(--font-data);
@@ -2822,7 +2795,7 @@ html[data-theme='day'] .hero-bench b.hb-bad { color: #a32b2e; }
 }
 
 /* nav download button — latest release tag, links to /releases/latest */
-.nav .nav-dl{padding:.35rem .7rem;border:1px solid var(--accent,#ffc400);border-radius:4px;
-  color:var(--accent,#ffc400);font-weight:700;white-space:nowrap;text-decoration:none;
+.nav .nav-dl{padding:.35rem .7rem;border:1px solid var(--z-accent);border-radius:4px;
+  color:var(--z-accent);font-weight:700;white-space:nowrap;text-decoration:none;
   font-family:"JetBrains Mono",monospace;font-size:.8rem;}
-.nav .nav-dl:hover{background:var(--accent,#ffc400);color:#0b0b0d;}
+.nav .nav-dl:hover{background:var(--z-accent);color:#0b0b0d;}
