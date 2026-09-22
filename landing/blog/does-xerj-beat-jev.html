@@ -10,152 +10,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@400;700;800;900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%230b0b0d'/><text x='50' y='68' font-size='60' font-family='Big Shoulders Display,sans-serif' font-weight='900' fill='%23ffc400' text-anchor='middle'>X</text></svg>">
 <link rel="stylesheet" href="/style.css?v=if9">
-<style>
-  /* page-local: a negative colour the system lacks, both themes */
-  :root                  { --z-neg: #d9575f; }
-  html[data-theme='day'] { --z-neg: #a32b2e; }
-
-  /* vertical comparison chart — same component as the benchmarks hub */
-  .vchart { margin: var(--sp-6) 0 0; }
-  .vc-legend { display:flex; flex-wrap:wrap; gap:22px; margin:0 0 var(--sp-8);
-               font-family:var(--font-data); font-size:var(--fs-11);
-               letter-spacing:var(--track-label); text-transform:uppercase; }
-  .vc-legend b { display:inline-flex; align-items:center; gap:8px; font-weight:600; }
-  .vc-legend b::before { content:''; width:11px; height:11px; border-radius:2px; background:currentColor; }
-  .vc-legend .bare { color:var(--z-neg); } .vc-legend .native { color:var(--z-cmp); }
-  .vc-legend .xerj { color:var(--z-accent); }
-  .vc-groups { display:grid; gap:var(--sp-10) var(--sp-12);
-               grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); }
-  .vc-group  { min-width:0; }
-  .vc-plot { box-sizing:border-box; height:238px; padding:30px var(--sp-2) 0;
-             display:grid; grid-auto-flow:column; grid-auto-columns:1fr;
-             gap:var(--sp-6); border-bottom:1px solid var(--z-line); }
-  .vc-col  { display:flex; flex-direction:column; justify-content:flex-end;
-             align-items:center; height:100%; min-width:0; }
-  .vc-bar  { position:relative; display:block; width:100%; max-width:78px;
-             min-height:3px; border-radius:2px 2px 0 0; background:currentColor; }
-  .vc-v    { position:absolute; bottom:100%; left:50%; transform:translateX(-50%);
-             margin-bottom:8px; white-space:nowrap; color:var(--z-ink);
-             font-family:var(--font-data); font-size:var(--fs-13); font-weight:700; }
-  .vc-col.bare   { color:var(--z-neg); }
-  .vc-col.native { color:var(--z-cmp); }
-  .vc-col.xerj   { color:var(--z-accent); }
-  .vc-col.xerj .vc-v { color:var(--z-accent); }
-  .vc-axis { display:grid; grid-auto-flow:column; grid-auto-columns:1fr; gap:var(--sp-6);
-             padding:var(--sp-3) var(--sp-2) 0; text-align:center; min-height:46px;
-             font-family:var(--font-data); font-size:var(--fs-11);
-             letter-spacing:var(--track-label); text-transform:uppercase; color:var(--z-mute); }
-  .vc-axis span { min-width:0; }
-  .vc-axis .sub { display:block; font-style:normal; letter-spacing:.03em;
-                  text-transform:none; opacity:.72; margin-top:3px; }
-  .vc-axis .win { color:var(--z-accent); opacity:1; }
-  .vc-title { margin-top:var(--sp-4); padding-top:var(--sp-3);
-              border-top:1px solid var(--z-faint);
-              font-family:var(--font-data); font-size:var(--fs-11);
-              letter-spacing:var(--track-label); text-transform:uppercase; color:var(--z-mute); }
-  .vc-title b { color:var(--z-ink); font-weight:600; }
-  .vc-note { margin:var(--sp-4) 0 0; max-width:900px;
-             font-family:var(--font-data); font-size:12px; letter-spacing:.03em; color:var(--z-mute); }
-  @media (max-width:620px) {
-    .vc-plot { height:196px; gap:var(--sp-3); padding-top:26px; }
-    .vc-axis { gap:var(--sp-3); }
-    .vc-v { font-size:11px; }
-  }
-
-  /* stat band */
-  .stat-band { display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr));
-               gap:1px; background:var(--z-line); border:1px solid var(--z-line);
-               margin:var(--sp-8) 0 0; }
-  .stat { background:var(--z-bg); padding:20px 22px; }
-  .stat .v { font-family:var(--font-display); font-weight:800; font-size:var(--fs-32);
-             color:var(--z-accent); line-height:1.05; }
-  .stat .v.bad { color:var(--z-neg); }
-  .stat .k { font-family:var(--font-data); font-size:var(--fs-11); letter-spacing:var(--track-label);
-             text-transform:uppercase; color:var(--z-mute); margin-top:8px; }
-  .stat .s { font-size:13px; color:var(--z-mute); margin-top:4px; line-height:1.5; }
-  .stat .s a { color:var(--z-mute); }
-
-  /* verdict table */
-  .vt-wrap { overflow-x:auto; margin-top:var(--sp-6); }
-  table.vt { width:100%; border-collapse:collapse; font-family:var(--font-data); font-size:13.5px; }
-  .vt th { text-align:left; font-size:11px; letter-spacing:.06em; text-transform:uppercase;
-           color:var(--z-mute); font-weight:600; padding:9px 12px 9px 0; border-bottom:1px solid var(--z-ink); }
-  .vt td { padding:10px 12px 10px 0; border-bottom:1px solid var(--z-faint); vertical-align:top; }
-  .vt td.n { font-variant-numeric:tabular-nums; white-space:nowrap; }
-  .vt .w { color:var(--z-accent); font-weight:700; }
-  .vt .t { color:var(--z-mute); font-weight:600; }
-  .vt .l { color:var(--z-neg); font-weight:700; }
-
-  /* Mobile scroll affordance (2026-09-21 fix round). Three of the six tables
-     have min-content widths of 379 / 405 / 699 px and clip inside .vt-wrap on
-     phones with nothing saying more columns sit sideways. The shell holds a
-     right-edge scrim that fades to the page background — a soft cut line, not
-     a shadow (brand: no shadows) — painted above the scrolled table because
-     the shell itself does not scroll. Each modifier's gate is the measured
-     viewport at which THAT table starts to clip (min-content + 2×18px
-     gutter), so a table that fits never gets a fade over its last column.
-     Pure CSS, pointer-events none, no JS. */
-  .vt-shell { position:relative; }
-  .vt-shell::after { content:''; position:absolute; top:0; right:0; bottom:0; width:26px;
-                     background:linear-gradient(to right, transparent, var(--z-bg));
-                     pointer-events:none; display:none; }
-  @media (max-width:735px) { .vt-shell--bills::after { display:block; } }
-  @media (max-width:440px) { .vt-shell--hist::after  { display:block; } }
-  @media (max-width:420px) { .vt-shell--beir::after  { display:block; } }
-
-  /* wire panels */
-  .wire { display:grid; gap:var(--sp-4); margin-top:var(--sp-8); }
-  .wp { border:1px solid var(--z-line); border-left:3px solid var(--z-accent); padding:18px 22px; }
-  .wp .wh { display:flex; gap:14px; align-items:baseline; flex-wrap:wrap; }
-  .wp .wn { font-family:var(--font-data); font-size:12px; font-weight:700; letter-spacing:.08em; color:var(--z-accent); }
-  .wp h3 { margin:0; font-family:var(--font-display); font-weight:800; font-size:var(--fs-20); letter-spacing:.01em; }
-  .wp .wm { margin-left:auto; font-family:var(--font-data); font-size:12px; color:var(--z-mute); letter-spacing:.04em; }
-  .wp p { margin:8px 0 0; color:var(--z-mute); font-size:15px; line-height:1.6; max-width:920px; }
-  .wp p strong { color:var(--z-ink); }
-  .wp.neg { border-left-color:var(--z-neg); }
-  .wp.neg .wn { color:var(--z-neg); }
-
-  .loss { border:1px solid var(--z-line); border-left:3px solid var(--z-neg); padding:16px 20px;
-          margin-top:var(--sp-6); font-size:15px; color:var(--z-mute); line-height:1.65; max-width:980px; }
-  .loss strong { color:var(--z-ink); }
-  .src { font-family:var(--font-data); font-size:12px; letter-spacing:.03em; color:var(--z-mute); margin-top:var(--sp-4); }
-
-  /* terminal blocks */
-  pre.code { margin:var(--sp-5) 0 0; padding:18px 20px; border:1px solid var(--z-line);
-             overflow-x:auto; font-family:var(--font-data); font-size:12.5px; line-height:1.75;
-             color:var(--z-mute); background:var(--z-bg); }
-  pre.code .prompt { color:var(--z-accent); font-weight:700; user-select:none; }
-  pre.code .out { color:var(--z-ink); }
-  pre.code .cmt { opacity:.62; }
-
-  /* bullet lists — same rule the hub carries locally */
-  ul.deep { list-style:none; padding:0; max-width:920px; }
-  ul.deep li { margin:14px 0; line-height:1.65; color:var(--z-mute); font-size:15px; }
-  ul.deep li strong { color:var(--z-ink); }
-  ul.deep code.inline { color:var(--z-ink); }
-
-  /* blog post scaffolding — breadcrumb, byline, verdict lede */
-  .blog-crumb { margin:0 0 var(--sp-6); font-family:var(--font-data); font-size:var(--fs-11);
-                font-weight:600; letter-spacing:var(--track-label); text-transform:uppercase; }
-  .blog-crumb a { color:var(--z-mute); text-decoration:none; border-bottom:1px solid var(--z-line);
-                  padding-bottom:1px; }
-  .blog-crumb a:hover, .blog-crumb a:focus-visible { color:var(--z-accent); border-color:var(--z-accent); }
-  .blog-byline { margin:var(--sp-4) 0 0; font-family:var(--font-data); font-size:var(--fs-11);
-                 font-weight:600; letter-spacing:var(--track-label); text-transform:uppercase;
-                 color:var(--z-mute); }
-  .verdict-panel { border:1px solid var(--z-line); border-left:3px solid var(--z-accent);
-                   padding:var(--sp-6); margin:var(--sp-8) 0 0; text-align:left; }
-  .verdict-panel .vh { display:flex; gap:14px; align-items:baseline; flex-wrap:wrap; margin-bottom:var(--sp-4); }
-  .verdict-panel .vh .wn { font-family:var(--font-data); font-size:12px; font-weight:700;
-                           letter-spacing:.08em; color:var(--z-accent); }
-  .verdict-panel .vh .wm { margin-left:auto; font-family:var(--font-data); font-size:12px;
-                           color:var(--z-mute); letter-spacing:.04em; }
-  .verdict-panel p { margin:0 0 var(--sp-4); font-family:var(--font-prose); font-size:var(--fs-16);
-                     line-height:1.7; color:var(--z-mute); max-width:900px; }
-  .verdict-panel p:last-child { margin-bottom:0; }
-  .verdict-panel p strong { color:var(--z-ink); }
-  .verdict-panel p code.inline { color:var(--z-ink); }
-</style>
+<link rel="stylesheet" href="/blog.css?v=1">
 <!-- seo:begin — generated by scripts/seo/fix_heads.py · do not hand-edit -->
 <link rel="canonical" href="https://xerj.org/blog/does-xerj-beat-jev">
 <meta property="og:site_name" content="XERJ.ai">
@@ -543,7 +398,7 @@
     </div>
   </div>
 
-  <h3 class="scene" style="font-size:var(--fs-24); margin-top:var(--sp-8);">The gate: the pip client, unmodified, on a local node</h3>
+  <h3 class="scene" style="font-size:var(--fs-20); margin-top:var(--sp-8);">The gate: the pip client, unmodified, on a local node</h3>
   <p class="wide">No SDK of ours, no patches, no subclassing. <code class="inline">pip install jev-reranker</code> (0.1.2, MIT), its own listwise template, its own splitting, its own strict response validation, pointed at a XERJ node holding 4,000 labelled SMS messages. The gate ranks through both of the client's entry points — the constructor default, and the documented relevance preset, which since 0.1.2 ships its rubric as an <em>object</em> the vote must acknowledge without reading it as retrieval text. Two environment variables, and one of them is a trap:</p>
 
   <pre class="code"><span class="prompt">$</span> pip install jev-reranker
@@ -569,7 +424,7 @@ GATE PASSED: unmodified jev-reranker ranked from the XERJ node</span></pre>
     <strong>The first gate attempt failed. It is the most useful thing on this page.</strong> The wire puts the query in <code class="inline">state</code>, and the vote text joined it, so query vocabulary took part in retrieval. With a spam-bearing query like "winner claim prize", <em>every</em> document's vote retrieved spam neighbours. The vote measured the query, not the documents: spam 1.000 against ham 0.785. No separation. We first called that "inherent to a retrieval vote". <strong>It was not. It was two defects, and we fixed them.</strong> The vote text used to concatenate the instruction's prose into the retrieval query — wording alone moved accuracy 32 points (0.9867 with an empty instruction, 0.6700 with a criteria-rich one, same 300 held-out messages) — and an object state contributed only its <code class="inline">query</code> field, so <code class="inline">{"message": …}</code> voted on prose at the spam base rate (0.1733 against 0.9667 for the same message as a string). The vote text is now exactly what the question points at: its backtick references, or the state's own string content — never instruction prose, never state the question never named. After the fix, all eight wording/shape arms of the same 300 messages score identically (0.9767). One part <em>is</em> by design, and it is the client's choice, not ours: since 0.1.2 the client's own question references the query in backticks, so the query is named payload — the question being asked is "does this document answer this query". <strong>Pick the query for the history you have</strong> still holds: under the deliberately spammy query the gap narrows from 0.8542 to 0.6087, and the gate asserts both.
   </div>
 
-  <h3 class="scene" style="font-size:var(--fs-24); margin-top:var(--sp-8);">Speed: the Rust side of the same wire</h3>
+  <h3 class="scene" style="font-size:var(--fs-20); margin-top:var(--sp-8);">Speed: the Rust side of the same wire</h3>
   <p class="wide">A full news item against 120,000 labelled AG News examples is a heavy query. About 40 terms, and the match set is most of the index. This is the workload that exposed the waste in our own search loop. The old path built a hit list per term, folded them through hash maps, and sorted the whole match set. All that to return a size-10 page. We replaced it with a WAND-style pruned walk for the one shape every <code class="inline">match</code> query becomes. A document is now scored only when it can still make the page even at its best possible score. The method is the classic one from Broder et al., and the same idea tantivy uses, adapted to our postings format.</p>
 
   <div class="vt-wrap">
@@ -608,7 +463,7 @@ GATE PASSED: unmodified jev-reranker ranked from the XERJ node</span></pre>
     <p class="vc-note">The hosted bar is the Jev API's measured p50 on the FiQA rerank run in §02, 1.23 s per query. Its fastest of the three datasets, so the bar is generous to the hosted side; SciFact and NFCorpus measured 1.49 s and 1.48 s. The local bars are the same wire answered by the vote over 120k AG News history on this engine. Different tools: the hosted judge needs no history, the vote needs this index. This is a speed, cost and egress comparison, not a quality race. No Jev number exists for AG News and we claim none.</p>
   </div>
 
-  <h3 class="scene" style="font-size:var(--fs-24); margin-top:var(--sp-8);">What the vote itself is worth</h3>
+  <h3 class="scene" style="font-size:var(--fs-20); margin-top:var(--sp-8);">What the vote itself is worth</h3>
   <p class="wide">Measured earlier on the same engine (<a href="/benchmarks/">the hub's ranking section</a>), on the vote's home ground: labelled history, in-domain classification. <strong>No judge model was run on these datasets by us, and none of these rows say anything about Jev.</strong></p>
 
   <div class="vt-shell vt-shell--hist">
@@ -682,7 +537,7 @@ GATE PASSED: unmodified jev-reranker ranked from the XERJ node</span></pre>
     <strong>What we claim, and what we do not.</strong> Claimed: every number on this page, from the runs cited beside it, on our node, our shortlists, the pinned model. Not claimed: anything about how Jev scores on Banking77, SMS or AG News. TypeSafe has published no such numbers and we ran none, which is why those tables carry no judge row. Not claimed: any zero-shot ability for the local vote, or that the published hosted-reranker figures and ours compare beyond dataset and metric. TypeSafe AI granted the evaluation key that made §01 and §02 possible. The measurements are of their model, through their documented API, and this project thanks them for the access. The findings are ours, warts published.
   </div>
 
-  <h3 class="scene" style="font-size:var(--fs-24); margin-top:var(--sp-8);">Reproduce the gate</h3>
+  <h3 class="scene" style="font-size:var(--fs-20); margin-top:var(--sp-8);">Reproduce the gate</h3>
   <pre class="code"><span class="prompt">$</span> git clone https://github.com/xerj-org/xerj && cd xerj/engine
 <span class="prompt">$</span> cargo build --release -p xerj-server
 <span class="prompt">$</span> cat &gt; gate.toml &lt;&lt;'EOF'

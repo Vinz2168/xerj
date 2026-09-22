@@ -146,7 +146,7 @@
 </div>
 
 <section class="scene-section">
-  <h2 class="scene" style="font-size:var(--fs-40);">TWO REAL <span class="accent">PROOF RUNS.</span></h2>
+  <h2 class="scene" style="font-size:var(--fs-32);">TWO REAL <span class="accent">PROOF RUNS.</span></h2>
   <p class="wide">The method has been run end to end on two real codebases, not a demo corpus. The WordPress proof (below) is the token-economics story. The second run turned the method on <strong>XERJ's own Rust engine</strong> — and it is the stronger proof, because it found and <em>fixed</em> real vulnerabilities: an unauthenticated <code class="inline">/_sql</code> stack-overflow that aborts the process, a search-template injection that drops a query's ACL filter and leaks private documents, and a snapshot path-traversal that writes outside the data directory. Each was proven by crashing (then, after the fix, not crashing) a live server. Against six known-fixed bugs the substrate recalled <strong>6/6 where grep managed 4/6</strong> — grep cannot find a missing check — and reached the <code class="inline">/_sql</code> finding for <strong>171× fewer tokens</strong> than reading the tree. Full methodology, all eight findings, and the honest in-sample caveat: <a href="https://github.com/xerj-org/xerj/tree/main/docs/case-studies/xerj-self-audit" rel="external">docs/case-studies/xerj-self-audit →</a>.</p>
 </section>
 

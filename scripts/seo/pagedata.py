@@ -104,11 +104,20 @@ PAGES: dict[str, dict[str, str]] = {
         # source of record for what is on it.
         og_image_alt="XERJ vs JEV, measured: SciFact, NFCorpus and FiQA nDCG@10 over 1,271 judged queries, and the FiQA judge bill — $0.6375 against $0 local",
     ),
+    # Decisions study, 2026-09-22. published/updated pinned so the schema dates
+    # do not drift with git (same reason as the post above). Prose written to the
+    # targets in docs/research/writing-corpus-2026-09/.
+    "blog/jev-vs-a-bm25-vote.html": dict(
+        label="Jev vs a BM25 vote", kind="article",
+        title="A BM25 vote ties Jev on spam and beats it on intent",
+        description="500 decisions each on SMS Spam and Banking77: a tie on spam (McNemar p=0.75), a 9-point retrieval win on 77-way intent at zero cost, and one dataset Jev wins.",
+        published="2026-09-22", updated="2026-09-22",
+    ),
     "blog/index.html": dict(
         label="Blog", kind="collection",
         title="XERJ.ai — Blog: the engineering log",
-        description="Measured results with the losses left in: the JEV verdict, benchmark autopsies, and the Jev wire XERJ answers locally.",
-        updated="2026-09-21",
+        description="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, and benchmark autopsies that name the runs behind every number.",
+        updated="2026-09-22",
     ),
     "demo/index.html": dict(
         label="Real-data demo", kind="software",

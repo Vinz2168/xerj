@@ -2,7 +2,7 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
     <loc>https://xerj.org/</loc>
-    <lastmod>2026-09-21</lastmod>
+    <lastmod>2026-09-22</lastmod>
   </url>
   <url>
     <loc>https://xerj.org/agent-search/</loc>
@@ -334,11 +334,15 @@
   </url>
   <url>
     <loc>https://xerj.org/blog/</loc>
-    <lastmod>2026-09-21</lastmod>
+    <lastmod>2026-09-22</lastmod>
   </url>
   <url>
     <loc>https://xerj.org/blog/does-xerj-beat-jev</loc>
-    <lastmod>2026-09-21</lastmod>
+    <lastmod>2026-09-22</lastmod>
+  </url>
+  <url>
+    <loc>https://xerj.org/blog/jev-vs-a-bm25-vote</loc>
+    <lastmod>2026-09-22</lastmod>
   </url>
   <url>
     <loc>https://xerj.org/brand</loc>
@@ -678,7 +682,7 @@
   </url>
   <url>
     <loc>https://xerj.org/use-cases/code-security-audit</loc>
-    <lastmod>2026-09-21</lastmod>
+    <lastmod>2026-09-22</lastmod>
   </url>
   <url>
     <loc>https://xerj.org/use-cases/elasticsearch-replacement</loc>
