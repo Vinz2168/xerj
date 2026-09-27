@@ -2138,7 +2138,7 @@ mod tests {
     /// env held across both, not scoped per call. Under ENV_LOCK for the
     /// same reason the env tests above are (do NOT re-enter: the lock is not
     /// reentrant, so nothing inside may take it again).
-    struct CodeHomeGuard(std::sync::MutexGuard<'static, ()>);
+    struct CodeHomeGuard(#[expect(dead_code)] std::sync::MutexGuard<'static, ()>);
     impl Drop for CodeHomeGuard {
         fn drop(&mut self) {
             std::env::remove_var("XERJ_CODE_HOME");

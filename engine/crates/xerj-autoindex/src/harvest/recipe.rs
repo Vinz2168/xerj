@@ -667,7 +667,7 @@ edges = [{ field = "id" }]
         let r = load(&write(tmp.path(), MINIMAL)).unwrap();
         assert_eq!(r.name, "demo");
         assert_eq!(r.envelope.id_from, vec!["id".to_string()]);
-        assert_eq!(r.envelope.passthrough, true);
+        assert!(r.envelope.passthrough);
         assert_eq!(r.emit.shards, 16);
         assert_eq!(r.sources[0].glob, "**/*.json");
     }
