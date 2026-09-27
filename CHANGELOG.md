@@ -88,7 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ships a consumer-verifiable signature. (PRs
   [#1046](https://github.com/xerj-org/xerj/pull/1046) and
   [#1047](https://github.com/xerj-org/xerj/pull/1047) for the builder and
-  showcase; the signing/publish half rides the M6 PR.)
+  showcase; the signing/publish half is
+  [#1048](https://github.com/xerj-org/xerj/pull/1048).)
 - **An on-disk size harness for force-merged indexes**
   (`benchmarks/index-size/`) — the measurement half of the index-size
   effort (epic [#1038](https://github.com/xerj-org/xerj/issues/1038)):
