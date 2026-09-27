@@ -67,6 +67,7 @@ pub struct Recipe {
     pub merge: Merge,
     pub derived: Vec<Derived>,
     pub emit: Emit,
+    pub suggest: Suggest,
 }
 
 /// Which normalized keys feed the query envelope. All are "first non-empty
@@ -89,7 +90,8 @@ pub struct SourceSpec {
     /// `http-zip`/`git` sources: where the bytes come from. A git url may
     /// also be a local path (git itself accepts both — tests rely on it).
     pub url: Option<String>,
-    /// `git` sources: a pinned commit sha, or absent to track remote HEAD.
+    /// `git` sources: a full commit sha (pinned), a branch or tag name, or
+    /// absent to track the remote's default branch (HEAD).
     pub rev: Option<String>,
     pub glob: String,
     pub format: Format,
@@ -107,10 +109,15 @@ pub enum SourceKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
-    /// OSV v1.x (the `ossf/osv-schema` shape shared by osv.dev dumps, the
-    /// RustSec `osv` branch and github-reviewed GHSA files). Curated
-    /// extraction of the standard fields plus generic flattening of the rest.
+    /// OSV v1.x (the `ossf/osv-schema` shape shared by osv.dev dumps and
+    /// github-reviewed GHSA files). Curated extraction of the standard
+    /// fields plus generic flattening of the rest.
     Osv,
+    /// RustSec's native advisory: a `crates/<crate>/RUSTSEC-*.md` file —
+    /// ```toml frontmatter tables plus markdown prose. The only source of
+    /// the curated `affected.functions` paths (the osv-branch conversion
+    /// drops them).
+    RustsecMd,
     /// Already-flat JSON records: generic two-level flattening only. This is
     /// the "we have not written a format adapter for this yet" path.
     Flat,
@@ -169,6 +176,15 @@ pub struct Emit {
     pub shards: usize,
 }
 
+/// The suggester's knob. A recipe (not a CLI flag) on purpose: the sample
+/// size changes the suggestion files' bytes, and the recipe ships inside
+/// the pack — a pack stays reproducible from its own contents.
+#[derive(Debug, Clone)]
+pub struct Suggest {
+    /// Records the suggester samples (stride over id-sorted records).
+    pub sample: usize,
+}
+
 // ── raw (serde) layer ───────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -185,6 +201,8 @@ struct RawRecipe {
     derived: Vec<RawDerived>,
     #[serde(default)]
     emit: RawEmit,
+    #[serde(default)]
+    suggest: RawSuggest,
 }
 
 #[derive(Deserialize)]
@@ -324,6 +342,25 @@ fn d_shards() -> usize {
     16
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSuggest {
+    #[serde(default = "d_sample")]
+    sample: usize,
+}
+
+// absent `[suggest]` table = field defaults, not Default::default() zero —
+// the same trap RawEnvelope's manual impl documents.
+impl Default for RawSuggest {
+    fn default() -> Self {
+        RawSuggest { sample: d_sample() }
+    }
+}
+
+fn d_sample() -> usize {
+    512
+}
+
 // ── load + validate + compile ───────────────────────────────────────────────
 
 /// A slug becomes a filename component in the content store
@@ -389,9 +426,10 @@ fn compile(path: &Path, file: RawRecipe) -> Result<Recipe> {
         };
         let format = match s.format.as_str() {
             "osv" => Format::Osv,
+            "rustsec-md" => Format::RustsecMd,
             "flat" => Format::Flat,
             other => bail!(at(&format!(
-                "source '{}': unknown format '{other}' (supported: osv, flat)",
+                "source '{}': unknown format '{other}' (supported: osv, rustsec-md, flat)",
                 s.slug
             ))),
         };
@@ -593,6 +631,12 @@ fn compile(path: &Path, file: RawRecipe) -> Result<Recipe> {
             file.emit.shards
         )));
     }
+    if file.suggest.sample < 16 || file.suggest.sample > 100_000 {
+        bail!(at(&format!(
+            "suggest.sample must be 16..=100000, got {}",
+            file.suggest.sample
+        )));
+    }
 
     Ok(Recipe {
         name,
@@ -613,6 +657,9 @@ fn compile(path: &Path, file: RawRecipe) -> Result<Recipe> {
         derived,
         emit: Emit {
             shards: file.emit.shards,
+        },
+        suggest: Suggest {
+            sample: file.suggest.sample,
         },
     })
 }
@@ -669,7 +716,26 @@ edges = [{ field = "id" }]
         assert_eq!(r.envelope.id_from, vec!["id".to_string()]);
         assert!(r.envelope.passthrough);
         assert_eq!(r.emit.shards, 16);
+        assert_eq!(
+            r.suggest.sample, 512,
+            "absent [suggest] table = field default"
+        );
         assert_eq!(r.sources[0].glob, "**/*.json");
+    }
+
+    #[test]
+    fn suggest_sample_bounds_are_enforced() {
+        let tmp = tempfile::tempdir().unwrap();
+        for bad in ["8", "200000"] {
+            let r = MINIMAL.replace(
+                "[identity]",
+                &format!("[suggest]\nsample = {bad}\n\n[identity]"),
+            );
+            let err = load(&write(tmp.path(), &r)).unwrap_err().to_string();
+            assert!(err.contains("suggest.sample"), "{err}");
+        }
+        let ok = MINIMAL.replace("[identity]", "[suggest]\nsample = 64\n\n[identity]");
+        assert_eq!(load(&write(tmp.path(), &ok)).unwrap().suggest.sample, 64);
     }
 
     #[test]

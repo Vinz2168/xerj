@@ -1,0 +1,26 @@
+{
+  "provenance": "measured",
+  "measured_at": "2026-09-27",
+  "pack": "rust-vulns",
+  "recipe_sha256": "fe25ecac5ae1921e945fdf9d495f3a88ea81cfa3e613688b6a128af252290349",
+  "sources": {
+    "rustsec": { "kind": "git", "envelopes": 1251, "licence": "CC0-1.0" },
+    "osv": { "kind": "http-zip", "envelopes": 2856, "licence": "CC0-1.0" }
+  },
+  "envelopes": 4107,
+  "records": 1950,
+  "canonical_ids": { "RUSTSEC": 1221, "GHSA": 711, "MAL": 18 },
+  "merged_from_both_sources": 1221,
+  "records_with_functions": 270,
+  "function_paths_distinct": 663,
+  "function_entries_total": 707,
+  "records_withdrawn": 124,
+  "records_with_cve": 992,
+  "packages": 1813,
+  "records_bytes": 10140789,
+  "build_seconds": 34,
+  "notes": {
+    "function_files_vs_records": "275 advisory files carry affected.functions; their paths land in 270 records — 5 advisories are sibling filings of one CVE/GHSA (libcrux x3, hpke-rs x3, wasmtime pairs) and their function lists UNION into the shared cluster, nothing is dropped. 663 paths are distinct across the pack; the same path legitimately appears in 707 record entries when separate advisories hit the same function",
+    "dedup": "4107 envelopes to 1950 records (52.5% collapsed): every RUSTSEC advisory merged with its osv.dev mirror via id, and GHSA/MAL records merged into RUSTSEC clusters via shared CVE aliases"
+  }
+}

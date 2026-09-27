@@ -30,6 +30,7 @@ use super::recipe::SourceSpec;
 /// 3 MiB file can claim to expand to terabytes.
 const MAX_EXTRACT_BYTES: u64 = 2 << 30;
 
+#[derive(Debug)]
 pub struct Fetched {
     /// The directory the glob walk starts from.
     pub root: PathBuf,
@@ -93,9 +94,10 @@ pub fn save_watermark(cache_dir: &Path, slug: &str, watermark: &str) -> Result<(
         .with_context(|| format!("save watermark for '{slug}'"))
 }
 
-/// Shallow promisor checkout of `rev` (a sha or `HEAD`) into `target`,
-/// reusing the corpus-clone machinery: init + blob:none filter so a pin at
-/// an old sha costs one small fetch, never a full history. Returns HEAD.
+/// Shallow promisor checkout of `rev` into `target`, reusing the
+/// corpus-clone machinery: init + blob:none filter so a pin at an old sha
+/// costs one small fetch, never a full history. `rev` is a full sha, a
+/// branch/tag name, or `HEAD` (the remote's default). Returns HEAD.
 fn git_checkout(target: &Path, url: &str, rev: &str, slug: &str) -> Result<String> {
     if !target.join(".git").exists() {
         std::fs::create_dir_all(target)
@@ -109,25 +111,29 @@ fn git_checkout(target: &Path, url: &str, rev: &str, slug: &str) -> Result<Strin
         )
         .ok();
     }
-    // A pinned rev (full sha) can reuse checkout_at_sha; tracking HEAD goes
-    // through FETCH_HEAD, which checkout_at_sha cannot name.
+    // A pinned rev (full sha) can reuse checkout_at_sha; a named ref (branch
+    // or tag, e.g. RustSec's `osv` branch) and plain HEAD go through
+    // FETCH_HEAD, which checkout_at_sha cannot name. Anything else used to
+    // silently fetch HEAD — a typo'd branch name now fails loudly instead.
     let ok = |r: Result<(i32, String)>| r.map(|(rc, _)| rc == 0).unwrap_or(false);
     let looks_like_sha = rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit());
     if looks_like_sha {
         crate::xc::checkout_at_sha(target, url, rev)
             .with_context(|| format!("source '{slug}': checkout {rev}"))?;
     } else {
+        // `rev` works directly as the refspec: a branch/tag name fetches that
+        // ref, and the literal "HEAD" fetches the remote's default HEAD.
         if !ok(crate::xc::git(
             Some(target),
-            &["fetch", "--depth", "1", "origin", "HEAD"],
+            &["fetch", "--depth", "1", "origin", rev],
         )) {
-            bail!("source '{slug}': git fetch HEAD from {url} failed");
+            bail!("source '{slug}': git fetch {rev} from {url} failed");
         }
         if !ok(crate::xc::git(
             Some(target),
             &["checkout", "--quiet", "--force", "--detach", "FETCH_HEAD"],
         )) {
-            bail!("source '{slug}': git checkout FETCH_HEAD failed");
+            bail!("source '{slug}': git checkout FETCH_HEAD ({rev}) failed");
         }
         crate::xc::git(Some(target), &["clean", "-qfd"]).ok();
     }
@@ -357,5 +363,68 @@ mod tests {
             f3.root.join("two.json").exists(),
             "checkout moved to the new tip"
         );
+    }
+
+    #[test]
+    fn git_source_checks_out_a_named_branch() {
+        // RustSec's useful branch (`osv`) is not the default: `rev` must be
+        // able to name it. Before this was supported, a non-sha rev silently
+        // fetched the default branch's HEAD — the wrong tree, quietly.
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        assert!(crate::xc::git(Some(&origin), &["init", "--quiet", "-b", "main"]).is_ok());
+        std::fs::write(origin.join("main.json"), r#"{"id":"M"}"#).unwrap();
+        let commit = |m: &str| {
+            crate::xc::git(Some(&origin), &["add", "."]).ok();
+            crate::xc::git(
+                Some(&origin),
+                &[
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    m,
+                ],
+            )
+            .ok();
+        };
+        commit("main only");
+        // branch `export` carries a different tree
+        assert!(crate::xc::git(Some(&origin), &["checkout", "--quiet", "-b", "export"]).is_ok());
+        std::fs::write(origin.join("export.json"), r#"{"id":"E"}"#).unwrap();
+        std::fs::remove_file(origin.join("main.json")).unwrap();
+        commit("export tree");
+        assert!(crate::xc::git(Some(&origin), &["checkout", "--quiet", "main"]).is_ok());
+
+        let mut spec = super::super::recipe::SourceSpec {
+            slug: "repo".into(),
+            kind: super::super::recipe::SourceKind::Git,
+            path: None,
+            url: Some(origin.to_string_lossy().to_string()),
+            rev: Some("export".into()),
+            glob: "**/*.json".into(),
+            format: super::super::recipe::Format::Flat,
+            licence: "CC0-1.0".into(),
+        };
+        let f = fetch(&spec, tmp.path(), &tmp.path().join("cache")).unwrap();
+        assert!(
+            f.root.join("export.json").exists(),
+            "the named branch's tree"
+        );
+        assert!(
+            !f.root.join("main.json").exists(),
+            "not the default branch's"
+        );
+
+        // a rev that names nothing fails loudly, not as a silent HEAD fetch
+        spec.rev = Some("no-such-branch".into());
+        let err = fetch(&spec, tmp.path(), &tmp.path().join("cache"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no-such-branch"), "{err}");
     }
 }

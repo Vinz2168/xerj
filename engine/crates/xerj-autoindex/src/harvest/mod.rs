@@ -8,6 +8,7 @@
 //!             ─→ store     (content-addressed, presence = dedup)
 //!             ─→ identity  (union-find over declared edge values)
 //!             ─→ merge     (precedence + array union + strictest licence)
+//!             ─→ suggest   (mapping + join-key hints from a sample — never applied)
 //!             ─→ pack      (deterministic sharded JSONL + manifest + SUMS)
 //! ```
 //!
@@ -30,6 +31,7 @@ pub mod pack;
 pub mod recipe;
 pub mod source;
 pub mod store;
+pub mod suggest;
 
 pub(crate) use store::MAX_FIELDS;
 
@@ -208,7 +210,17 @@ fn run_build_inner(args: &[String], home: &Path) -> Result<i32> {
         envelopes: envelopes.len(),
         per_source,
     };
-    let result = pack::emit(&build_dir, &recipe, &recipe_toml, records, &stats)?;
+    // suggestions from a deterministic sample — the recipe author's feedback
+    // loop, never applied to the records or the index
+    let suggestions = suggest::analyze(&records, recipe.suggest.sample);
+    let result = pack::emit(
+        &build_dir,
+        &recipe,
+        &recipe_toml,
+        records,
+        &stats,
+        &suggestions,
+    )?;
 
     // run report: the machine-readable twin of the stdout summary, with the
     // watermarks a scheduled rebuild (M6) will diff against
@@ -247,6 +259,12 @@ fn run_build_inner(args: &[String], home: &Path) -> Result<i32> {
         );
     }
     println!("pack: {}", result.dir.display());
+    println!(
+        "  suggestions: {} field(s), {} relation(s) — see {}",
+        suggestions.fields.len(),
+        suggestions.relations.len(),
+        result.dir.join("suggestions.md").display()
+    );
     Ok(0)
 }
 
@@ -318,10 +336,13 @@ fn glob_regex(glob: &str) -> regex::Regex {
     regex::Regex::new(&re).expect("glob translation always yields a valid regex")
 }
 
-/// Parse one harvested file: `.json`/`.jsonl`/`.ndjson`. A `.json` array
-/// yields its elements; `.jsonl` yields one per non-empty line. Other
-/// extensions are skipped by the glob, not here — reaching this with a
-/// non-JSON file is a hard error, not a silent drop.
+/// Parse one harvested file: `.json`/`.jsonl`/`.ndjson`/`.md`. A `.json`
+/// array yields its elements; `.jsonl` yields one per non-empty line; a
+/// `.md` yields its raw text as ONE string value — the format adapter (e.g.
+/// `rustsec-md`) owns interpreting it, so an `.md` globbed by a json-format
+/// source is visible junk, not a silent parse error. Other extensions are
+/// skipped by the glob, not here — reaching this with an unlisted type is a
+/// hard error, not a silent drop.
 fn parse_file(path: &Path) -> Result<Vec<Value>> {
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
@@ -330,6 +351,9 @@ fn parse_file(path: &Path) -> Result<Vec<Value>> {
         .and_then(|n| n.to_str())
         .unwrap_or_default()
         .to_lowercase();
+    if name.ends_with(".md") || name.ends_with(".markdown") {
+        return Ok(vec![Value::String(raw)]);
+    }
     let jsonl = name.ends_with(".jsonl") || name.ends_with(".ndjson");
     if jsonl {
         let mut out = Vec::new();
@@ -402,6 +426,11 @@ mod tests {
         let c = tmp.path().join("c.json");
         std::fs::write(&c, r#"{"id":"one"}"#).unwrap();
         assert_eq!(parse_file(&c).unwrap().len(), 1);
+        let d = tmp.path().join("d.md");
+        std::fs::write(&d, "```toml\n[advisory]\nid = \"R\"\n```\n\n# T\n").unwrap();
+        let parsed = parse_file(&d).unwrap();
+        assert_eq!(parsed.len(), 1, "one raw string value, not json-parsed");
+        assert!(parsed[0].as_str().unwrap().starts_with("```toml"));
     }
 
     // ── end to end: recipe → harvest → identity → pack, twice ─────────────
@@ -592,6 +621,45 @@ shards = 4
             .is_some_and(|s| s.len() == 64));
         assert!(pack.join("recipe.toml").is_file(), "recipe ships verbatim");
 
+        // suggestion artifacts: shipped, checksum-covered, and honest about
+        // the alias pair this recipe encodes
+        let sums = std::fs::read_to_string(pack.join("SHA256SUMS")).unwrap();
+        for f in [
+            "mapping.suggested.json",
+            "relations.jsonl",
+            "suggestions.md",
+        ] {
+            assert!(pack.join(f).is_file(), "{f} ships");
+            assert!(sums.contains(&format!("  {f}\n")), "{f} checksum-covered");
+        }
+        let mapping: Value = serde_json::from_str(
+            &std::fs::read_to_string(pack.join("mapping.suggested.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mapping["total_records"], json!(2));
+        assert_eq!(mapping["sampled_records"], json!(2));
+        assert!(mapping["es_mapping"]["properties"]["id"]["type"].is_string());
+        let rels: Vec<Value> = std::fs::read_to_string(pack.join("relations.jsonl"))
+            .unwrap()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let alias = rels
+            .iter()
+            .find(|r| {
+                (r["left"] == json!("aliases") && r["right"] == json!("cve_ids"))
+                    || (r["left"] == json!("cve_ids") && r["right"] == json!("aliases"))
+            })
+            .expect("aliases ↔ cve_ids discovered from the data itself");
+        assert_eq!(alias["grammar"], json!("cve"));
+        assert_eq!(alias["cardinality"], json!("many-to-many"));
+        assert!(alias["overlap"]
+            .as_array()
+            .is_some_and(|o| o.contains(&json!("CVE-2021-25900"))));
+        let md = std::fs::read_to_string(pack.join("suggestions.md")).unwrap();
+        assert!(md.contains("Suggestions, not decisions"), "{md}");
+
         // ── second run: nothing new, shards byte-identical, generation up ──
         let before: Vec<(String, Vec<u8>)> = std::fs::read_dir(&pack)
             .unwrap()
@@ -602,7 +670,12 @@ shards = 4
                     std::fs::read(e.path()).unwrap(),
                 )
             })
-            .filter(|(n, _)| n.starts_with("records-"))
+            .filter(|(n, _)| {
+                n.starts_with("records-")
+                    || n == "mapping.suggested.json"
+                    || n == "relations.jsonl"
+                    || n == "suggestions.md"
+            })
             .collect();
         assert_eq!(run_build_inner(&args, home.path()).unwrap(), 0);
         let manifest: Value =
