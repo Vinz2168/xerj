@@ -224,17 +224,21 @@ pub fn run_code_cli(args: &[String]) -> i32 {
 // ── xerj corpus add ─────────────────────────────────────────────────────────
 
 const CORPUS_USAGE: &str =
-    "usage: xerj corpus add <name> <git-url>... | --from <manifest.json|pack-dir|pack.zip> [--as <name>]
+    "usage: xerj corpus add <name> <git-url>... | --from <manifest.json|pack-dir|pack.zip> [--as <name>] [--verify-sig <pubkey-file>]
        xerj corpus build <name> [--recipe <path>] [--fresh]
+       xerj corpus sign <pack-dir> --key <seed-file>
+       xerj corpus keygen --out <prefix>
        xerj corpus index <name> [--fresh] [--url URL]
        xerj corpus list [--url URL]
 
 clone the repos, detect licences, write corpora/<name>/corpus.json;
 --from takes the corpus name from the manifest's 'corpus' field (or the
 pack's 'pack' field) unless <name> or --as overrides it; a harvested pack
-also checksum-verifies and materializes records per source; build
-harvests recipe sources into a deterministic pack under builds/<name>/
-(see tools/xerj-code/);
+also checksum-verifies and materializes records per source; --verify-sig
+checks the pack's SHA256SUMS.sig against a public key file first and
+refuses the pack on failure; build harvests recipe sources into a
+deterministic pack under builds/<name>/ (see tools/xerj-code/); sign/keygen
+are the publish step (ed25519 over SHA256SUMS);
 index builds/verifies/switches the corpus (exit 3 skips junk — normal);
 list shows what is loaded on this node.";
 
@@ -331,6 +335,7 @@ fn run_corpus_add(args: &[String]) -> i32 {
     let mut name: Option<String> = None;
     let mut as_name: Option<String> = None;
     let mut from: Option<String> = None;
+    let mut verify_sig: Option<String> = None;
     let mut urls: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -346,6 +351,18 @@ fn run_corpus_add(args: &[String]) -> i32 {
                 }
                 None => {
                     eprintln!("xerj corpus add: --from needs a manifest path\n\n{CORPUS_USAGE}");
+                    return 2;
+                }
+            },
+            "--verify-sig" => match args.get(i + 1) {
+                Some(v) => {
+                    verify_sig = Some(v.clone());
+                    i += 1;
+                }
+                None => {
+                    eprintln!(
+                        "xerj corpus add: --verify-sig needs a public key file\n\n{CORPUS_USAGE}"
+                    );
                     return 2;
                 }
             },
@@ -396,7 +413,7 @@ fn run_corpus_add(args: &[String]) -> i32 {
             Ok(FromPack::NotAPack) => {}
             Ok(FromPack::Dir(dir)) => {
                 let share = dir.display().to_string();
-                return run_corpus_add_pack(&dir, explicit_name, &share);
+                return run_corpus_add_pack(&dir, explicit_name, &share, verify_sig.as_deref());
             }
             Ok(FromPack::Zip(zip)) => {
                 // transient staging, never build state — it dies with this
@@ -428,13 +445,19 @@ fn run_corpus_add(args: &[String]) -> i32 {
                         }
                     }
                 }
-                return run_corpus_add_pack(&dir, explicit_name, &zip);
+                return run_corpus_add_pack(&dir, explicit_name, &zip, verify_sig.as_deref());
             }
             Err(e) => {
                 eprintln!("xerj corpus add: {e}");
                 return 2;
             }
         }
+    }
+    if verify_sig.is_some() {
+        eprintln!(
+            "xerj corpus add: --verify-sig applies to a harvested pack --from, not a clone\n\n{CORPUS_USAGE}"
+        );
+        return 2;
     }
     // The manifest is read BEFORE the name is finalised: with `--from` and
     // no explicit <name>/--as, the manifest's own 'corpus' field supplies
@@ -698,7 +721,37 @@ fn resolve_pack_source(path: &str) -> Result<FromPack, String> {
 /// ([`xccode::passage::locator_repo`]), so `rustsec/records.jsonl` keys the
 /// same way a cloned `rustsec/` repo always did and the per-hit licence
 /// warnings work unchanged.
-fn run_corpus_add_pack(pack_dir: &Path, explicit_name: Option<String>, share_path: &str) -> i32 {
+fn run_corpus_add_pack(
+    pack_dir: &Path,
+    explicit_name: Option<String>,
+    share_path: &str,
+    verify_sig: Option<&str>,
+) -> i32 {
+    // Origin check first, before a byte of the pack is trusted: checksums
+    // prove integrity, the signature proves who built it. A pack that
+    // fails here is refused whole — nothing is materialized, nothing is
+    // indexed.
+    if let Some(pubfile) = verify_sig {
+        let public = match std::fs::read_to_string(pubfile) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("xerj corpus add: cannot read public key {pubfile}: {e}");
+                return 2;
+            }
+        };
+        if let Err(e) = crate::harvest::sign::verify_pack(pack_dir, &public) {
+            eprintln!("xerj corpus add: {e:#}");
+            return 2;
+        }
+        println!("signature verified against {pubfile}");
+    } else if crate::harvest::sign::pack_is_signed(pack_dir) {
+        // unsigned USE of a signed pack is not an error — the key choice is
+        // the consumer's — but it deserves a nudge, not silence
+        eprintln!(
+            "note: this pack carries a SHA256SUMS.sig — pass --verify-sig <pubkey-file> to check \
+             its origin before indexing"
+        );
+    }
     let meta = match crate::harvest::pack::read_manifest(pack_dir) {
         Ok(m) => m,
         Err(e) => {
@@ -1529,6 +1582,7 @@ pub fn run_corpus_cli(args: &[String]) -> i32 {
     match sub.as_str() {
         "add" => run_corpus_add(&rest),
         "build" => crate::harvest::run_build(&rest),
+        "sign" | "keygen" => crate::harvest::sign::run_sign_cli(sub, &rest),
         "index" => run_corpus_index(&rest),
         "list" => run_corpus_list(&rest),
         "-h" | "--help" | "help" => {
@@ -2304,6 +2358,53 @@ precedence = ["a", "b"]
         )
         .unwrap();
         assert_eq!(add(), 2);
+    }
+
+    #[test]
+    fn corpus_add_verifies_the_pack_signature_before_materializing() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let pack = build_demo_pack(home.path());
+        let corpus = home.path().join("corpora/demo");
+
+        // sign the demo pack and publish both halves as key files
+        let (seed, public) = crate::harvest::sign::generate_keypair().unwrap();
+        crate::harvest::sign::sign_pack(&pack, &seed).unwrap();
+        let good = home.path().join("good.pub");
+        std::fs::write(&good, &public).unwrap();
+        let (_, other) = crate::harvest::sign::generate_keypair().unwrap();
+        let wrong = home.path().join("wrong.pub");
+        std::fs::write(&wrong, &other).unwrap();
+
+        let add = |key: &Path| {
+            run_corpus_add(&[
+                "--from".to_string(),
+                pack.display().to_string(),
+                "--verify-sig".to_string(),
+                key.display().to_string(),
+            ])
+        };
+
+        // the wrong key refuses the pack WHOLE: exit 2 and no corpus written
+        // — a signature failure must never leave a half-materialized corpus
+        assert_eq!(add(&wrong), 2);
+        assert!(
+            !corpus.exists(),
+            "a failed verification must not materialize anything"
+        );
+
+        // the right key installs normally
+        assert_eq!(add(&good), 0);
+        assert!(corpus.join("corpus.json").is_file());
+
+        // and the unsigned-pack hint path: rebuild without the .sig, add
+        // without --verify-sig still works (the consumer's key choice is
+        // theirs), the hint goes to stderr where the callers ignore it
+        std::fs::remove_file(pack.join(crate::harvest::sign::SIG_NAME)).unwrap();
+        assert_eq!(
+            run_corpus_add(&["--from".to_string(), pack.display().to_string()]),
+            0
+        );
     }
 
     #[test]

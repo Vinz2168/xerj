@@ -77,6 +77,9 @@ rustc-hash = "2"
 crc32fast = "1"
 # Crypto/Random
 rand = "0.8"
+# ed25519 pack signatures (harvest/sign.rs); same crate the TLS stack uses,
+# so it adds no new native build to the binary.
+ring = "0.17"
 # Bytes
 bytes = "1"
 memmap2 = "0.9"

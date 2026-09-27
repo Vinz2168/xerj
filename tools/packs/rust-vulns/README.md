@@ -1,5 +1,8 @@
 # rust-vulns — the showcase corpus pack
 
+[![pack publish](https://github.com/xerj-org/xerj/actions/workflows/pack-publish.yml/badge.svg)](https://github.com/xerj-org/xerj/actions/workflows/pack-publish.yml)
+[![rust-vulns freshness](https://img.shields.io/endpoint?url=https://github.com/xerj-org/xerj/releases/download/pack-rust-vulns/rust-vulns-freshness.json)](https://github.com/xerj-org/xerj/releases/tag/pack-rust-vulns)
+
 Rust vulnerability advisories, **identity-resolved across sources**: the same
 vulnerability that arrives as `RUSTSEC-2021-0003`, `GHSA-43w2-9j62-hq99` and
 `CVE-2021-25900` is one record, carrying every field any source knew — and
@@ -49,6 +52,32 @@ author owns what goes in a pack.
 
 ## Build, consume, query
 
+The published pack is a rolling GitHub Release
+([pack-rust-vulns](https://github.com/xerj-org/xerj/releases/tag/pack-rust-vulns)),
+rebuilt and signed daily by the
+[pack publish](https://github.com/xerj-org/xerj/actions/workflows/pack-publish.yml)
+workflow.
+
+```sh
+# consume the published, signed pack:
+#   1. fetch the zip and the public key (the key travels OUT of band —
+#      next to the recipe in this repo, never inside the pack)
+curl -LO https://github.com/xerj-org/xerj/releases/download/pack-rust-vulns/rust-vulns-pack.zip
+curl -LO https://github.com/xerj-org/xerj/releases/download/pack-rust-vulns/rust-vulns-SHA256SUMS.sig
+curl -LO https://raw.githubusercontent.com/xerj-org/xerj/main/tools/packs/keys/rust-vulns.pub
+
+#   2. install it with signature verification — refuses the pack whole if
+#      the signature does not verify, before anything is indexed
+xerj corpus add rust-vulns --from rust-vulns-pack.zip \
+  --verify-sig rust-vulns.pub
+
+#   3. index and query
+xerj corpus index rust-vulns
+xerj code rust-vulns "smallvec insert_many buffer overflow"
+```
+
+Or build it yourself from this directory (the recipe is the whole build):
+
 ```sh
 # build (or incrementally refresh) — fetches both sources, dedups, packs
 xerj corpus build rust-vulns --recipe tools/packs/rust-vulns/recipe.toml
@@ -80,14 +109,35 @@ sample. Suggestions, not decisions: the index infers the real mapping.
 | `is_withdrawn` / `informational` | lifecycle flags — withdrawn records stay, flagged |
 | `licence` / `sources` / `origin` | provenance per record |
 
+## Signatures and key rotation
+
+`SHA256SUMS.sig` is a raw 64-byte ed25519 signature over the pack's
+SHA256SUMS (which covers every pack file). The verifying key lives at
+[keys/rust-vulns.pub](./keys/rust-vulns.pub) here and on xerj.org — never
+inside the pack, because a key shipped beside its own signature verifies
+nothing. Checksums prove the pack arrived intact; the signature proves who
+built it. A self-consistent rebuild (valid checksums over tampered records)
+passes checksums and fails the signature — that is the attack the signature
+exists for, and a test in `harvest/sign.rs` pins it.
+
+v1 uses a single release key. Rotation: generate a new keypair
+(`xerj corpus keygen`), set the new `PACK_SIGNING_SEED` secret, commit the
+new `.pub` in the same change, and let the next scheduled publish run — the
+workflow verifies its own output against the committed `.pub` before
+publishing, so a half-rotated key fails the build instead of shipping an
+unverifiable pack. Consumers re-fetch the `.pub` when they choose to trust
+the new one.
+
 ## Honest limits
 
-- **Freshness is whatever the last build fetched.** Rebuild to refresh;
-  a scheduled build with a freshness badge is the next milestone.
+- **Freshness is whatever the last build fetched.** The scheduled workflow
+  rebuilds daily; the badge above shows the last build's date and record
+  count. Between the sources updating and the next cron tick, the pack lags
+  by up to a day — a rebuild you run yourself is always current.
 - **Not a security product.** This is a searchable corpus of advisories for
   agents and humans; it is not a scanner and makes no completeness claim
   beyond "what these two sources carried at build time".
 - Withdrawn (124) and informational advisories are kept and flagged, not
   dropped — filtering is the consumer's decision.
-- v1 ships checksums (SHA256SUMS verifies on `corpus add`); signing lands
-  with the publishing milestone.
+- The signature proves origin, not safety: a verified pack is exactly what
+  the key holder built — indexing it is still your decision.

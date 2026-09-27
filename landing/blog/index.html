@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>XERJ.ai — Blog: the engineering log</title>
-<meta name="description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, benchmark autopsies, and the storage formats that cut the index 28%.">
+<meta name="description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@400;700;800;900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -16,7 +16,7 @@
 <meta property="og:site_name" content="XERJ.ai">
 <meta property="og:type" content="website">
 <meta property="og:title" content="XERJ.ai — Blog: the engineering log">
-<meta property="og:description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, benchmark autopsies, and the storage formats that cut the index 28%.">
+<meta property="og:description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
 <meta property="og:url" content="https://xerj.org/blog/">
 <meta property="og:image" content="https://xerj.org/og/xerj-card.png">
 <meta property="og:image:width" content="1200">
@@ -25,7 +25,7 @@
 <meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="XERJ.ai — Blog: the engineering log">
-<meta name="twitter:description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, benchmark autopsies, and the storage formats that cut the index 28%.">
+<meta name="twitter:description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
 <meta name="twitter:image" content="https://xerj.org/og/xerj-card.png">
 <script type="application/ld+json">
 {
@@ -59,7 +59,7 @@
   "@context": "https://schema.org",
   "@type": "CollectionPage",
   "name": "XERJ.ai — Blog: the engineering log",
-  "description": "Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, benchmark autopsies, and the storage formats that cut the index 28%.",
+  "description": "Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
   "url": "https://xerj.org/blog/",
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
@@ -126,6 +126,51 @@
   <!-- Reverse-chronological by hand while there is one post; new posts PREPEND.
        Move to a generator only past ~10 posts. -->
   <ol class="blog-list">
+    <li>
+      <a class="bl-card" href="/blog/one-vulnerability-three-names">
+        <!-- Bar widths share ONE denominator, 4,107 envelopes (the max across
+             all rows), so lengths compare across rows. Neutral bar = what the
+             two sources filed, accent bar = what identity resolution made of
+             it. Figures verbatim from the post: 4,107 envelopes → 1,950
+             records, 1,221 of them merged from both sources. -->
+        <div class="bl-preview" aria-hidden="true">
+          <div class="blp-kicker">CORPUS PACKS · 2 SOURCES · UNION-FIND · ED25519</div>
+          <div class="blp-row">
+            <div class="blp-ds">FILED</div>
+            <div class="blp-pair">
+              <span class="blp-num">4,107 <i>envelopes</i></span><span class="blp-bar b" style="width:100%"></span>
+              <span class="blp-num">osv.dev + RustSec</span><span class="blp-bar b" style="width:100%"></span>
+            </div>
+          </div>
+          <div class="blp-row">
+            <div class="blp-ds">RESOLVED</div>
+            <div class="blp-pair">
+              <span class="blp-num">1,950 <i>records</i> <span class="blp-chip">&minus;52.5%</span></span><span class="blp-bar a" style="width:47.5%"></span>
+              <span class="blp-num">1,221 <i>from both</i></span><span class="blp-bar a" style="width:29.7%"></span>
+            </div>
+          </div>
+          <div class="blp-row">
+            <div class="blp-ds">SIGNED</div>
+            <div class="blp-pair">
+              <span class="blp-num">ed25519 over SHA256SUMS <span class="blp-chip">prior art: 0 of 4</span></span><span class="blp-bar a" style="width:100%"></span>
+            </div>
+          </div>
+          <p class="blp-foot">daily rebuild · rolling release pack-rust-vulns · cold build ~34 s</p>
+        </div>
+        <div class="bl-meta">
+          <p class="bl-date"><time datetime="2026-09-27">2026-09-27</time> · CORPUS PACKS · SECURITY DATA</p>
+          <h2 class="bl-title">One vulnerability, three names, and a pack we sign</h2>
+          <p class="bl-excerpt">The same Rust vulnerability sits in two databases under three ids, and
+          neither database merges them. A three-line identity recipe collapses
+          <strong>4,107 filings to 1,950 records</strong> carrying every field either source knew
+          &mdash; including the curated vulnerable-function paths no export has. Then the part
+          nobody ships: <strong>a signature</strong>, because checksums prove integrity and not
+          origin.</p>
+          <p class="bl-byline">AUTHOR · XERJ ENGINEERING TEAM · PUBLISHED · 2026-09-27</p>
+          <span class="bl-read">READ THE POST &rarr;</span>
+        </div>
+      </a>
+    </li>
     <li>
       <a class="bl-card" href="/blog/cutting-the-index-28-percent">
         <!-- Bar widths share ONE denominator, 2,449 kB (the max across all rows,
