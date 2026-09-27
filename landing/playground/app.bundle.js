@@ -3515,7 +3515,7 @@ When the engine grows a \`/v1/users/me\` endpoint, this store syncs up.`
     }
     return `
 <nav class="nav" aria-label="Product">
-  <span class="brand">XERJ.AI \xB7 OBSERVE</span>
+  <span class="brand">XERJ \xB7 OBSERVE</span>
   ${primaryLinks}
   <span class="spacer"></span>
   ${EditCtrl({ active: edit })}

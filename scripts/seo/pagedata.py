@@ -96,7 +96,10 @@ PAGES: dict[str, dict[str, str]] = {
         label="Jev measured, wire spoken", kind="article",
         title="Does XERJ beat JEV? On the bill, outright. On FiQA, no.",
         description="1,271 judged queries: Jev rerank takes SciFact 0.7410 and FiQA 0.3638 (+0.126), our zero-API-token hybrid keeps NFCorpus 0.3448, and the FiQA run cost $0.6375.",
-        published="2026-09-21", updated="2026-09-21",
+        published="2026-09-21",
+        # 2026-09-27: added the closing 05 section (verdict + try-it); measurement
+        # content unchanged. updated follows the edit, published stays pinned.
+        updated="2026-09-27",
         og_image="og/does-xerj-beat-jev.png",
         # alt text must describe only what the committed 1200x630 card
         # renders — the token count is NOT on the image (strip: queries,
@@ -111,7 +114,10 @@ PAGES: dict[str, dict[str, str]] = {
         label="Jev vs a BM25 vote", kind="article",
         title="A BM25 vote ties Jev on spam and beats it on intent",
         description="500 decisions each on SMS Spam and Banking77: a tie on spam (McNemar p=0.75), a 9-point retrieval win on 77-way intent at zero cost, and one dataset Jev wins.",
-        published="2026-09-22", updated="2026-09-22",
+        published="2026-09-22",
+        # 2026-09-27: added the closing 08 section (takeaway + try-it); measurement
+        # content unchanged. updated follows the edit, published stays pinned.
+        updated="2026-09-27",
     ),
     # Size-epic stage-1 write-up, 2026-09-27. published/updated pinned like the
     # two posts above; in-body run dates stay 2026-09-26/27.
