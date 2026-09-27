@@ -111,7 +111,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   family drops 200,826 → 13,774 B (−93.1 %), total durable −3.5 %, with
   every other extension byte-identical; the win scales
   with term cardinality, which is exactly the shape of unique-id fields
-  on large deployments.  ZFM4-and-older segments decode unchanged.
+  on large deployments.  Measured again on a tree carrying ZBS4 as well
+  (`results/result-zbs4-zfm5-balanced.json` vs
+  `result-zbs4-only-control-balanced.json`, same day): 4,176,306 →
+  3,989,254 B — the two stages together take the pre-stage baseline
+  5,398,478 → 3,989,254 B (**−26.1 %**), with the four staged deltas
+  (ZNV2, ZPS2, ZBS4, ZFM5) summing to within 12 B of the directly
+  measured endpoint.  ZFM4-and-older segments decode unchanged.
 
 - **Stored sections get typed-int columns, duplicate-column references and
   a merge-path zstd effort chooser (`ZBS4`)** — stage 1 of the index-size
