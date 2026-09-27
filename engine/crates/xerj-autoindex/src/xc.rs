@@ -224,16 +224,21 @@ pub fn run_code_cli(args: &[String]) -> i32 {
 // ── xerj corpus add ─────────────────────────────────────────────────────────
 
 const CORPUS_USAGE: &str =
-    "usage: xerj corpus add <name> <git-url>... | --from <manifest.json> [--as <name>]
+    "usage: xerj corpus add <name> <git-url>... | --from <manifest.json|pack-dir|pack.zip> [--as <name>]
+       xerj corpus build <name> [--recipe <path>] [--fresh]
        xerj corpus index <name> [--fresh] [--url URL]
        xerj corpus list [--url URL]
 
 clone the repos, detect licences, write corpora/<name>/corpus.json;
---from takes the corpus name from the manifest's 'corpus' field unless
-<name> or --as overrides it; index builds/verifies/switches the corpus
-(exit 3 skips junk — normal); list shows what is loaded on this node.";
+--from takes the corpus name from the manifest's 'corpus' field (or the
+pack's 'pack' field) unless <name> or --as overrides it; a harvested pack
+also checksum-verifies and materializes records per source; build
+harvests recipe sources into a deterministic pack under builds/<name>/
+(see tools/xerj-code/);
+index builds/verifies/switches the corpus (exit 3 skips junk — normal);
+list shows what is loaded on this node.";
 
-fn git(dir: Option<&Path>, args: &[&str]) -> Result<(i32, String)> {
+pub(crate) fn git(dir: Option<&Path>, args: &[&str]) -> Result<(i32, String)> {
     let mut c = Command::new("git");
     if let Some(d) = dir {
         c.current_dir(d).arg("-C").arg(d);
@@ -251,7 +256,7 @@ fn git(dir: Option<&Path>, args: &[&str]) -> Result<(i32, String)> {
 
 /// Move a clone to `sha` (shallow). Never a shell string: the sha comes from
 /// an untrusted manifest, and `Command` passes it as ONE argv element.
-fn checkout_at_sha(target: &Path, url: &str, sha: &str) -> Result<()> {
+pub(crate) fn checkout_at_sha(target: &Path, url: &str, sha: &str) -> Result<()> {
     if !target.join(".git").exists() {
         std::fs::create_dir_all(target)?;
         git(Some(target), &["init", "--quiet"])?;
@@ -381,6 +386,56 @@ fn run_corpus_add(args: &[String]) -> i32 {
         );
         return 2;
     }
+    // A `--from` that names a harvested pack (a pack dir, the pack's own
+    // manifest.json, or a pack.zip) routes to the pack path BEFORE the
+    // hub-manifest arm reads it: the two are different documents (`repos[]`
+    // vs `files`+`kind`), and mis-reading one as the other produces noise,
+    // not a useful error.
+    if let Some(path) = &from {
+        match resolve_pack_source(path) {
+            Ok(FromPack::NotAPack) => {}
+            Ok(FromPack::Dir(dir)) => {
+                let share = dir.display().to_string();
+                return run_corpus_add_pack(&dir, explicit_name, &share);
+            }
+            Ok(FromPack::Zip(zip)) => {
+                // transient staging, never build state — it dies with this
+                // call, after the records have been copied out
+                let tmp = match tempfile::tempdir() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("xerj corpus add: cannot stage {zip}: {e}");
+                        return 2;
+                    }
+                };
+                let dest = tmp.path().join("pack");
+                if let Err(e) = crate::harvest::source::extract_zip(Path::new(&zip), &dest) {
+                    eprintln!("xerj corpus add: cannot extract {zip}: {e:#}");
+                    return 2;
+                }
+                // a zip of a directory carries the wrapper (`demo.zip` →
+                // `demo/…`) — descend exactly one level when needed; a pack
+                // nested deeper than that is not a shape this tool emits
+                let mut dir = dest.clone();
+                if !dir.join("manifest.json").is_file() {
+                    let kids: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+                        Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
+                        Err(_) => Vec::new(),
+                    };
+                    if let [only] = kids.as_slice() {
+                        if only.join("manifest.json").is_file() {
+                            dir = only.clone();
+                        }
+                    }
+                }
+                return run_corpus_add_pack(&dir, explicit_name, &zip);
+            }
+            Err(e) => {
+                eprintln!("xerj corpus add: {e}");
+                return 2;
+            }
+        }
+    }
     // The manifest is read BEFORE the name is finalised: with `--from` and
     // no explicit <name>/--as, the manifest's own 'corpus' field supplies
     // it. Everything downstream (dest, carry, entries) needs the resolved
@@ -436,6 +491,21 @@ fn run_corpus_add(args: &[String]) -> i32 {
 
     let root = code_root();
     let dest = root.join("corpora").join(&name);
+    // A corpus name is EITHER a cloned-repo corpus or a harvested one.
+    // Cloning repos into a harvested corpus's dir would corrupt both views:
+    // the manifest's pseudo-repos would sit beside real clones, and
+    // `xerj code`'s per-hit licence lookups would key on whichever won.
+    if let Ok(prev) = manifest::read_corpus_manifest(&dest.join("corpus.json")) {
+        if prev.kind.as_deref() == Some("harvested") {
+            eprintln!(
+                "xerj corpus add: corpus '{name}' is a harvested corpus — rebuild it from its pack:"
+            );
+            eprintln!(
+                "xerj corpus add:   xerj corpus add {name} --from <pack-dir|pack.zip|manifest.json>"
+            );
+            return 2;
+        }
+    }
     if let Err(e) = std::fs::create_dir_all(&dest) {
         eprintln!("xerj corpus add: cannot create {}: {e}", dest.display());
         return 2;
@@ -556,6 +626,249 @@ fn run_corpus_add(args: &[String]) -> i32 {
     }
     println!("next: xerj corpus index {name}");
     0
+}
+
+// ── xerj corpus add --from <pack> ───────────────────────────────────────────
+
+/// What `--from` named, as decided by [`resolve_pack_source`].
+#[derive(Debug)]
+enum FromPack {
+    /// Not a pack — the hub-manifest arm handles it.
+    NotAPack,
+    /// A directory holding a harvested `manifest.json`.
+    Dir(PathBuf),
+    /// A zip file to stage and treat as `Dir` after extraction.
+    Zip(String),
+}
+
+/// Decide whether a `--from` argument names a harvested pack. A directory
+/// with a `manifest.json` whose `kind` is `harvested`, a `.json` file of the
+/// same shape (the pack's own manifest, one level inside the pack), or a
+/// `.zip` — anything else is `NotAPack`. `Err` is reserved for paths that
+/// LOOK like a pack but cannot be inspected: a broken zip or an unreadable
+/// manifest must be reported, never silently fallen through to the hub arm
+/// (which would emit a confusing `repos[]` error for the same file).
+fn resolve_pack_source(path: &str) -> Result<FromPack, String> {
+    let p = Path::new(path);
+    let is_harvested = |m: &Path| -> Result<bool, String> {
+        let v: Value = std::fs::read_to_string(m)
+            .map_err(|e| format!("cannot read {}: {e}", m.display()))
+            .and_then(|raw| {
+                serde_json::from_str(&raw)
+                    .map_err(|e| format!("{} is not valid JSON: {e}", m.display()))
+            })?;
+        Ok(v.get("kind").and_then(Value::as_str) == Some("harvested"))
+    };
+    if p.is_dir() {
+        let m = p.join("manifest.json");
+        if !m.is_file() {
+            return Err(format!(
+                "{} is a directory with no manifest.json — name the pack directory, its \
+                 manifest, or its zip",
+                p.display()
+            ));
+        }
+        return if is_harvested(&m)? {
+            Ok(FromPack::Dir(p.to_path_buf()))
+        } else {
+            Err(format!(
+                "{} holds a manifest.json that is not a harvested pack",
+                p.display()
+            ))
+        };
+    }
+    let lower = path.to_lowercase();
+    if lower.ends_with(".zip") {
+        return Ok(FromPack::Zip(path.to_string()));
+    }
+    if p.is_file() {
+        if let Ok(true) = is_harvested(p) {
+            let dir = p.parent().unwrap_or(Path::new(".")).to_path_buf();
+            return Ok(FromPack::Dir(dir));
+        }
+    }
+    Ok(FromPack::NotAPack)
+}
+
+/// `corpus add --from <pack>`: checksum-verify the pack, then materialize it
+/// as a corpus — one directory per source slug holding that source's
+/// records, plus an extended corpus.json whose pseudo-repos are the pack's
+/// sources. The per-slug layout is load-bearing, not cosmetic: `xerj code`
+/// derives a hit's licence from the FIRST path segment of its locator
+/// ([`xccode::passage::locator_repo`]), so `rustsec/records.jsonl` keys the
+/// same way a cloned `rustsec/` repo always did and the per-hit licence
+/// warnings work unchanged.
+fn run_corpus_add_pack(pack_dir: &Path, explicit_name: Option<String>, share_path: &str) -> i32 {
+    let meta = match crate::harvest::pack::read_manifest(pack_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("xerj corpus add: {e:#}");
+            return 2;
+        }
+    };
+    let name = match resolve_corpus_name(explicit_name, &meta.name, &pack_dir.display().to_string())
+    {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("xerj corpus add: {e}");
+            return 2;
+        }
+    };
+    if let Err(e) = xccode::pathgate::valid_corpus_name(&name) {
+        eprintln!("xerj corpus add: {e}");
+        return 2;
+    }
+    let root = code_root();
+    let dest = root.join("corpora").join(&name);
+    // Same one-kind-per-name rule the git arm enforces, from the other side.
+    if let Ok(prev) = manifest::read_corpus_manifest(&dest.join("corpus.json")) {
+        if prev.kind.as_deref() != Some("harvested") {
+            eprintln!(
+                "xerj corpus add: corpus '{name}' already exists as a cloned-repo corpus at {}",
+                dest.display()
+            );
+            eprintln!("xerj corpus add: pick another name (--as <name>) or remove it first");
+            return 2;
+        }
+    }
+    println!(
+        "materializing corpus '{name}' from pack generation {}",
+        meta.generation
+    );
+    if let Err(e) = add_pack_materialize(&dest, pack_dir, &meta) {
+        eprintln!("xerj corpus add: {e:#}");
+        return 1;
+    }
+    let mut total = 0usize;
+    for s in &meta.sources {
+        let count = std::fs::read_to_string(dest.join(&s.slug).join("records.jsonl"))
+            .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0);
+        total += count;
+        println!("  [pack] {}: {} record(s) ({})", s.slug, count, s.licence);
+        if let Some(w) = xccode::licence::clone_warning_line(&s.licence) {
+            eprintln!("{w}");
+        }
+    }
+    println!(
+        "corpus '{name}': {} records from {} source(s) at {}",
+        total,
+        meta.sources.len(),
+        dest.display()
+    );
+    // `share_path` is where the pack CAME FROM — the dir spelling names the
+    // pack dir, the zip spelling names the zip (its staging dir is deleted by
+    // the time this prints, and a share line pointing at a dead tempdir
+    // teaches users to re-send nothing).
+    println!("share it: {share_path}  (rebuild with xerj corpus add {name} --from <that pack>)");
+    println!("next: xerj corpus index {name}");
+    0
+}
+
+/// Copy the pack's records into `corpora/<name>/<slug>/records.jsonl`
+/// (verbatim lines — the pack line IS canonical JSON), reconcile away slug
+/// dirs a previous add owned that this pack no longer has, and write the
+/// extended corpus.json. Records are routed by their `source` field (the
+/// merge winner), which the pack's uniform-key invariant guarantees on
+/// every record.
+fn add_pack_materialize(
+    dest: &Path,
+    pack_dir: &Path,
+    meta: &crate::harvest::pack::PackMeta,
+) -> anyhow::Result<()> {
+    use std::collections::HashSet;
+    use std::io::{BufRead, BufReader, Write};
+
+    let slugs: HashSet<&str> = meta.sources.iter().map(|s| s.slug.as_str()).collect();
+
+    // reconcile FIRST: every dir the previous harvested manifest owned is
+    // regenerated from this pack — drop them all, not just the renamed ones,
+    // or a re-add APPENDS to the old records.jsonl and duplicates every line
+    if let Ok(prev) = manifest::read_corpus_manifest(&dest.join("corpus.json")) {
+        for r in &prev.repos {
+            let _ = std::fs::remove_dir_all(dest.join(&r.repo));
+        }
+    }
+    std::fs::create_dir_all(dest).with_context(|| format!("cannot create {}", dest.display()))?;
+
+    // per-slug buffer: shard files interleave ids (bucket = hash(id) %
+    // shards), so the corpus's records.jsonl is re-sorted by id at write
+    // time — a refresh then diffs clean against the pack's own ordering
+    let mut by_slug: std::collections::HashMap<String, Vec<(String, String)>> =
+        std::collections::HashMap::new();
+    for f in &meta.files {
+        let rdr = BufReader::new(
+            std::fs::File::open(pack_dir.join(&f.name))
+                .with_context(|| format!("cannot read {}", f.name))?,
+        );
+        for line in rdr.lines() {
+            let line = line.with_context(|| format!("read {}", f.name))?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let v: Value = serde_json::from_str(&line)
+                .with_context(|| format!("{}: a record line is not valid JSON", f.name))?;
+            let slug = v.get("source").and_then(Value::as_str).unwrap_or("");
+            if !slugs.contains(slug) {
+                let fname = &f.name;
+                anyhow::bail!(
+                    "{fname}: a record names source '{slug}' which the pack does not declare"
+                );
+            }
+            let id = v
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            by_slug
+                .entry(slug.to_string())
+                .or_default()
+                .push((id, line));
+        }
+    }
+    if by_slug.is_empty() {
+        anyhow::bail!("pack holds no records — nothing to materialize");
+    }
+
+    let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for (slug, mut records) in by_slug {
+        records.sort_by(|a, b| a.0.cmp(&b.0));
+        let dir = dest.join(&slug);
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("cannot create {}", dir.display()))?;
+        let path = dir.join("records.jsonl");
+        let mut w = std::fs::File::create(&path)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+        for (_, line) in &records {
+            // verbatim: the pack line IS canonical JSON
+            w.write_all(line.as_bytes())?;
+            w.write_all(b"\n")?;
+        }
+        counts.insert(slug, records.len() as u64);
+    }
+
+    let mut entries = Vec::new();
+    for s in &meta.sources {
+        let path = dest.join(&s.slug).join("records.jsonl");
+        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        entries.push(manifest::ManifestRepo {
+            repo: s.slug.clone(),
+            url: s.url.clone().unwrap_or_default(),
+            licence: s.licence.clone(),
+            sha: s.watermark.clone().unwrap_or_default(),
+            files: Some(*counts.get(&s.slug).unwrap_or(&0)),
+            bytes: Some(bytes),
+            review: None,
+        });
+    }
+    manifest::write_corpus_manifest_kind(
+        &dest.join("corpus.json"),
+        &meta.name,
+        Some("harvested"),
+        &chrono_now_stamp(),
+        &entries,
+    );
+    Ok(())
 }
 
 fn record(
@@ -1206,7 +1519,7 @@ fn run_corpus_list(args: &[String]) -> i32 {
 
 // ── dispatch ────────────────────────────────────────────────────────────────
 
-/// `xerj corpus <add|index|list> …` — returns the process exit code.
+/// `xerj corpus <add|build|index|list> …` — returns the process exit code.
 pub fn run_corpus_cli(args: &[String]) -> i32 {
     let Some(sub) = args.first() else {
         eprintln!("{CORPUS_USAGE}");
@@ -1215,6 +1528,7 @@ pub fn run_corpus_cli(args: &[String]) -> i32 {
     let rest: Vec<String> = args[1..].to_vec();
     match sub.as_str() {
         "add" => run_corpus_add(&rest),
+        "build" => crate::harvest::run_build(&rest),
         "index" => run_corpus_index(&rest),
         "list" => run_corpus_list(&rest),
         "-h" | "--help" | "help" => {
@@ -1814,5 +2128,283 @@ mod tests {
         assert_eq!(st.index_prefix, None, "legacy state records no build");
         assert!(node.live("xc-kv-000"));
         assert!(node.ops.borrow().iter().all(|o| !o.starts_with("delete:")));
+    }
+
+    // ── corpus add --from <pack> (harvested consumption) ────────────────────
+
+    /// Holds XERJ_CODE_HOME at `home` for the guard's lifetime — both the
+    /// build and the add paths resolve their root through `code_root()` at
+    /// CALL time, so a test that builds a pack and then adds it needs the
+    /// env held across both, not scoped per call. Under ENV_LOCK for the
+    /// same reason the env tests above are (do NOT re-enter: the lock is not
+    /// reentrant, so nothing inside may take it again).
+    struct CodeHomeGuard(#[expect(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for CodeHomeGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("XERJ_CODE_HOME");
+        }
+    }
+    fn code_home(home: &Path) -> CodeHomeGuard {
+        let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("XERJ_CODE_HOME", home);
+        CodeHomeGuard(g)
+    }
+
+    /// A small two-source pack under `home`: source `a` owns X1 (merged with
+    /// b's alias-linked record) and X3; source `b` wins nothing.
+    fn build_demo_pack(home: &Path) -> PathBuf {
+        let root = home.join("recipes");
+        std::fs::create_dir_all(root.join("data/a")).unwrap();
+        std::fs::create_dir_all(root.join("data/b")).unwrap();
+        std::fs::write(
+            root.join("demo.toml"),
+            r#"
+[recipe]
+format = 1
+name = "demo"
+
+[[sources]]
+slug = "a"
+kind = "dir"
+path = "data/a"
+format = "flat"
+licence = "CC0-1.0"
+
+[[sources]]
+slug = "b"
+kind = "dir"
+path = "data/b"
+format = "flat"
+licence = "CC-BY-4.0"
+
+[identity]
+edges = [{ field = "id" }, { field = "aliases", each = true }]
+canonical_source_order = ["a", "b"]
+
+[merge]
+precedence = ["a", "b"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("data/a/one.json"),
+            r#"{"id":"X1","aliases":["C1"],"title":"one"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("data/a/three.json"),
+            r#"{"id":"X3","title":"three"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("data/b/two.json"),
+            r#"{"id":"X2","aliases":["C1"],"title":"two"}"#,
+        )
+        .unwrap();
+        let rc = crate::harvest::run_build(&["demo".to_string()]);
+        assert_eq!(rc, 0, "pack build must succeed");
+        home.join("builds/demo/pack/demo")
+    }
+
+    fn records_lines(path: &Path) -> Vec<Value> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn resolve_pack_source_sniffs_the_pack_spellings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _h = code_home(tmp.path());
+        let pack = build_demo_pack(tmp.path());
+        assert!(matches!(
+            resolve_pack_source(&pack.display().to_string()).unwrap(),
+            FromPack::Dir(_)
+        ));
+        // the pack's own manifest names the pack (its parent dir)
+        assert!(matches!(
+            resolve_pack_source(&pack.join("manifest.json").display().to_string()).unwrap(),
+            FromPack::Dir(_)
+        ));
+        // a hub manifest is not a pack — the hub arm reads it
+        let hub = tmp.path().join("hub.json");
+        std::fs::write(&hub, r#"{"corpus":"x","repos":[]}"#).unwrap();
+        assert!(matches!(
+            resolve_pack_source(&hub.display().to_string()).unwrap(),
+            FromPack::NotAPack
+        ));
+        // a zip is staged, not inspected, here
+        let zipf = tmp.path().join("p.zip");
+        std::fs::write(&zipf, b"PK").unwrap();
+        assert!(matches!(
+            resolve_pack_source(&zipf.display().to_string()).unwrap(),
+            FromPack::Zip(_)
+        ));
+        // a directory without a manifest is an error, not a silent fallthrough
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let err = resolve_pack_source(&empty.display().to_string()).unwrap_err();
+        assert!(err.contains("no manifest.json"), "{err}");
+        // and a dir whose manifest is not a harvested pack is named as such
+        let hubdir = tmp.path().join("hubdir");
+        std::fs::create_dir_all(&hubdir).unwrap();
+        std::fs::write(hubdir.join("manifest.json"), r#"{"corpus":"x"}"#).unwrap();
+        let err = resolve_pack_source(&hubdir.display().to_string()).unwrap_err();
+        assert!(err.contains("not a harvested pack"), "{err}");
+    }
+
+    #[test]
+    fn corpus_add_from_pack_materializes_re_adds_and_refuses_mixing() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let pack = build_demo_pack(home.path());
+        let corpus = home.path().join("corpora/demo");
+
+        let add = || run_corpus_add(&["--from".to_string(), pack.display().to_string()]);
+        let rc = add();
+        assert_eq!(rc, 0);
+
+        // records are partitioned by WINNING source: a holds X1 (merged with
+        // b's alias) and X3; b won nothing so it has no directory at all
+        let a = records_lines(&corpus.join("a/records.jsonl"));
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0]["id"], json!("X1"));
+        assert_eq!(a[0]["sources"], json!(["a", "b"]), "alias merge survived");
+        assert_eq!(a[1]["id"], json!("X3"));
+        assert!(!corpus.join("b").exists(), "no b-won records, no b dir");
+
+        // the manifest: kind + pseudo-repos with the pack's source licences
+        let m = manifest::read_corpus_manifest(&corpus.join("corpus.json")).unwrap();
+        assert_eq!(m.kind.as_deref(), Some("harvested"));
+        assert_eq!(m.repos.len(), 2);
+        assert_eq!(m.repos[0].repo, "a");
+        assert_eq!(m.repos[0].licence, "CC0-1.0");
+        assert_eq!(m.repos[0].files, Some(2));
+        assert_eq!(m.repos[1].repo, "b");
+        assert_eq!(m.repos[1].files, Some(0));
+
+        // THE integration pin: xerj code's per-hit licence lookups key on the
+        // first locator segment, which is the slug dir — licence_map must see
+        // exactly what a cloned repo would have given it
+        let lic = manifest::licence_map(home.path(), "demo");
+        assert_eq!(lic.get("a").map(String::as_str), Some("CC0-1.0"));
+        assert_eq!(lic.get("b").map(String::as_str), Some("CC-BY-4.0"));
+
+        // re-add: refresh, never duplicate — same pack, same line counts
+        assert_eq!(add(), 0);
+        assert_eq!(records_lines(&corpus.join("a/records.jsonl")).len(), 2);
+
+        // a git-shaped corpus already owns the name → refused, nothing cloned
+        std::fs::write(
+            corpus.join("corpus.json"),
+            r#"{"corpus":"demo","repos":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(add(), 2);
+    }
+
+    #[test]
+    fn git_arm_refuses_to_clone_onto_a_harvested_name() {
+        let home = tempfile::tempdir().unwrap();
+        let corpus = home.path().join("corpora/occupied");
+        std::fs::create_dir_all(&corpus).unwrap();
+        // harvested-kind marker: the git arm must refuse BEFORE cloning
+        manifest::write_corpus_manifest_kind(
+            &corpus.join("corpus.json"),
+            "occupied",
+            Some("harvested"),
+            "t",
+            &[manifest::ManifestRepo {
+                repo: "a".into(),
+                url: "u".into(),
+                licence: "CC0-1.0".into(),
+                sha: String::new(),
+                files: None,
+                bytes: None,
+                review: None,
+            }],
+        );
+        let _h = code_home(home.path());
+        let rc = run_corpus_add(&[
+            "occupied".to_string(),
+            "https://github.com/xerj-org/xerj".to_string(),
+        ]);
+        assert_eq!(rc, 2);
+        assert!(!corpus.join("xerj").exists(), "no clone happened");
+    }
+
+    #[test]
+    fn a_pack_zip_stages_and_materializes() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let pack = build_demo_pack(home.path());
+
+        // zip the pack dir, both shapes anyone hands us: the wrapper dir
+        // (`demo/…` inside — how every zip-of-a-directory tool packs) and
+        // the bare contents
+        fn zip_up(zip_path: &Path, base: &Path, prefix: &str) {
+            use std::io::Write;
+            let f = std::fs::File::create(zip_path).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+            fn add(
+                z: &mut zip::ZipWriter<std::fs::File>,
+                base: &Path,
+                rel: &Path,
+                prefix: &str,
+                opts: zip::write::SimpleFileOptions,
+            ) {
+                if rel.is_dir() {
+                    if let Ok(entries) = std::fs::read_dir(rel) {
+                        for e in entries.flatten() {
+                            add(z, base, &e.path(), prefix, opts);
+                        }
+                    }
+                    return;
+                }
+                let name = format!(
+                    "{prefix}{}",
+                    rel.strip_prefix(base)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                );
+                z.start_file(name, opts).unwrap();
+                z.write_all(&std::fs::read(rel).unwrap()).unwrap();
+            }
+            add(&mut z, base, base, prefix, opts);
+            z.finish().unwrap();
+        }
+
+        let corpus = home.path().join("corpora/demo");
+        for (name, prefix) in [("wrapped.zip", "demo/"), ("flat.zip", "")] {
+            let zip_path = home.path().join(name);
+            zip_up(&zip_path, &pack, prefix);
+            let rc = run_corpus_add(&["--from".to_string(), zip_path.display().to_string()]);
+            assert_eq!(rc, 0, "{name} must materialize");
+            assert_eq!(
+                records_lines(&corpus.join("a/records.jsonl")).len(),
+                2,
+                "{name}"
+            );
+            assert_eq!(
+                manifest::read_corpus_manifest(&corpus.join("corpus.json"))
+                    .unwrap()
+                    .kind
+                    .as_deref(),
+                Some("harvested"),
+                "{name}"
+            );
+        }
+
+        // and a non-pack zip fails loudly instead of materializing noise
+        let junk = home.path().join("junk.zip");
+        std::fs::write(&junk, b"definitely not a zip").unwrap();
+        let rc = run_corpus_add(&["--from".to_string(), junk.display().to_string()]);
+        assert_eq!(rc, 2);
+        assert!(!home.path().join("corpora/junk").exists());
     }
 }

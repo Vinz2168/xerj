@@ -7322,6 +7322,7 @@ dependencies = [
  "streaming-iterator",
  "tempfile",
  "tokio",
+ "toml",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-c",
