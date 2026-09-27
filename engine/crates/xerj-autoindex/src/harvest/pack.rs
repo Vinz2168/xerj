@@ -2,7 +2,9 @@
 //!
 //! A pack is a directory (a zip of it later) that ANY tool can consume:
 //! sharded `records-*.jsonl`, a `manifest.json` with per-file sha256s, the
-//! recipe that built it, and a `SHA256SUMS` over everything. Determinism is
+//! recipe that built it, the suggestion files (`mapping.suggested.json`,
+//! `relations.jsonl`, `suggestions.md`), and a `SHA256SUMS` over
+//! everything. Determinism is
 //! the load-bearing property: shard assignment is `xxh3_64(id) % shards`,
 //! records are id-ordered, and every record carries the SAME key set (a
 //! key absent from one record is `[]` for array keys, `null` otherwise) —
@@ -68,6 +70,7 @@ pub fn emit(
     recipe_toml: &str,
     mut records: Vec<Map<String, Value>>,
     stats: &RunStats,
+    sugg: &crate::harvest::suggest::Suggestions,
 ) -> Result<PackResult> {
     let pack_dir = build_dir.join("pack").join(&recipe.name);
     let generation = previous_generation(&pack_dir)? + 1;
@@ -136,6 +139,19 @@ pub fn emit(
     std::fs::write(pack_dir.join("recipe.toml"), recipe_toml)?;
     let recipe_sha = hex(&Sha256::digest(recipe_toml.as_bytes()));
 
+    // suggestions — computed by `suggest` from a deterministic sample, never
+    // applied to anything. Deliberately NOT in the manifest's `files` map
+    // (that map is records files with per-file counts semantics); they ride
+    // in SHA256SUMS like every other artifact, so a consumer can verify
+    // them, and the M3 reader re-hashes them without needing to interpret
+    // them — packs from before this table existed still verify clean.
+    std::fs::write(
+        pack_dir.join("mapping.suggested.json"),
+        serde_json::to_vec_pretty(&sugg.mapping_doc())?,
+    )?;
+    std::fs::write(pack_dir.join("relations.jsonl"), sugg.relations_jsonl())?;
+    std::fs::write(pack_dir.join("suggestions.md"), sugg.to_markdown())?;
+
     let manifest = serde_json::json!({
         "format_version": 1,
         "kind": "harvested",
@@ -164,6 +180,9 @@ pub fn emit(
     let mut names: Vec<String> = files.keys().cloned().collect();
     names.push("recipe.toml".to_string());
     names.push("manifest.json".to_string());
+    names.push("mapping.suggested.json".to_string());
+    names.push("relations.jsonl".to_string());
+    names.push("suggestions.md".to_string());
     names.sort();
     for n in &names {
         let bytes = std::fs::read(pack_dir.join(n)).with_context(|| format!("checksumming {n}"))?;
@@ -441,7 +460,7 @@ fn plain_file_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::harvest::recipe::{Emit, Envelope, Identity, Merge};
+    use crate::harvest::recipe::{Emit, Envelope, Identity, Merge, Suggest};
     use serde_json::json;
 
     fn recipe(name: &str, shards: usize) -> Recipe {
@@ -463,6 +482,7 @@ mod tests {
             merge: Merge::default(),
             derived: vec![],
             emit: Emit { shards },
+            suggest: Suggest { sample: 64 },
         }
     }
 
@@ -482,6 +502,12 @@ mod tests {
         }
     }
 
+    /// A minimal real suggestion set — the files must exist and be
+    /// checksum-covered even for a tiny pack.
+    fn sugg(records: &[Map<String, Value>]) -> crate::harvest::suggest::Suggestions {
+        crate::harvest::suggest::analyze(records, 64)
+    }
+
     #[test]
     fn uniform_keys_fill_and_shard_determinism() {
         let tmp = tempfile::tempdir().unwrap();
@@ -495,6 +521,7 @@ mod tests {
             "# recipe\n",
             records.clone(),
             &stats(),
+            &sugg(&records),
         )
         .unwrap();
         assert_eq!(r1.records, 2);
@@ -541,6 +568,7 @@ mod tests {
             "# recipe\n",
             shuffled,
             &stats(),
+            &sugg(&records),
         )
         .unwrap();
         assert_eq!(r2.generation, 2, "generation advances");
@@ -584,8 +612,9 @@ mod tests {
             tmp.path(),
             &recipe("t", 2),
             "# r\n",
-            records,
+            records.clone(),
             &stats_with_source(),
+            &sugg(&records),
         )
         .unwrap();
         let meta = read_manifest(&r.dir).unwrap();
@@ -608,6 +637,7 @@ mod tests {
             "# r\n",
             vec![rec("a", &[])],
             &stats_with_source(),
+            &sugg(&[rec("a", &[])]),
         )
         .unwrap();
         let fname = meta_file_name(&r.dir);
@@ -629,6 +659,7 @@ mod tests {
             "# r\n",
             vec![rec("a", &[])],
             &stats_with_source(),
+            &sugg(&[rec("a", &[])]),
         )
         .unwrap();
         // checked BEFORE any checksum: a future format must be refused on the
@@ -656,6 +687,7 @@ mod tests {
             "# r\n",
             vec![rec("a", &[])],
             &stats_with_source(),
+            &sugg(&[rec("a", &[])]),
         )
         .unwrap();
         let kept: String = std::fs::read_to_string(r.dir.join("SHA256SUMS"))
@@ -684,6 +716,7 @@ mod tests {
             "# r\n",
             vec![rec("a", &[])],
             &stats_with_source(),
+            &sugg(&[rec("a", &[])]),
         )
         .unwrap();
         let fname = meta_file_name(&r.dir);
@@ -720,9 +753,16 @@ mod tests {
     fn duplicate_ids_are_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let records = vec![rec("a", &[]), rec("a", &[])];
-        let err = emit(tmp.path(), &recipe("t", 2), "", records, &stats())
-            .unwrap_err()
-            .to_string();
+        let err = emit(
+            tmp.path(),
+            &recipe("t", 2),
+            "",
+            records.clone(),
+            &stats(),
+            &sugg(&records),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("duplicate emitted id"), "{err}");
     }
 
@@ -730,7 +770,15 @@ mod tests {
     fn sums_cover_every_artifact() {
         let tmp = tempfile::tempdir().unwrap();
         let records = vec![rec("a", &[]), rec("b", &[]), rec("c", &[])];
-        let r = emit(tmp.path(), &recipe("t", 2), "# r\n", records, &stats()).unwrap();
+        let r = emit(
+            tmp.path(),
+            &recipe("t", 2),
+            "# r\n",
+            records.clone(),
+            &stats(),
+            &sugg(&records),
+        )
+        .unwrap();
         let sums = std::fs::read_to_string(r.dir.join("SHA256SUMS")).unwrap();
         assert!(sums.contains("  manifest.json\n"));
         assert!(sums.contains("  recipe.toml\n"));
