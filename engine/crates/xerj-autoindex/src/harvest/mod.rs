@@ -1,0 +1,600 @@
+//! `xerj corpus build` — build a portable corpus pack from harvested records.
+//!
+//! The pipeline, end to end:
+//!
+//! ```text
+//! recipe.toml ─→ harvest (dir walk / M2: http-zip, git)
+//!             ─→ normalize (format adapter: osv | flat)
+//!             ─→ store     (content-addressed, presence = dedup)
+//!             ─→ identity  (union-find over declared edge values)
+//!             ─→ merge     (precedence + array union + strictest licence)
+//!             ─→ pack      (deterministic sharded JSONL + manifest + SUMS)
+//! ```
+//!
+//! Incrementality is not a mode, it is the storage layout: every normalized
+//! record lands at `store/<slug>.<xxh3-of-canonical-json>.json`, so a re-run
+//! recomputes the key, sees the file, and skips. Deleting the source tree's
+//! unchanged files and re-running is a no-op beyond the walk; the pack is
+//! then rebuilt from the store deterministically.
+//!
+//! The tool is domain-agnostic by directive: what a "record" is, which
+//! fields are identity, and how fields merge all live in the recipe, never
+//! here. Licence terms ride along as record data (`licence`, per-source
+//! `sources[]`); the tool does not and must not enforce them — the pack
+//! author owns what goes in the pack.
+
+pub mod identity;
+pub mod normalize;
+pub mod pack;
+pub mod recipe;
+pub mod store;
+
+pub(crate) use store::MAX_FIELDS;
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+use anyhow::{bail, Context, Result};
+use serde_json::{Map, Value};
+
+use crate::xc::code_root;
+use pack::{RunStats, SourceStat};
+use recipe::{SourceKind, LICENCE, SRC, SRC_PATH, SRC_URL};
+
+const BUILD_USAGE: &str = "usage: xerj corpus build <name> [--recipe <path>] [--fresh]
+
+build (or incrementally refresh) a harvested corpus pack:
+  1. load the recipe (default $XERJ_CODE_HOME/recipes/<name>.toml)
+  2. harvest every declared source into the content store
+     (already-stored records are skipped — that is the point)
+  3. resolve identity, merge duplicates, emit a deterministic pack
+     under $XERJ_CODE_HOME/builds/<name>/pack/<name>/
+
+--fresh discards the build state first (full re-harvest).";
+
+/// Entry point from the corpus dispatcher. 0 = pack built, 1 = failure,
+/// 2 = usage error.
+pub fn run_build(args: &[String]) -> i32 {
+    match run_build_inner(args, &code_root()) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("xerj corpus build: {e:#}");
+            1
+        }
+    }
+}
+
+fn run_build_inner(args: &[String], home: &Path) -> Result<i32> {
+    let mut name: Option<String> = None;
+    let mut recipe_path: Option<PathBuf> = None;
+    let mut fresh = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--recipe" => {
+                recipe_path = Some(PathBuf::from(it.next().context("--recipe needs a path")?));
+            }
+            "--fresh" => fresh = true,
+            "-h" | "--help" | "help" => {
+                println!("{BUILD_USAGE}");
+                return Ok(0);
+            }
+            s if s.starts_with('-') => bail!("unknown flag '{s}'\n\n{BUILD_USAGE}"),
+            s => {
+                if name.replace(s.to_string()).is_some() {
+                    bail!("unexpected second name '{s}'\n\n{BUILD_USAGE}");
+                }
+            }
+        }
+    }
+    let Some(name) = name else {
+        eprintln!("{BUILD_USAGE}");
+        return Ok(2);
+    };
+
+    let recipe_file = match recipe_path {
+        Some(p) => p,
+        None => home.join("recipes").join(format!("{name}.toml")),
+    };
+    if !recipe_file.is_file() {
+        bail!(
+            "no recipe for '{name}' at {} (pass --recipe <path>, or create it there)",
+            recipe_file.display()
+        );
+    }
+    let recipe = recipe::load(&recipe_file)?;
+    if recipe.name != name {
+        bail!(
+            "recipe at {} builds corpus '{}', not '{}' — the name must match",
+            recipe_file.display(),
+            recipe.name,
+            name
+        );
+    }
+    let recipe_dir = recipe_file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let recipe_toml = std::fs::read_to_string(&recipe_file)?;
+
+    let build_dir = home.join("builds").join(&recipe.name);
+    if fresh && build_dir.exists() {
+        std::fs::remove_dir_all(&build_dir)
+            .with_context(|| format!("--fresh: cannot clear {}", build_dir.display()))?;
+    }
+    let store_dir = build_dir.join("store");
+
+    // ── harvest into the content store ───────────────────────────────────
+    let mut per_source = Vec::new();
+    for src in &recipe.sources {
+        let SourceKind::Dir = src.kind;
+        let root = recipe_dir.join(src.path.as_deref().unwrap_or("."));
+        let files = walk(&root, &src.glob)?;
+        let mut stat = SourceStat {
+            slug: src.slug.clone(),
+            kind: "dir".to_string(),
+            path: src.path.clone(),
+            url: src.url.clone(),
+            licence: src.licence.clone(),
+            records: 0,
+            new: 0,
+            skipped: 0,
+            pruned: 0,
+        };
+        let mut keys = HashSet::new();
+        for (rel, path) in files {
+            for value in parse_file(&path)? {
+                let mut env = normalize::normalize(src.format, &value);
+                env.insert(SRC.into(), Value::String(src.slug.clone()));
+                env.insert(
+                    SRC_URL.into(),
+                    Value::String(src.url.clone().unwrap_or_default()),
+                );
+                env.insert(SRC_PATH.into(), Value::String(rel.clone()));
+                env.insert(LICENCE.into(), Value::String(src.licence.clone()));
+                let (key, was_new) = store::put(&store_dir, &src.slug, &env)?;
+                keys.insert(key);
+                stat.records += 1;
+                if was_new {
+                    stat.new += 1;
+                } else {
+                    stat.skipped += 1;
+                }
+            }
+        }
+        stat.pruned = store::prune(&store_dir, &src.slug, &keys);
+        per_source.push(stat);
+    }
+
+    // ── identity + merge over the FULL store (not just this run's files) ──
+    let slugs: HashSet<String> = recipe.sources.iter().map(|s| s.slug.clone()).collect();
+    let envelopes = store::read_all(&store_dir, &slugs);
+    let clusters = identity::cluster(&envelopes, &recipe.identity);
+    let merge_order = if recipe.merge.precedence.is_empty() {
+        recipe.identity.canonical_source_order.clone()
+    } else {
+        recipe.merge.precedence.clone()
+    };
+    let mut records = Vec::with_capacity(clusters.len());
+    for c in &clusters {
+        let members: Vec<&Map<String, Value>> = c.members.iter().map(|&i| &envelopes[i]).collect();
+        records.push(identity::merge_cluster(
+            &members,
+            &merge_order,
+            &recipe.envelope,
+            &recipe.merge,
+            &recipe.derived,
+        ));
+    }
+
+    // ── emit ──────────────────────────────────────────────────────────────
+    let stats = RunStats {
+        envelopes: envelopes.len(),
+        per_source,
+    };
+    let result = pack::emit(&build_dir, &recipe, &recipe_toml, records, &stats)?;
+
+    println!(
+        "built '{}' generation {}: {} envelopes → {} records, {} shard file(s)",
+        recipe.name, result.generation, stats.envelopes, result.records, result.shards
+    );
+    for s in &stats.per_source {
+        println!(
+            "  {}: {} record(s) — {} new, {} skipped, {} pruned ({})",
+            s.slug, s.records, s.new, s.skipped, s.pruned, s.licence
+        );
+    }
+    println!("pack: {}", result.dir.display());
+    Ok(0)
+}
+
+// ── dir source ──────────────────────────────────────────────────────────────
+
+/// Recursively list files under `root` matching `glob`, as
+/// (posix-relative-path, absolute-path), sorted — directory iteration order
+/// must never reach the output.
+fn walk(root: &Path, glob: &str) -> Result<Vec<(String, PathBuf)>> {
+    let re = glob_regex(glob);
+    let mut out = Vec::new();
+    fn recurse(dir: &Path, root: &Path, re: &regex::Regex, out: &mut Vec<(String, PathBuf)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                recurse(&p, root, re, out);
+            } else {
+                let rel = p.strip_prefix(root).unwrap_or(&p);
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                if re.is_match(&rel) {
+                    out.push((rel, p));
+                }
+            }
+        }
+    }
+    recurse(root, root, &re, &mut out);
+    out.sort();
+    Ok(out)
+}
+
+/// Minimal glob → regex: `**` spans directories (`**/` also matches zero
+/// directories), `*` stays inside one segment, `?` is one char. Recipes
+/// need path matching, not the full glob grammar; if a recipe ever needs
+/// character classes we take a real glob crate rather than growing this.
+fn glob_regex(glob: &str) -> regex::Regex {
+    let mut re = String::from("^");
+    let mut chars = glob.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' => {
+                if chars.peek() == Some(&'*') {
+                    chars.next();
+                    if chars.peek() == Some(&'/') {
+                        chars.next();
+                        re.push_str("(.*/)?");
+                    } else {
+                        re.push_str(".*");
+                    }
+                } else {
+                    re.push_str("[^/]*");
+                }
+            }
+            '?' => re.push_str("[^/]"),
+            other => re.push_str(&regex::escape(&other.to_string())),
+        }
+    }
+    re.push('$');
+    regex::Regex::new(&re).expect("glob translation always yields a valid regex")
+}
+
+/// Parse one harvested file: `.json`/`.jsonl`/`.ndjson`. A `.json` array
+/// yields its elements; `.jsonl` yields one per non-empty line. Other
+/// extensions are skipped by the glob, not here — reaching this with a
+/// non-JSON file is a hard error, not a silent drop.
+fn parse_file(path: &Path) -> Result<Vec<Value>> {
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let jsonl = name.ends_with(".jsonl") || name.ends_with(".ndjson");
+    if jsonl {
+        let mut out = Vec::new();
+        for (n, line) in raw.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let v: Value = serde_json::from_str(line)
+                .with_context(|| format!("{}:{}: not valid JSON", path.display(), n + 1))?;
+            out.push(v);
+        }
+        Ok(out)
+    } else {
+        let v: Value = serde_json::from_str(&raw)
+            .with_context(|| format!("{}: not valid JSON", path.display()))?;
+        Ok(match v {
+            Value::Array(a) => a,
+            other => vec![other],
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn glob_matches_paths_like_a_recipe_expects() {
+        let re = glob_regex("**/*.json");
+        assert!(re.is_match("a.json"));
+        assert!(re.is_match("deep/nested/a.json"));
+        assert!(!re.is_match("a.jsonl"));
+        assert!(!re.is_match("dir/sub")); // '.json' must be a suffix
+
+        let re = glob_regex("osv/*.json");
+        assert!(re.is_match("osv/x.json"));
+        assert!(!re.is_match("osv/nested/x.json"), "* does not cross '/'");
+        assert!(!re.is_match("other/x.json"));
+
+        let re = glob_regex("**/GHSA-????.json");
+        assert!(re.is_match("GHSA-1234.json"));
+        assert!(!re.is_match("GHSA-12345.json"));
+    }
+
+    #[test]
+    fn walk_is_sorted_and_relative() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("src");
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::write(root.join("b/second.json"), "{}").unwrap();
+        std::fs::write(root.join("a/first.json"), "{}").unwrap();
+        std::fs::write(root.join("a/note.txt"), "x").unwrap();
+        let files = walk(&root, "**/*.json").unwrap();
+        let rels: Vec<&str> = files.iter().map(|(r, _)| r.as_str()).collect();
+        assert_eq!(rels, vec!["a/first.json", "b/second.json"]);
+    }
+
+    #[test]
+    fn parse_file_understands_json_and_jsonl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a.json");
+        std::fs::write(&a, r#"[{"id":"x"},{"id":"y"}]"#).unwrap();
+        assert_eq!(parse_file(&a).unwrap().len(), 2);
+        let b = tmp.path().join("b.jsonl");
+        std::fs::write(&b, "{\"id\":\"z\"}\n\n{\"id\":\"w\"}\n").unwrap();
+        assert_eq!(parse_file(&b).unwrap().len(), 2, "blank lines skipped");
+        let c = tmp.path().join("c.json");
+        std::fs::write(&c, r#"{"id":"one"}"#).unwrap();
+        assert_eq!(parse_file(&c).unwrap().len(), 1);
+    }
+
+    // ── end to end: recipe → harvest → identity → pack, twice ─────────────
+
+    const E2E_RECIPE: &str = r#"
+[recipe]
+format = 1
+name = "e2e"
+description = "two sources, one alias-linked record"
+
+[[sources]]
+slug = "rustsec"
+kind = "dir"
+path = "data/rustsec"
+format = "osv"
+licence = "CC0-1.0"
+
+[[sources]]
+slug = "ghsa"
+kind = "dir"
+path = "data/ghsa"
+glob = "**/*.jsonl"
+format = "osv"
+licence = "CC-BY-4.0"
+
+[envelope]
+id_from = ["id"]
+title_from = ["summary", "id"]
+body_join = ["summary", "details"]
+defs_from = ["affected_functions"]
+
+[identity]
+edges = [{ field = "id" }, { field = "aliases", each = true }]
+canonical_source_order = ["rustsec", "ghsa"]
+
+[merge]
+precedence = ["rustsec", "ghsa"]
+
+[[derived]]
+name = "cve_ids"
+op = "regex_extract"
+from = ["id", "aliases"]
+pattern = '(?i)\bCVE-\d{4}-\d{4,}\b'
+unique = true
+
+[emit]
+shards = 4
+"#;
+
+    fn e2e_env(home: &Path) {
+        let root = home.join("recipes");
+        std::fs::create_dir_all(root.join("data/rustsec")).unwrap();
+        std::fs::create_dir_all(root.join("data/ghsa")).unwrap();
+        std::fs::write(root.join("e2e.toml"), E2E_RECIPE).unwrap();
+        std::fs::write(
+            root.join("data/rustsec/RUSTSEC-2021-0003.json"),
+            r#"{
+                "id": "RUSTSEC-2021-0003",
+                "aliases": ["CVE-2021-25900"],
+                "summary": "Out of bounds write in SmallVec::insert_many",
+                "details": "An issue was discovered that allows attackers...",
+                "modified": "2023-06-20T00:00:00Z",
+                "affected": [{
+                    "package": {"ecosystem": "crates.io", "name": "smallvec"},
+                    "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "0.6.14"}]}]
+                }],
+                "ecosystem_specific": {"affects": {"functions": {"smallvec::SmallVec::insert_many": ["<0.6.14"]}}}
+            }"#,
+        )
+        .unwrap();
+        // second rustsec record with NO alias link: its own cluster
+        std::fs::write(
+            root.join("data/rustsec/RUSTSEC-2020-0001.json"),
+            r#"{"id": "RUSTSEC-2020-0001", "summary": "other issue"}"#,
+        )
+        .unwrap();
+        // same logical record, GHSA shape: split ranges, no functions
+        std::fs::write(
+            root.join("data/ghsa/reviewed.jsonl"),
+            concat!(
+                r#"{"id": "GHSA-43w2-9j62-hq99", "aliases": ["CVE-2021-25900"], "summary": "Out of bounds write in insert_many", "modified": "2025-01-02T00:00:00Z", "affected": [{"package": {"ecosystem": "crates.io", "name": "smallvec"}, "ranges": [{"type": "SEMVER", "events": [{"introduced": "1.0.0"}, {"fixed": "1.6.1"}]}]}]}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+    }
+
+    fn read_records(pack: &Path) -> Vec<Map<String, Value>> {
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(pack.join("manifest.json")).unwrap())
+                .unwrap();
+        let mut out = Vec::new();
+        for name in manifest["files"].as_object().unwrap().keys() {
+            for line in std::fs::read_to_string(pack.join(name)).unwrap().lines() {
+                out.push(serde_json::from_str(line).unwrap());
+            }
+        }
+        out.sort_by_key(|r: &Map<String, Value>| {
+            r.get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        });
+        out
+    }
+
+    #[test]
+    fn build_end_to_end_and_incrementally() {
+        let home = tempfile::tempdir().unwrap();
+        e2e_env(home.path());
+
+        let args: Vec<String> = vec!["e2e".to_string()];
+        assert_eq!(run_build_inner(&args, home.path()).unwrap(), 0);
+
+        let pack = home.path().join("builds/e2e/pack/e2e");
+        let records = read_records(&pack);
+        assert_eq!(
+            records.len(),
+            2,
+            "GHSA+RUSTSEC merge via CVE alias; RUSTSEC-2020-0001 alone"
+        );
+
+        let merged = records
+            .iter()
+            .find(|r| r["id"] == json!("RUSTSEC-2021-0003"))
+            .expect("precedence-first source names the id");
+        assert_eq!(merged["sources"], json!(["rustsec", "ghsa"]));
+        assert_eq!(merged["source"], json!("rustsec"));
+        assert_eq!(
+            merged["title"],
+            json!("Out of bounds write in SmallVec::insert_many")
+        );
+        assert_eq!(
+            merged["defs"],
+            json!("smallvec::SmallVec::insert_many"),
+            "rustsec-only field still feeds xerj code"
+        );
+        assert_eq!(
+            merged["fixed_versions"],
+            json!(["0.6.14", "1.6.1"]),
+            "split GHSA range unions with the packed RustSec one"
+        );
+        assert_eq!(
+            merged["modified"],
+            json!("2025-01-02T00:00:00Z"),
+            "max across members"
+        );
+        assert_eq!(
+            merged["licence"],
+            json!("CC0-1.0"),
+            "neither is restricted; precedence first"
+        );
+        assert_eq!(
+            merged["cve_ids"],
+            json!(["CVE-2021-25900"]),
+            "derived over the merged record"
+        );
+
+        // uniform keys: the GHSA-less record still carries every key
+        let lone = records
+            .iter()
+            .find(|r| r["id"] == json!("RUSTSEC-2020-0001"))
+            .unwrap();
+        assert_eq!(lone["sources"], json!(["rustsec"]));
+        assert_eq!(lone["fixed_versions"], json!([]), "array key fills empty");
+        assert_eq!(lone["cve_ids"], json!([]));
+        assert_eq!(lone["affected_functions"], json!([]));
+        assert_eq!(lone["modified"], json!(""));
+
+        // manifest structure + checksums
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(pack.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["format_version"], json!(1));
+        assert_eq!(manifest["kind"], json!("harvested"));
+        assert_eq!(manifest["generation"], json!(1));
+        assert_eq!(manifest["counts"]["records"], json!(2));
+        assert_eq!(
+            manifest["description"],
+            json!("two sources, one alias-linked record")
+        );
+        let rs = &manifest["sources"][0];
+        assert_eq!(rs["slug"], json!("rustsec"));
+        assert_eq!(rs["new"], json!(2));
+        assert_eq!(rs["skipped"], json!(0));
+        assert!(manifest["recipe_sha256"]
+            .as_str()
+            .is_some_and(|s| s.len() == 64));
+        assert!(pack.join("recipe.toml").is_file(), "recipe ships verbatim");
+
+        // ── second run: nothing new, shards byte-identical, generation up ──
+        let before: Vec<(String, Vec<u8>)> = std::fs::read_dir(&pack)
+            .unwrap()
+            .flatten()
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().to_string(),
+                    std::fs::read(e.path()).unwrap(),
+                )
+            })
+            .filter(|(n, _)| n.starts_with("records-"))
+            .collect();
+        assert_eq!(run_build_inner(&args, home.path()).unwrap(), 0);
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(pack.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            manifest["generation"],
+            json!(2),
+            "rebuild advances generation"
+        );
+        for s in manifest["sources"].as_array().unwrap() {
+            assert_eq!(
+                s["new"],
+                json!(0),
+                "content-addressed store skipped everything"
+            );
+            assert_eq!(s["skipped"], json!(s["records"]));
+            assert_eq!(s["pruned"], json!(0));
+        }
+        for (name, bytes) in before {
+            assert_eq!(
+                std::fs::read(pack.join(&name)).unwrap(),
+                bytes,
+                "{name} byte-identical"
+            );
+        }
+
+        // ── third run after deleting an upstream file: prune removes it ────
+        std::fs::remove_file(
+            home.path()
+                .join("recipes/data/rustsec/RUSTSEC-2020-0001.json"),
+        )
+        .unwrap();
+        assert_eq!(run_build_inner(&args, home.path()).unwrap(), 0);
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(pack.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            manifest["sources"][0]["pruned"],
+            json!(1),
+            "dead envelope pruned"
+        );
+        assert_eq!(read_records(&pack).len(), 1);
+    }
+}

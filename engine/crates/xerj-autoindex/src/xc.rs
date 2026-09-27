@@ -225,13 +225,16 @@ pub fn run_code_cli(args: &[String]) -> i32 {
 
 const CORPUS_USAGE: &str =
     "usage: xerj corpus add <name> <git-url>... | --from <manifest.json> [--as <name>]
+       xerj corpus build <name> [--recipe <path>] [--fresh]
        xerj corpus index <name> [--fresh] [--url URL]
        xerj corpus list [--url URL]
 
 clone the repos, detect licences, write corpora/<name>/corpus.json;
 --from takes the corpus name from the manifest's 'corpus' field unless
-<name> or --as overrides it; index builds/verifies/switches the corpus
-(exit 3 skips junk — normal); list shows what is loaded on this node.";
+<name> or --as overrides it; build harvests recipe sources into a
+deterministic pack under builds/<name>/ (see tools/xerj-code/);
+index builds/verifies/switches the corpus (exit 3 skips junk — normal);
+list shows what is loaded on this node.";
 
 fn git(dir: Option<&Path>, args: &[&str]) -> Result<(i32, String)> {
     let mut c = Command::new("git");
@@ -1206,7 +1209,7 @@ fn run_corpus_list(args: &[String]) -> i32 {
 
 // ── dispatch ────────────────────────────────────────────────────────────────
 
-/// `xerj corpus <add|index|list> …` — returns the process exit code.
+/// `xerj corpus <add|build|index|list> …` — returns the process exit code.
 pub fn run_corpus_cli(args: &[String]) -> i32 {
     let Some(sub) = args.first() else {
         eprintln!("{CORPUS_USAGE}");
@@ -1215,6 +1218,7 @@ pub fn run_corpus_cli(args: &[String]) -> i32 {
     let rest: Vec<String> = args[1..].to_vec();
     match sub.as_str() {
         "add" => run_corpus_add(&rest),
+        "build" => crate::harvest::run_build(&rest),
         "index" => run_corpus_index(&rest),
         "list" => run_corpus_list(&rest),
         "-h" | "--help" | "help" => {

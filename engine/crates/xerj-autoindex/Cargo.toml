@@ -18,6 +18,10 @@ serde_json.workspace = true
 simd-json.workspace = true
 chrono.workspace = true
 regex = "1"
+# Corpus recipes (`xerj corpus build`) are authored TOML: human-readable and
+# commented, so licence reasoning sits next to the source it justifies and
+# ships verbatim inside the pack as provenance.
+toml.workspace = true
 walkdir = "2"
 # gitignore/.xerjignore matching (#276). ripgrep's matcher, used for its
 # semantics only — traversal stays on walkdir so the existing symlink,
