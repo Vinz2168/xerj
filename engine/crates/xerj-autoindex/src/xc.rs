@@ -394,7 +394,10 @@ fn run_corpus_add(args: &[String]) -> i32 {
     if let Some(path) = &from {
         match resolve_pack_source(path) {
             Ok(FromPack::NotAPack) => {}
-            Ok(FromPack::Dir(dir)) => return run_corpus_add_pack(&dir, explicit_name),
+            Ok(FromPack::Dir(dir)) => {
+                let share = dir.display().to_string();
+                return run_corpus_add_pack(&dir, explicit_name, &share);
+            }
             Ok(FromPack::Zip(zip)) => {
                 // transient staging, never build state — it dies with this
                 // call, after the records have been copied out
@@ -410,7 +413,22 @@ fn run_corpus_add(args: &[String]) -> i32 {
                     eprintln!("xerj corpus add: cannot extract {zip}: {e:#}");
                     return 2;
                 }
-                return run_corpus_add_pack(&dest, explicit_name);
+                // a zip of a directory carries the wrapper (`demo.zip` →
+                // `demo/…`) — descend exactly one level when needed; a pack
+                // nested deeper than that is not a shape this tool emits
+                let mut dir = dest.clone();
+                if !dir.join("manifest.json").is_file() {
+                    let kids: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+                        Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
+                        Err(_) => Vec::new(),
+                    };
+                    if let [only] = kids.as_slice() {
+                        if only.join("manifest.json").is_file() {
+                            dir = only.clone();
+                        }
+                    }
+                }
+                return run_corpus_add_pack(&dir, explicit_name, &zip);
             }
             Err(e) => {
                 eprintln!("xerj corpus add: {e}");
@@ -680,7 +698,7 @@ fn resolve_pack_source(path: &str) -> Result<FromPack, String> {
 /// ([`xccode::passage::locator_repo`]), so `rustsec/records.jsonl` keys the
 /// same way a cloned `rustsec/` repo always did and the per-hit licence
 /// warnings work unchanged.
-fn run_corpus_add_pack(pack_dir: &Path, explicit_name: Option<String>) -> i32 {
+fn run_corpus_add_pack(pack_dir: &Path, explicit_name: Option<String>, share_path: &str) -> i32 {
     let meta = match crate::harvest::pack::read_manifest(pack_dir) {
         Ok(m) => m,
         Err(e) => {
@@ -738,10 +756,11 @@ fn run_corpus_add_pack(pack_dir: &Path, explicit_name: Option<String>) -> i32 {
         meta.sources.len(),
         dest.display()
     );
-    println!(
-        "share it: {}  (rebuild with xerj corpus add {name} --from <that pack>)",
-        pack_dir.display()
-    );
+    // `share_path` is where the pack CAME FROM — the dir spelling names the
+    // pack dir, the zip spelling names the zip (its staging dir is deleted by
+    // the time this prints, and a share line pointing at a dead tempdir
+    // teaches users to re-send nothing).
+    println!("share it: {share_path}  (rebuild with xerj corpus add {name} --from <that pack>)");
     println!("next: xerj corpus index {name}");
     0
 }
@@ -2323,50 +2342,63 @@ precedence = ["a", "b"]
         let _h = code_home(home.path());
         let pack = build_demo_pack(home.path());
 
-        // zip the pack dir the way a release artifact would
-        let zip_path = home.path().join("demo-pack.zip");
-        {
+        // zip the pack dir, both shapes anyone hands us: the wrapper dir
+        // (`demo/…` inside — how every zip-of-a-directory tool packs) and
+        // the bare contents
+        fn zip_up(zip_path: &Path, base: &Path, prefix: &str) {
             use std::io::Write;
-            let f = std::fs::File::create(&zip_path).unwrap();
+            let f = std::fs::File::create(zip_path).unwrap();
             let mut z = zip::ZipWriter::new(f);
             let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
             fn add(
                 z: &mut zip::ZipWriter<std::fs::File>,
                 base: &Path,
                 rel: &Path,
+                prefix: &str,
                 opts: zip::write::SimpleFileOptions,
             ) {
                 if rel.is_dir() {
                     if let Ok(entries) = std::fs::read_dir(rel) {
                         for e in entries.flatten() {
-                            add(z, base, &e.path(), opts);
+                            add(z, base, &e.path(), prefix, opts);
                         }
                     }
                     return;
                 }
-                let name = rel
-                    .strip_prefix(base)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/");
+                let name = format!(
+                    "{prefix}{}",
+                    rel.strip_prefix(base)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                );
                 z.start_file(name, opts).unwrap();
                 z.write_all(&std::fs::read(rel).unwrap()).unwrap();
             }
-            add(&mut z, &pack, &pack, opts);
+            add(&mut z, base, base, prefix, opts);
             z.finish().unwrap();
         }
 
         let corpus = home.path().join("corpora/demo");
-        let rc = run_corpus_add(&["--from".to_string(), zip_path.display().to_string()]);
-        assert_eq!(rc, 0);
-        assert_eq!(records_lines(&corpus.join("a/records.jsonl")).len(), 2);
-        assert_eq!(
-            manifest::read_corpus_manifest(&corpus.join("corpus.json"))
-                .unwrap()
-                .kind
-                .as_deref(),
-            Some("harvested")
-        );
+        for (name, prefix) in [("wrapped.zip", "demo/"), ("flat.zip", "")] {
+            let zip_path = home.path().join(name);
+            zip_up(&zip_path, &pack, prefix);
+            let rc = run_corpus_add(&["--from".to_string(), zip_path.display().to_string()]);
+            assert_eq!(rc, 0, "{name} must materialize");
+            assert_eq!(
+                records_lines(&corpus.join("a/records.jsonl")).len(),
+                2,
+                "{name}"
+            );
+            assert_eq!(
+                manifest::read_corpus_manifest(&corpus.join("corpus.json"))
+                    .unwrap()
+                    .kind
+                    .as_deref(),
+                Some("harvested"),
+                "{name}"
+            );
+        }
 
         // and a non-pack zip fails loudly instead of materializing noise
         let junk = home.path().join("junk.zip");
