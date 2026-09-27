@@ -358,8 +358,8 @@ const META_MAGIC_V4: &[u8; 4] = b"ZFM4";
 ///   len stream    num_terms × uvarint(postings_length)
 /// ```
 ///
-/// Measured on that segment the `.meta` family drops 199,390 → ~13,062 B
-/// (−93.4 %), and the win scales with term cardinality, which is exactly
+/// Measured on that segment the `.meta` family drops 200,826 → 13,774 B
+/// (−93.1 %), and the win scales with term cardinality, which is exactly
 /// the shape of the 66.5 M-doc nginx battle's id fields.  Peer pattern:
 /// tantivy's `TermInfoValueWriter::serialize_block`
 /// (`src/termdict/sstable_termdict/mod.rs:92-105`, MIT — postings-peers
@@ -645,7 +645,13 @@ fn decode_field_meta_binary(bytes: &[u8]) -> Result<FieldMeta> {
         for i in 0..num_terms {
             let df = u32::try_from(dfs[i])
                 .map_err(|_| anyhow::anyhow!("field meta: ZFM5 df exceeds u32"))?;
-            let ttf = df as u64 + ttf_deltas[i];
+            // The delta is an untrusted varint up to u64::MAX — an
+            // unchecked add would wrap in release (panic in dev) and
+            // hand the ZPS2 freq-elision predicate a ttf < df, so this
+            // lane fails closed exactly like the offset lanes below.
+            let ttf = (df as u64)
+                .checked_add(ttf_deltas[i])
+                .ok_or_else(|| anyhow::anyhow!("field meta: ZFM5 ttf overflow"))?;
             offset = offset
                 .checked_add(gap_section[i])
                 .ok_or_else(|| anyhow::anyhow!("field meta: ZFM5 offset overflow"))?;
@@ -3158,6 +3164,20 @@ mod tests {
         uvarint_encode(1, &mut missing);
         uvarint_encode(10, &mut missing); // len stream absent
         assert!(decode_field_meta_binary(&assemble(0, &missing)).is_err());
+
+        // A ttf delta is an untrusted varint up to u64::MAX.  df + delta
+        // must fail closed rather than wrap — a wrapped ttf < df would
+        // flip the ZPS2 freq-elision predicate downstream.
+        let mut wrap = Vec::new();
+        uvarint_encode(1, &mut wrap); // df
+        uvarint_encode(u64::MAX, &mut wrap); // ttf delta
+        uvarint_encode(10, &mut wrap); // gap
+        uvarint_encode(4, &mut wrap); // len
+        let error = decode_field_meta_binary(&assemble(ZFM5_FLAG_TTF_STREAM, &wrap)).unwrap_err();
+        assert!(
+            error.to_string().contains("ttf overflow"),
+            "must reject the wrapped delta, got: {error}"
+        );
     }
 
     /// The current writer stamps the `ZPS2` envelope, and the reader
