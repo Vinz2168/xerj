@@ -158,8 +158,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   full decoder's fixpoint resolves reference chains while hard-erroring on
   cycles.  Measured on the 100k `benchmarks/index-size` harness at
   LEVEL=balanced against a same-day main control (`results/result-zbs4*-balanced.json`):
-  `.seg` **−73.1 %** (1,671,271 → 449,094 B), total durable **−22.7 %**
+  `.seg` **−73.1 %** (1,671,271 → 449,094 B), total durable **−22.6 %**
   (5,398,478 → 4,176,300 B); every non-`.seg` extension byte-identical
+  but for a 1 B `.json` manifest delta (47,366 → 47,365)
   between the runs.  ES-YAML conformance 1380 passed / 0 failed; 10 new
   storage unit tests cover typed-int round-trips (nulls, negatives,
   i64-extreme clusters), copy-of decode across full/projection/hydration
