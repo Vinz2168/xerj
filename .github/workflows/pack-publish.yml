@@ -122,18 +122,42 @@ jobs:
           cp SHA256SUMS "$RUNNER_TEMP/rust-vulns-SHA256SUMS"
           cp SHA256SUMS.sig "$RUNNER_TEMP/rust-vulns-SHA256SUMS.sig"
 
-      # Rolling prerelease tag: consumers pin one URL that always carries the
-      # latest build. Versioned history lives in the workflow runs and the
-      # release's previous-assets behavior (clobber replaces same-named files).
-      - name: Publish to the rolling release
+      # This repository has immutable releases: assets may only be uploaded
+      # BEFORE a release is published. Run 36355121167 died uploading the
+      # signature — "Cannot upload asset … to an immutable release" — because
+      # the action created the release already published. Deleting a release
+      # (and its tag) is still allowed — verified by hand against the
+      # half-published first attempt. So a rolling release under one URL is
+      # three moves:
+      #   1. drop the previous release and tag (first-ever run: nothing to
+      #      delete, `|| true`),
+      #   2. recreate it as a DRAFT and upload the assets to the draft,
+      #   3. publish the draft (`release.published` fires).
+      # Consumers keep the one stable set of URLs already printed in the pack
+      # README, docs/CORPUS_PACKS.md and the blog post; the seconds between
+      # (1) and (3) are the only window they 404. Yesterday's build stays
+      # exactly what was downloaded from it — the signature pins the bytes.
+      - name: Drop the previous rolling release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          gh release delete pack-rust-vulns --repo "$GITHUB_REPOSITORY"
+          --cleanup-tag --yes || true
+
+      - name: Upload the assets to a draft release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: pack-rust-vulns
           name: "rust-vulns corpus pack (rolling)"
+          draft: true
           prerelease: true
           body: |
             The `rust-vulns` corpus pack, built and signed by the scheduled
             `pack publish` workflow from `tools/packs/rust-vulns/recipe.toml`.
+
+            Each scheduled run deletes and recreates this release, so these
+            URLs always carry the newest signed build; build history lives in
+            the workflow runs.
 
             Install (public key: `tools/packs/keys/rust-vulns.pub` in the repo):
 
@@ -148,3 +172,12 @@ jobs:
             ${{ runner.temp }}/rust-vulns-SHA256SUMS
             ${{ runner.temp }}/rust-vulns-SHA256SUMS.sig
             ${{ runner.temp }}/rust-vulns-freshness.json
+
+      # Draft first, publish last: this is the step GitHub's own error
+      # message prescribes for immutable-release repositories.
+      - name: Publish the draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          gh release edit pack-rust-vulns --repo "$GITHUB_REPOSITORY"
+          --draft=false
