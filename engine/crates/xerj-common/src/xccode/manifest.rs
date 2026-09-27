@@ -40,6 +40,11 @@ pub struct ManifestRepo {
 pub struct CorpusManifest {
     #[serde(default)]
     pub corpus: String,
+    /// `"harvested"` for corpora materialized from a pack (`corpus add --from
+    /// <pack>`); absent for cloned-repo corpora. Readers must treat absent as
+    /// the repo shape — every historical manifest has no `kind`.
+    #[serde(default)]
+    pub kind: Option<String>,
     #[serde(default)]
     pub cloned_at: Option<String>,
     #[serde(default)]
@@ -103,8 +108,27 @@ fn entry_json(repo: &ManifestRepo) -> String {
 /// Atomic (tmp + rename): a half-written manifest describes a checkout that
 /// does not exist, and `xerj corpus list` reads these.
 pub fn write_corpus_manifest(path: &Path, corpus: &str, cloned_at: &str, repos: &[ManifestRepo]) {
+    write_corpus_manifest_kind(path, corpus, None, cloned_at, repos)
+}
+
+/// [`write_corpus_manifest`] with an optional `kind`. `None` emits byte-for-byte
+/// what the pinned format has always been — a git corpus's manifest must not
+/// churn because a second kind of corpus now exists. `Some("harvested")`
+/// inserts `"kind":"harvested"` directly after `"corpus"`; only packs' corpora
+/// carry it, and `add` refuses to mix the two kinds under one name.
+pub fn write_corpus_manifest_kind(
+    path: &Path,
+    corpus: &str,
+    kind: Option<&str>,
+    cloned_at: &str,
+    repos: &[ManifestRepo],
+) {
+    let kind_json = match kind {
+        Some(k) => format!(",\"kind\":{}", Value::String(k.to_string())),
+        None => String::new(),
+    };
     let mut body = format!(
-        "{{\"corpus\":{},\"cloned_at\":{},\"repos\":[\n",
+        "{{\"corpus\":{}{kind_json},\"cloned_at\":{},\"repos\":[\n",
         Value::String(corpus.to_string()),
         Value::String(cloned_at.to_string())
     );
@@ -227,6 +251,39 @@ mod tests {
         let back = read_corpus_manifest(&path).unwrap();
         assert_eq!(back.repos[0].review, Some(review));
         assert_eq!(back.corpus, "kv");
+    }
+
+    #[test]
+    fn harvested_kind_emits_after_corpus_and_reads_back() {
+        let dir = tmp();
+        let path = dir.join("corpus.json");
+        let repos = vec![ManifestRepo {
+            repo: "rustsec".into(),
+            url: String::new(),
+            licence: "CC0-1.0".into(),
+            sha: String::new(),
+            files: Some(2),
+            bytes: Some(512),
+            review: None,
+        }];
+        write_corpus_manifest_kind(&path, "rust-vulns", Some("harvested"), "t", &repos);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.starts_with("{\"corpus\":\"rust-vulns\",\"kind\":\"harvested\",\"cloned_at\":"),
+            "{text}"
+        );
+        let back = read_corpus_manifest(&path).unwrap();
+        assert_eq!(back.kind.as_deref(), Some("harvested"));
+        assert_eq!(back.repos[0].repo, "rustsec");
+
+        // and the pinned git shape is UNCHANGED by the extension
+        write_corpus_manifest(&path, "kv", "t", &repos);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.starts_with("{\"corpus\":\"kv\",\"cloned_at\":"),
+            "{text}"
+        );
+        assert!(read_corpus_manifest(&path).unwrap().kind.is_none());
     }
 
     #[test]

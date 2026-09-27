@@ -13,6 +13,12 @@
 //!
 //! `manifest.json` and `SHA256SUMS` necessarily vary (timestamp,
 //! generation) — determinism is claimed for the RECORDS, never the wrapper.
+//!
+//! Reading a pack back ([`read_manifest`]) is the consumption half of
+//! `xerj corpus add --from <pack>`: checksum-verify EVERYTHING the manifest
+//! and SHA256SUMS claim, refusing loudly on any mismatch, because a pack is
+//! an artifact that traveled — disk, download, or release attachment —
+//! before it got here.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -208,6 +214,230 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+// ── reading a pack back (consumption) ───────────────────────────────────────
+
+/// One source row of a read pack — the pseudo-repo `corpus add` writes for
+/// it (repo=slug, licence, url, watermark-as-sha).
+#[derive(Debug, Clone)]
+pub struct PackSource {
+    pub slug: String,
+    pub licence: String,
+    pub url: Option<String>,
+    pub watermark: Option<String>,
+}
+
+/// One records file of a read pack, already checksum-verified.
+#[derive(Debug, Clone)]
+pub struct PackFile {
+    pub name: String,
+    pub records: usize,
+}
+
+/// A VERIFIED pack: everything the manifest and SHA256SUMS claim was checked
+/// against the bytes on disk before this was returned.
+#[derive(Debug)]
+pub struct PackMeta {
+    pub name: String,
+    pub description: String,
+    pub generation: u64,
+    pub records: usize,
+    pub sources: Vec<PackSource>,
+    /// Records files in name order — the deterministic read order.
+    pub files: Vec<PackFile>,
+}
+
+/// Read and VERIFY a pack directory. Strict where [`emit`] was careful: an
+/// unknown `format_version` is refused (a reader that silently indexed a
+/// future format would mis-map fields), every SHA256SUMS line is re-hashed,
+/// and every records file's sha256 and line count must match the manifest.
+/// A pack that fails here is corrupt or tampered with, and the error says
+/// which file and why.
+pub fn read_manifest(pack_dir: &Path) -> Result<PackMeta> {
+    let at = |what: &str| format!("{}: {what}", pack_dir.display());
+
+    let v: Value = serde_json::from_str(
+        &std::fs::read_to_string(pack_dir.join("manifest.json"))
+            .with_context(|| at("cannot read manifest.json"))?,
+    )
+    .with_context(|| at("manifest.json is not valid JSON"))?;
+
+    let version = v.get("format_version").and_then(Value::as_u64).unwrap_or(0);
+    if version != 1 {
+        bail!(at(&format!(
+            "pack format version {version} is not supported by this build (supported: 1)"
+        )));
+    }
+    let kind = v.get("kind").and_then(Value::as_str).unwrap_or("");
+    if kind != "harvested" {
+        bail!(at(&format!(
+            "not a harvested pack (kind='{kind}') — this reader consumes packs from `xerj \
+             corpus build`"
+        )));
+    }
+    let name = v.get("pack").and_then(Value::as_str).unwrap_or("");
+    if name.is_empty() {
+        bail!(at("manifest has no 'pack' name"));
+    }
+
+    // files: name → {sha256, records}. A file name is about to become a path
+    // under pack_dir — plain file names only, same charset thinking as the
+    // zip-entry gate in source.rs.
+    let mut files: Vec<PackFile> = Vec::new();
+    let mut declared: BTreeMap<String, String> = BTreeMap::new();
+    for (fname, meta) in v
+        .get("files")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow::anyhow!(at("manifest has no 'files' map")))?
+    {
+        if !plain_file_name(fname) {
+            bail!(at(&format!(
+                "manifest names file '{fname}', which is not a plain file name"
+            )));
+        }
+        let sha = meta
+            .get("sha256")
+            .and_then(Value::as_str)
+            .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()))
+            .ok_or_else(|| anyhow::anyhow!(at(&format!("file '{fname}' has no valid sha256"))))?;
+        let records =
+            meta.get("records").and_then(Value::as_u64).ok_or_else(|| {
+                anyhow::anyhow!(at(&format!("file '{fname}' has no record count")))
+            })? as usize;
+        declared.insert(fname.clone(), sha.to_string());
+        files.push(PackFile {
+            name: fname.clone(),
+            records,
+        });
+    }
+    files.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // SHA256SUMS is the outer truth: re-hash EVERYTHING it names.
+    let sums_raw = std::fs::read_to_string(pack_dir.join("SHA256SUMS"))
+        .with_context(|| at("cannot read SHA256SUMS"))?;
+    let mut sums: BTreeMap<String, String> = BTreeMap::new();
+    for line in sums_raw.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        let Some((sha, fname)) = line.split_once("  ") else {
+            bail!(at(&format!(
+                "SHA256SUMS line is not '<sha>  <file>': '{line}'"
+            )));
+        };
+        if !plain_file_name(fname) {
+            bail!(at(&format!(
+                "SHA256SUMS names '{fname}', which is not a plain file name"
+            )));
+        }
+        sums.insert(fname.to_string(), sha.to_string());
+    }
+    for required in ["manifest.json", "recipe.toml"] {
+        if !sums.contains_key(required) {
+            bail!(at(&format!("SHA256SUMS does not cover {required}")));
+        }
+    }
+    for (fname, sha) in &declared {
+        if !sums.contains_key(fname) {
+            bail!(at(&format!("SHA256SUMS does not cover {fname}")));
+        }
+        if &sums[fname] != sha {
+            bail!(at(&format!(
+                "{fname}: manifest sha256 and SHA256SUMS disagree — the pack is inconsistent"
+            )));
+        }
+    }
+    for (fname, sha) in &sums {
+        let bytes = std::fs::read(pack_dir.join(fname))
+            .with_context(|| at(&format!("SHA256SUMS names {fname}, which is missing")))?;
+        let got = hex(&Sha256::digest(&bytes));
+        if &got != sha {
+            bail!(at(&format!(
+                "{fname}: checksum mismatch (want {sha}, got {got}) — corrupt or tampered"
+            )));
+        }
+    }
+
+    // line counts: the manifest's per-file record counts must be the truth
+    for f in &files {
+        let n = std::fs::read_to_string(pack_dir.join(&f.name))
+            .with_context(|| at(&format!("cannot read {}", f.name)))?
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+        if n != f.records {
+            bail!(at(&format!(
+                "{}: manifest says {} records, file holds {n}",
+                f.name, f.records
+            )));
+        }
+    }
+
+    let sources = v
+        .get("sources")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!(at("manifest has no 'sources' array")))?
+        .iter()
+        .map(|s| PackSource {
+            slug: s
+                .get("slug")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            licence: s
+                .get("licence")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            url: s
+                .get("url")
+                .and_then(Value::as_str)
+                .filter(|u| !u.is_empty())
+                .map(str::to_string),
+            watermark: s
+                .get("watermark")
+                .and_then(Value::as_str)
+                .filter(|w| !w.is_empty())
+                .map(str::to_string),
+        })
+        .collect::<Vec<PackSource>>();
+    if sources.is_empty() {
+        bail!(at("manifest declares no sources"));
+    }
+    if sources.iter().any(|s| s.slug.is_empty()) {
+        bail!(at("a manifest source has no slug"));
+    }
+
+    Ok(PackMeta {
+        name: name.to_string(),
+        description: v
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        generation: v.get("generation").and_then(Value::as_u64).unwrap_or(0),
+        records: v
+            .get("counts")
+            .and_then(|c| c.get("records"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize,
+        sources,
+        files,
+    })
+}
+
+/// A name that may be joined onto a pack dir without escaping it: no path
+/// separators, no `..`, no drive letters, not hidden, not empty.
+fn plain_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains(':')
+        && name != "."
+        && name != ".."
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +551,169 @@ mod tests {
                 "{name} identical"
             );
         }
+    }
+
+    fn src_stat(slug: &str) -> SourceStat {
+        SourceStat {
+            slug: slug.to_string(),
+            kind: "dir".to_string(),
+            path: Some("data".to_string()),
+            url: None,
+            licence: "CC0-1.0".to_string(),
+            watermark: None,
+            unchanged: false,
+            records: 1,
+            new: 1,
+            skipped: 0,
+            pruned: 0,
+        }
+    }
+
+    fn stats_with_source() -> RunStats {
+        RunStats {
+            envelopes: 3,
+            per_source: vec![src_stat("a")],
+        }
+    }
+
+    #[test]
+    fn read_manifest_round_trips_a_verified_pack() {
+        let tmp = tempfile::tempdir().unwrap();
+        let records = vec![rec("a", &[]), rec("b", &[]), rec("c", &[])];
+        let r = emit(
+            tmp.path(),
+            &recipe("t", 2),
+            "# r\n",
+            records,
+            &stats_with_source(),
+        )
+        .unwrap();
+        let meta = read_manifest(&r.dir).unwrap();
+        assert_eq!(meta.name, "t");
+        assert_eq!(meta.generation, 1);
+        assert_eq!(meta.records, 3);
+        let total: usize = meta.files.iter().map(|f| f.records).sum();
+        assert_eq!(total, 3);
+        assert_eq!(meta.sources.len(), 1);
+        assert_eq!(meta.sources[0].slug, "a");
+        assert_eq!(meta.sources[0].licence, "CC0-1.0");
+    }
+
+    #[test]
+    fn read_manifest_names_the_tampered_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = emit(
+            tmp.path(),
+            &recipe("t", 1),
+            "# r\n",
+            vec![rec("a", &[])],
+            &stats_with_source(),
+        )
+        .unwrap();
+        let fname = meta_file_name(&r.dir);
+        let path = r.dir.join(&fname);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.push(b' ');
+        std::fs::write(&path, bytes).unwrap();
+        let err = read_manifest(&r.dir).unwrap_err().to_string();
+        assert!(err.contains("checksum mismatch"), "{err}");
+        assert!(err.contains(&fname), "{err}");
+    }
+
+    #[test]
+    fn read_manifest_refuses_an_unknown_format_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = emit(
+            tmp.path(),
+            &recipe("t", 1),
+            "# r\n",
+            vec![rec("a", &[])],
+            &stats_with_source(),
+        )
+        .unwrap();
+        // checked BEFORE any checksum: a future format must be refused on the
+        // version alone, not on a hash of a file we cannot interpret
+        let m: Value =
+            serde_json::from_str(&std::fs::read_to_string(r.dir.join("manifest.json")).unwrap())
+                .unwrap();
+        let mut m = m;
+        m["format_version"] = json!(2);
+        std::fs::write(
+            r.dir.join("manifest.json"),
+            serde_json::to_vec_pretty(&m).unwrap(),
+        )
+        .unwrap();
+        let err = read_manifest(&r.dir).unwrap_err().to_string();
+        assert!(err.contains("format version 2 is not supported"), "{err}");
+    }
+
+    #[test]
+    fn read_manifest_refuses_a_truncated_sums() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = emit(
+            tmp.path(),
+            &recipe("t", 1),
+            "# r\n",
+            vec![rec("a", &[])],
+            &stats_with_source(),
+        )
+        .unwrap();
+        let kept: String = std::fs::read_to_string(r.dir.join("SHA256SUMS"))
+            .unwrap()
+            .lines()
+            .filter(|l| !l.ends_with("manifest.json"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        std::fs::write(r.dir.join("SHA256SUMS"), kept).unwrap();
+        let err = read_manifest(&r.dir).unwrap_err().to_string();
+        assert!(err.contains("does not cover manifest.json"), "{err}");
+    }
+
+    #[test]
+    fn read_manifest_refuses_manifest_and_sums_disagreement() {
+        // A manifest whose files[] sha disagrees with SHA256SUMS: caught
+        // before any bytes are re-hashed, because the pack is internally
+        // inconsistent whichever of the two is the tampered one. (The case
+        // sums + manifest agree but the FILE differs is the tamper test
+        // above; the case everything-agree-but-lying is what signatures —
+        // a later milestone — exist for.)
+        let tmp = tempfile::tempdir().unwrap();
+        let r = emit(
+            tmp.path(),
+            &recipe("t", 1),
+            "# r\n",
+            vec![rec("a", &[])],
+            &stats_with_source(),
+        )
+        .unwrap();
+        let fname = meta_file_name(&r.dir);
+        let mut m: Value =
+            serde_json::from_str(&std::fs::read_to_string(r.dir.join("manifest.json")).unwrap())
+                .unwrap();
+        m["files"][&fname]["sha256"] = json!("0".repeat(64));
+        std::fs::write(
+            r.dir.join("manifest.json"),
+            serde_json::to_vec_pretty(&m).unwrap(),
+        )
+        .unwrap();
+        let err = read_manifest(&r.dir).unwrap_err().to_string();
+        assert!(err.contains("disagree"), "{err}");
+        assert!(err.contains(&fname), "{err}");
+    }
+
+    /// The first records file the manifest names (shards are hash-assigned,
+    /// so read the name instead of guessing it).
+    fn meta_file_name(pack_dir: &Path) -> String {
+        let m: Value =
+            serde_json::from_str(&std::fs::read_to_string(pack_dir.join("manifest.json")).unwrap())
+                .unwrap();
+        m["files"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone()
     }
 
     #[test]
