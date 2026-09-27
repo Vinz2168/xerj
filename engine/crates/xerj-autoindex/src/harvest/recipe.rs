@@ -90,7 +90,8 @@ pub struct SourceSpec {
     /// `http-zip`/`git` sources: where the bytes come from. A git url may
     /// also be a local path (git itself accepts both — tests rely on it).
     pub url: Option<String>,
-    /// `git` sources: a pinned commit sha, or absent to track remote HEAD.
+    /// `git` sources: a full commit sha (pinned), a branch or tag name, or
+    /// absent to track the remote's default branch (HEAD).
     pub rev: Option<String>,
     pub glob: String,
     pub format: Format,
@@ -108,10 +109,15 @@ pub enum SourceKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
-    /// OSV v1.x (the `ossf/osv-schema` shape shared by osv.dev dumps, the
-    /// RustSec `osv` branch and github-reviewed GHSA files). Curated
-    /// extraction of the standard fields plus generic flattening of the rest.
+    /// OSV v1.x (the `ossf/osv-schema` shape shared by osv.dev dumps and
+    /// github-reviewed GHSA files). Curated extraction of the standard
+    /// fields plus generic flattening of the rest.
     Osv,
+    /// RustSec's native advisory: a `crates/<crate>/RUSTSEC-*.md` file —
+    /// ```toml frontmatter tables plus markdown prose. The only source of
+    /// the curated `affected.functions` paths (the osv-branch conversion
+    /// drops them).
+    RustsecMd,
     /// Already-flat JSON records: generic two-level flattening only. This is
     /// the "we have not written a format adapter for this yet" path.
     Flat,
@@ -420,9 +426,10 @@ fn compile(path: &Path, file: RawRecipe) -> Result<Recipe> {
         };
         let format = match s.format.as_str() {
             "osv" => Format::Osv,
+            "rustsec-md" => Format::RustsecMd,
             "flat" => Format::Flat,
             other => bail!(at(&format!(
-                "source '{}': unknown format '{other}' (supported: osv, flat)",
+                "source '{}': unknown format '{other}' (supported: osv, rustsec-md, flat)",
                 s.slug
             ))),
         };

@@ -1,12 +1,14 @@
 //! Input-format adapters: one function per known record FORMAT, each turning
-//! a source JSON value into flat key paths.
+//! a source value into flat key paths.
 //!
 //! An adapter knows the INPUT format, never our domain: `osv` understands
-//! the ossf/osv-schema shape (shared by osv.dev dumps, the RustSec `osv`
-//! branch and github-reviewed GHSA files); `flat` does generic flattening
-//! for everything else. Which keys of the result feed the query envelope is
-//! the recipe's job, not the adapter's — the same `osv` adapter would serve
-//! a Go vulnerability corpus unchanged.
+//! the ossf/osv-schema shape (shared by osv.dev dumps and github-reviewed
+//! GHSA files); `rustsec-md` understands RustSec's native advisory file
+//! (TOML frontmatter + markdown — the mechanism is generic frontmatter
+//! extraction, the curated table names are upstream's); `flat` does generic
+//! flattening for everything else. Which keys of the result feed the query
+//! envelope is the recipe's job, not the adapter's — the same `osv` adapter
+//! would serve a Go vulnerability corpus unchanged.
 //!
 //! Flattening mirrors `extract::flatten_object` semantics (two levels of
 //! nesting become `a_b` keys; deeper structure and arrays-of-objects are
@@ -29,6 +31,10 @@ pub fn normalize(format: Format, v: &Value) -> Map<String, Value> {
     match format {
         Format::Flat => flatten(v),
         Format::Osv => normalize_osv(v),
+        Format::RustsecMd => match v {
+            Value::String(s) => normalize_rustsec_md(s),
+            other => flatten(other),
+        },
     }
 }
 
@@ -255,6 +261,173 @@ fn normalize_osv(v: &Value) -> Map<String, Value> {
     out
 }
 
+// ── RustSec native advisory ─────────────────────────────────────────────────
+
+/// Split a RustSec advisory into (frontmatter TOML text, markdown body). The
+/// file is one ```toml fenced block followed by prose; a file without the
+/// fence yields no frontmatter and the whole text as body.
+fn split_frontmatter(text: &str) -> (Option<&str>, &str) {
+    let t = text.trim_start_matches('\u{feff}');
+    let Some(after) = t.strip_prefix("```toml\n") else {
+        return (None, t);
+    };
+    match after.find("\n```\n") {
+        Some(i) => (Some(&after[..i]), &after[i + 5..]),
+        // a fence that never closes: treat everything after the opener as
+        // frontmatter-shaped text we cannot trust, keep it as body instead
+        None => (None, t),
+    }
+}
+
+/// RustSec's native `crates/<crate>/RUSTSEC-*.md`: a ```toml frontmatter
+/// (`[advisory]`/`[versions]`/`[affected]` tables) plus the advisory's
+/// markdown prose. The `osv`-branch conversion drops `affected.functions`
+/// and nulls `ecosystem_specific` (measured 2026-09-27: 0 of 1,252 records
+/// carry functions there), so the native files are the ONLY source of the
+/// curated vulnerable-function paths.
+///
+/// Facts both adapters carry land in the SAME key names (`id`, `aliases`,
+/// `summary`, `severity`, `affected_functions`, `withdrawn`, …) so a recipe
+/// can merge this source with an `osv` one without a bridge; RustSec-only
+/// facts (`patched_versions`, `categories`, `keywords`, `date`) keep their
+/// own names. Uncurated frontmatter keys flow through the generic
+/// flattener prefixed by their table (`advisory_foo`), mirroring the osv
+/// adapter's passthrough.
+fn normalize_rustsec_md(text: &str) -> Map<String, Value> {
+    let (fm, body) = split_frontmatter(text);
+    let mut out = Map::new();
+
+    let parsed = fm
+        .map(|f| f.parse::<toml::Value>())
+        .transpose()
+        .ok()
+        .flatten();
+    let tables: Option<&toml::value::Table> = match parsed.as_ref() {
+        Some(toml::Value::Table(t)) => Some(t),
+        _ => None,
+    };
+
+    // Track what curated extraction consumed so the passthrough loop below
+    // does not duplicate it under a prefixed name.
+    let mut curated: Vec<(&str, &str)> = Vec::new();
+    let sub = |name: &str| tables.and_then(|t| t.get(name)).and_then(|v| v.as_table());
+    let advisory = sub("advisory");
+    let versions = sub("versions");
+    let affected = sub("affected");
+    let put_str = |out: &mut Map<String, Value>, key: &str, s: String| {
+        if !s.is_empty() {
+            out.insert(key.to_string(), Value::String(s));
+        }
+    };
+
+    if let Some(advisory) = advisory {
+        for k in ["id", "date", "url", "title", "withdrawn", "informational"] {
+            if let Some(s) = advisory.get(k).and_then(|v| v.as_str()) {
+                curated.push(("advisory", k));
+                put_str(&mut out, k, s.to_string());
+            }
+        }
+        // `cvss` is a bare vector string here; the osv adapter keeps the
+        // first score in `severity` and all in `severity_scores` — same.
+        if let Some(cvss) = advisory.get("cvss").and_then(|v| v.as_str()) {
+            curated.push(("advisory", "cvss"));
+            put_str(&mut out, "severity", cvss.to_string());
+            out.insert(
+                "severity_scores".to_string(),
+                Value::Array(vec![Value::String(cvss.to_string())]),
+            );
+        }
+        if let Some(pkg) = advisory.get("package").and_then(|v| v.as_str()) {
+            curated.push(("advisory", "package"));
+            out.insert(
+                "packages".to_string(),
+                Value::Array(vec![Value::String(pkg.to_string())]),
+            );
+        }
+        for k in ["aliases", "related", "categories", "keywords"] {
+            if let Some(arr) = advisory.get(k).and_then(|v| v.as_array()) {
+                let vals: Vec<Value> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| Value::String(s.to_string()))
+                    .collect();
+                if !vals.is_empty() {
+                    curated.push(("advisory", k));
+                    out.insert(k.to_string(), Value::Array(vals));
+                }
+            }
+        }
+    }
+    if let Some(versions) = versions {
+        for (src, dst) in [
+            ("patched", "patched_versions"),
+            ("unaffected", "unaffected_versions"),
+        ] {
+            if let Some(arr) = versions.get(src).and_then(|v| v.as_array()) {
+                let vals: Vec<Value> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| Value::String(s.to_string()))
+                    .collect();
+                if !vals.is_empty() {
+                    curated.push(("versions", src));
+                    out.insert(dst.to_string(), Value::Array(vals));
+                }
+            }
+        }
+    }
+    if let Some(affected) = affected {
+        // `functions` is an inline table of function path → version ranges;
+        // the PATHS are the joinable fact (same key the osv adapter's
+        // ecosystem_specific extraction produces). Sorted: the file's key
+        // order must not reach the pack bytes.
+        if let Some(fns) = affected.get("functions").and_then(|v| v.as_table()) {
+            let mut paths: Vec<String> = fns.keys().cloned().collect();
+            paths.sort();
+            if !paths.is_empty() {
+                curated.push(("affected", "functions"));
+                out.insert(
+                    "affected_functions".to_string(),
+                    Value::Array(paths.into_iter().map(Value::String).collect()),
+                );
+            }
+        }
+    }
+
+    // Everything not curated flows through the generic flattener prefixed by
+    // its table, so unknown-but-real frontmatter survives into the pack.
+    if let Some(t) = tables {
+        for (tname, table_val) in t {
+            let Some(sub) = table_val.as_table() else {
+                continue;
+            };
+            for (k, v) in sub {
+                if curated.iter().any(|(tn, ck)| *tn == tname && ck == k) {
+                    continue;
+                }
+                let toml_json =
+                    |tv: &toml::Value| -> Value { serde_json::to_value(tv).unwrap_or(Value::Null) };
+                flatten_into(&format!("{tname}_{k}"), toml_json(v), 0, &mut out);
+            }
+        }
+    }
+
+    // The prose: first `# ` heading is the advisory's title when the
+    // frontmatter did not carry one; the whole body is the `details`.
+    let heading = body
+        .lines()
+        .find(|l| l.starts_with("# "))
+        .map(|l| l[2..].trim().to_string());
+    if let Some(h) = heading {
+        put_str(&mut out, "summary", h);
+    }
+    let trimmed = body.trim();
+    if !trimmed.is_empty() {
+        put_str(&mut out, "details", trimmed.to_string());
+    }
+    out
+}
+
 fn string_array(v: Option<&Value>) -> Option<Vec<Value>> {
     match v {
         Some(Value::Array(a)) if a.iter().all(|e| e.is_string()) => Some(a.to_vec()),
@@ -377,5 +550,124 @@ mod tests {
         let m = normalize(Format::Osv, &v);
         assert_eq!(m["schema_version"], json!("1.9.0"));
         assert_eq!(m["upstream_of"], json!("y"));
+    }
+
+    // ── rustsec-md ─────────────────────────────────────────────────────────
+
+    /// The real shape of crates/smallvec/RUSTSEC-2021-0003.md, trimmed.
+    const RUSTSEC_MD: &str = r#"```toml
+[advisory]
+id = "RUSTSEC-2021-0003"
+package = "smallvec"
+aliases = ["CVE-2021-25900", "GHSA-43w2-9j62-hq99"]
+cvss = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+date = "2021-01-08"
+url = "https://github.com/servo/rust-smallvec/issues/252"
+categories = ["memory-corruption"]
+keywords = ["buffer-overflow", "heap-overflow", "unsound"]
+
+[versions]
+patched = [">= 0.6.14, < 1.0.0", ">= 1.6.1"]
+unaffected = ["< 0.6.3"]
+
+[affected]
+functions = { "smallvec::SmallVec::insert_many" = [">= 0.6.3, < 0.6.14"] }
+```
+
+# Buffer overflow in SmallVec::insert_many
+
+A bug in the `SmallVec::insert_many` method caused it to allocate a buffer
+that was smaller than needed.
+"#;
+
+    #[test]
+    fn rustsec_md_extracts_the_curated_tables() {
+        let m = normalize(Format::RustsecMd, &json!(RUSTSEC_MD));
+        assert_eq!(m["id"], json!("RUSTSEC-2021-0003"));
+        assert_eq!(
+            m["aliases"],
+            json!(["CVE-2021-25900", "GHSA-43w2-9j62-hq99"])
+        );
+        assert_eq!(m["packages"], json!(["smallvec"]));
+        assert_eq!(
+            m["summary"],
+            json!("Buffer overflow in SmallVec::insert_many")
+        );
+        assert_eq!(
+            m["severity"],
+            json!("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H")
+        );
+        assert_eq!(
+            m["affected_functions"],
+            json!(["smallvec::SmallVec::insert_many"])
+        );
+        assert_eq!(
+            m["patched_versions"],
+            json!([">= 0.6.14, < 1.0.0", ">= 1.6.1"])
+        );
+        assert_eq!(m["unaffected_versions"], json!(["< 0.6.3"]));
+        assert_eq!(m["categories"], json!(["memory-corruption"]));
+        assert_eq!(
+            m["keywords"],
+            json!(["buffer-overflow", "heap-overflow", "unsound"])
+        );
+        assert_eq!(m["date"], json!("2021-01-08"));
+        assert_eq!(
+            m["url"],
+            json!("https://github.com/servo/rust-smallvec/issues/252")
+        );
+        assert!(
+            m["details"]
+                .as_str()
+                .unwrap()
+                .starts_with("# Buffer overflow"),
+            "the markdown body is the details"
+        );
+        assert!(
+            !m.contains_key("advisory_id"),
+            "curated keys are not duplicated by the passthrough"
+        );
+    }
+
+    #[test]
+    fn rustsec_md_key_names_line_up_with_osv_for_merge() {
+        // The whole point of the shared names: a recipe merges a rustsec-md
+        // source with an osv one over `id` without a field_precedence bridge.
+        let md = normalize(Format::RustsecMd, &json!(RUSTSEC_MD));
+        let osv = normalize(
+            Format::Osv,
+            &json!({
+                "id": "RUSTSEC-2021-0003",
+                "aliases": ["CVE-2021-25900", "GHSA-43w2-9j62-hq99"],
+                "summary": "Out of bounds write in SmallVec::insert_many",
+                "modified": "2023-06-20T00:00:00Z"
+            }),
+        );
+        for key in ["id", "aliases"] {
+            assert_eq!(md[key], osv[key], "{key} must carry identical meaning");
+        }
+    }
+
+    #[test]
+    fn rustsec_md_without_a_fence_degrades_to_body() {
+        let m = normalize(
+            Format::RustsecMd,
+            &json!("# just prose\n\nno frontmatter here"),
+        );
+        assert!(!m.contains_key("id"));
+        assert_eq!(m["summary"], json!("just prose"));
+        assert!(m["details"].as_str().unwrap().contains("no frontmatter"));
+    }
+
+    #[test]
+    fn rustsec_md_unknown_frontmatter_survives_prefixed() {
+        const ADVICE: &str = "```toml\n[advisory]\nid = \"RUSTSEC-2000-0001\"\ncwe = \"CWE-787\"\n\n[versions]\npatched = [\">= 1.0\"]\n```\n\n# Title\n";
+        let m = normalize(Format::RustsecMd, &json!(ADVICE));
+        assert_eq!(
+            m["advisory_cwe"],
+            json!("CWE-787"),
+            "uncurated key, prefixed by table"
+        );
+        assert_eq!(m["id"], json!("RUSTSEC-2000-0001"));
     }
 }

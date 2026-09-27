@@ -136,6 +136,7 @@ a fixed setup cost; a task you would finish in two tool calls will not repay it.
 ```
 xerj corpus add <name> <git-url>...   # clone reference repos (once per domain)
 xerj corpus add --from <manifest>     # ...or rebuild a corpus someone else defined
+xerj corpus build <name> --recipe <r> # ...or harvest RECORDS into a portable pack
 xerj corpus index  <name>             # index them with xerj autoindex (once per corpus)
 xerj code <name> "<what you need>"    # retrieve before writing (every task)
 ```
@@ -179,6 +180,21 @@ Corpus names and repo names are validated before anything touches the
 filesystem — a name with `/`, `*`, a leading `.`, or a reserved word is
 rejected at parse time, because the pinned-clone checkout runs `git checkout
 --force` inside that path.
+
+Not every corpus is source code. **Record packs** — advisories, datasets, any
+structured data — are built by a recipe instead of cloned:
+
+```sh
+xerj corpus build rust-vulns --recipe tools/packs/rust-vulns/recipe.toml
+xerj corpus add rust-vulns --from ~/.xerj-code/builds/rust-vulns/pack/rust-vulns
+```
+
+The recipe declares sources, identity edges (the same vulnerability arriving as
+RUSTSEC/GHSA/CVE becomes ONE record), merge precedence and derived fields; the
+pack it emits is checksummed and installs with the same `corpus add --from` as
+a corpus definition. The in-repo example is
+[`tools/packs/rust-vulns/`](../packs/rust-vulns/) — see its README for what a
+measured pack looks like.
 
 ### 2. Index it
 

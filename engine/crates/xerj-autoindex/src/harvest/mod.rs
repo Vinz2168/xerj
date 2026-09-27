@@ -336,10 +336,13 @@ fn glob_regex(glob: &str) -> regex::Regex {
     regex::Regex::new(&re).expect("glob translation always yields a valid regex")
 }
 
-/// Parse one harvested file: `.json`/`.jsonl`/`.ndjson`. A `.json` array
-/// yields its elements; `.jsonl` yields one per non-empty line. Other
-/// extensions are skipped by the glob, not here — reaching this with a
-/// non-JSON file is a hard error, not a silent drop.
+/// Parse one harvested file: `.json`/`.jsonl`/`.ndjson`/`.md`. A `.json`
+/// array yields its elements; `.jsonl` yields one per non-empty line; a
+/// `.md` yields its raw text as ONE string value — the format adapter (e.g.
+/// `rustsec-md`) owns interpreting it, so an `.md` globbed by a json-format
+/// source is visible junk, not a silent parse error. Other extensions are
+/// skipped by the glob, not here — reaching this with an unlisted type is a
+/// hard error, not a silent drop.
 fn parse_file(path: &Path) -> Result<Vec<Value>> {
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
@@ -348,6 +351,9 @@ fn parse_file(path: &Path) -> Result<Vec<Value>> {
         .and_then(|n| n.to_str())
         .unwrap_or_default()
         .to_lowercase();
+    if name.ends_with(".md") || name.ends_with(".markdown") {
+        return Ok(vec![Value::String(raw)]);
+    }
     let jsonl = name.ends_with(".jsonl") || name.ends_with(".ndjson");
     if jsonl {
         let mut out = Vec::new();
@@ -420,6 +426,11 @@ mod tests {
         let c = tmp.path().join("c.json");
         std::fs::write(&c, r#"{"id":"one"}"#).unwrap();
         assert_eq!(parse_file(&c).unwrap().len(), 1);
+        let d = tmp.path().join("d.md");
+        std::fs::write(&d, "```toml\n[advisory]\nid = \"R\"\n```\n\n# T\n").unwrap();
+        let parsed = parse_file(&d).unwrap();
+        assert_eq!(parsed.len(), 1, "one raw string value, not json-parsed");
+        assert!(parsed[0].as_str().unwrap().starts_with("```toml"));
     }
 
     // ── end to end: recipe → harvest → identity → pack, twice ─────────────
