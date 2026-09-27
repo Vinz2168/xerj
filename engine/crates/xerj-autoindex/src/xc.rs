@@ -236,7 +236,7 @@ deterministic pack under builds/<name>/ (see tools/xerj-code/);
 index builds/verifies/switches the corpus (exit 3 skips junk — normal);
 list shows what is loaded on this node.";
 
-fn git(dir: Option<&Path>, args: &[&str]) -> Result<(i32, String)> {
+pub(crate) fn git(dir: Option<&Path>, args: &[&str]) -> Result<(i32, String)> {
     let mut c = Command::new("git");
     if let Some(d) = dir {
         c.current_dir(d).arg("-C").arg(d);
@@ -254,7 +254,7 @@ fn git(dir: Option<&Path>, args: &[&str]) -> Result<(i32, String)> {
 
 /// Move a clone to `sha` (shallow). Never a shell string: the sha comes from
 /// an untrusted manifest, and `Command` passes it as ONE argv element.
-fn checkout_at_sha(target: &Path, url: &str, sha: &str) -> Result<()> {
+pub(crate) fn checkout_at_sha(target: &Path, url: &str, sha: &str) -> Result<()> {
     if !target.join(".git").exists() {
         std::fs::create_dir_all(target)?;
         git(Some(target), &["init", "--quiet"])?;

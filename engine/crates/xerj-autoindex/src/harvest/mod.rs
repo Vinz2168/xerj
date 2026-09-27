@@ -23,10 +23,12 @@
 //! `sources[]`); the tool does not and must not enforce them — the pack
 //! author owns what goes in the pack.
 
+pub mod httpget;
 pub mod identity;
 pub mod normalize;
 pub mod pack;
 pub mod recipe;
+pub mod source;
 pub mod store;
 
 pub(crate) use store::MAX_FIELDS;
@@ -123,24 +125,33 @@ fn run_build_inner(args: &[String], home: &Path) -> Result<i32> {
             .with_context(|| format!("--fresh: cannot clear {}", build_dir.display()))?;
     }
     let store_dir = build_dir.join("store");
+    let cache_dir = build_dir.join("cache");
 
     // ── harvest into the content store ───────────────────────────────────
     let mut per_source = Vec::new();
     for src in &recipe.sources {
-        let SourceKind::Dir = src.kind;
-        let root = recipe_dir.join(src.path.as_deref().unwrap_or("."));
-        let files = walk(&root, &src.glob)?;
+        let fetched = source::fetch(src, &recipe_dir, &cache_dir)?;
         let mut stat = SourceStat {
             slug: src.slug.clone(),
-            kind: "dir".to_string(),
+            kind: kind_name(src.kind).to_string(),
             path: src.path.clone(),
             url: src.url.clone(),
             licence: src.licence.clone(),
+            watermark: fetched.watermark.clone(),
+            unchanged: fetched.unchanged,
             records: 0,
             new: 0,
             skipped: 0,
             pruned: 0,
         };
+        if fetched.unchanged {
+            // The whole upstream tree is byte-identical to the previous run:
+            // skip the walk AND the prune — every envelope this source ever
+            // stored is still live, and pruning needs the full key set.
+            per_source.push(stat);
+            continue;
+        }
+        let files = walk(&fetched.root, &src.glob)?;
         let mut keys = HashSet::new();
         for (rel, path) in files {
             for value in parse_file(&path)? {
@@ -163,6 +174,11 @@ fn run_build_inner(args: &[String], home: &Path) -> Result<i32> {
             }
         }
         stat.pruned = store::prune(&store_dir, &src.slug, &keys);
+        // persist the watermark only after the source's harvest fully
+        // succeeded — a failed run must re-walk
+        if let Some(wm) = &fetched.watermark {
+            source::save_watermark(&cache_dir, &src.slug, wm)?;
+        }
         per_source.push(stat);
     }
 
@@ -194,11 +210,37 @@ fn run_build_inner(args: &[String], home: &Path) -> Result<i32> {
     };
     let result = pack::emit(&build_dir, &recipe, &recipe_toml, records, &stats)?;
 
+    // run report: the machine-readable twin of the stdout summary, with the
+    // watermarks a scheduled rebuild (M6) will diff against
+    let report = serde_json::json!({
+        "finished_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "pack": recipe.name,
+        "generation": result.generation,
+        "records": result.records,
+        "envelopes": stats.envelopes,
+        "sources": stats.per_source.iter()
+            .map(|s| serde_json::to_value(s).expect("SourceStat serializes"))
+            .collect::<Vec<_>>(),
+    });
+    std::fs::write(
+        build_dir.join("report.json"),
+        serde_json::to_vec_pretty(&report)?,
+    )
+    .with_context(|| format!("write {}", build_dir.join("report.json").display()))?;
+
     println!(
         "built '{}' generation {}: {} envelopes → {} records, {} shard file(s)",
         recipe.name, result.generation, stats.envelopes, result.records, result.shards
     );
     for s in &stats.per_source {
+        if s.unchanged {
+            println!(
+                "  {}: unchanged (watermark {})",
+                s.slug,
+                s.watermark.clone().unwrap_or_default()
+            );
+            continue;
+        }
         println!(
             "  {}: {} record(s) — {} new, {} skipped, {} pruned ({})",
             s.slug, s.records, s.new, s.skipped, s.pruned, s.licence
@@ -206,6 +248,14 @@ fn run_build_inner(args: &[String], home: &Path) -> Result<i32> {
     }
     println!("pack: {}", result.dir.display());
     Ok(0)
+}
+
+fn kind_name(kind: SourceKind) -> &'static str {
+    match kind {
+        SourceKind::Dir => "dir",
+        SourceKind::HttpZip => "http-zip",
+        SourceKind::Git => "git",
+    }
 }
 
 // ── dir source ──────────────────────────────────────────────────────────────
@@ -596,5 +646,95 @@ shards = 4
             "dead envelope pruned"
         );
         assert_eq!(read_records(&pack).len(), 1);
+    }
+
+    // ── end to end: a git source, watermark-skipped on the second run ─────
+
+    #[test]
+    fn build_from_git_source_and_skip_when_unchanged() {
+        let home = tempfile::tempdir().unwrap();
+        let origin = home.path().join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        crate::xc::git(Some(&origin), &["init", "--quiet", "-b", "main"]).ok();
+        std::fs::write(origin.join("a.json"), r#"{"id": "R1", "aliases": ["C1"]}"#).unwrap();
+        crate::xc::git(Some(&origin), &["add", "."]).ok();
+        crate::xc::git(
+            Some(&origin),
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--quiet",
+                "-m",
+                "one",
+            ],
+        )
+        .ok();
+
+        let recipe = format!(
+            "[recipe]\nformat = 1\nname = \"gitdemo\"\n\n\
+             [[sources]]\nslug = \"upstream\"\nkind = \"git\"\nurl = \"{}\"\nformat = \"flat\"\n\
+             licence = \"CC0-1.0\"\n\n\
+             [identity]\nedges = [{{ field = \"id\" }}]\n",
+            origin.to_string_lossy()
+        );
+        std::fs::create_dir_all(home.path().join("recipes")).unwrap();
+        std::fs::write(home.path().join("recipes/gitdemo.toml"), recipe).unwrap();
+
+        let args: Vec<String> = vec!["gitdemo".to_string()];
+        assert_eq!(run_build_inner(&args, home.path()).unwrap(), 0);
+        let pack = home.path().join("builds/gitdemo/pack/gitdemo");
+        assert_eq!(read_records(&pack).len(), 1);
+
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(pack.join("manifest.json")).unwrap())
+                .unwrap();
+        let s = &manifest["sources"][0];
+        assert_eq!(s["kind"], json!("git"));
+        assert_eq!(s["new"], json!(1));
+        assert!(s["watermark"].as_str().is_some_and(|w| w.len() == 40));
+
+        // second run: same HEAD → the source is not walked, the store is
+        // untouched, the pack is rebuilt identically from the store
+        assert_eq!(run_build_inner(&args, home.path()).unwrap(), 0);
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(pack.join("manifest.json")).unwrap())
+                .unwrap();
+        let s = &manifest["sources"][0];
+        assert_eq!(s["unchanged"], json!(true));
+        assert_eq!(s["records"], json!(0), "no walk happened");
+        assert_eq!(
+            read_records(&pack).len(),
+            1,
+            "records survive via the store"
+        );
+        assert!(home.path().join("builds/gitdemo/report.json").is_file());
+
+        // a new commit upstream re-activates the source
+        std::fs::write(origin.join("b.json"), r#"{"id": "R2"}"#).unwrap();
+        crate::xc::git(Some(&origin), &["add", "."]).ok();
+        crate::xc::git(
+            Some(&origin),
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--quiet",
+                "-m",
+                "two",
+            ],
+        )
+        .ok();
+        assert_eq!(run_build_inner(&args, home.path()).unwrap(), 0);
+        assert_eq!(read_records(&pack).len(), 2);
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(pack.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["sources"][0]["unchanged"], json!(false));
+        assert_eq!(manifest["sources"][0]["new"], json!(1));
     }
 }

@@ -24,13 +24,18 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use super::recipe::Recipe;
 
-/// Per-source counts for the manifest: what this run actually did.
+/// Per-source counts for the manifest and report: what this run actually
+/// did. `unchanged` = watermark matched, so the source was not walked at
+/// all (and must not be pruned either — everything it stored is live).
+#[derive(serde::Serialize)]
 pub struct SourceStat {
     pub slug: String,
     pub kind: String,
     pub path: Option<String>,
     pub url: Option<String>,
     pub licence: String,
+    pub watermark: Option<String>,
+    pub unchanged: bool,
     pub records: usize,
     pub new: usize,
     pub skipped: usize,
@@ -138,11 +143,11 @@ pub fn emit(
             "records": records.len(),
             "shards": shards,
         },
-        "sources": stats.per_source.iter().map(|s| serde_json::json!({
-            "slug": s.slug, "kind": s.kind, "path": s.path, "url": s.url,
-            "licence": s.licence, "records": s.records,
-            "new": s.new, "skipped": s.skipped, "pruned": s.pruned,
-        })).collect::<Vec<_>>(),
+        "sources": stats
+            .per_source
+            .iter()
+            .map(|s| serde_json::to_value(s).expect("SourceStat serializes"))
+            .collect::<Vec<_>>(),
         "files": Value::Object(files.clone().into_iter().collect()),
         "tool": { "name": "xerj", "version": env!("CARGO_PKG_VERSION") },
     });

@@ -86,7 +86,11 @@ pub struct SourceSpec {
     pub kind: SourceKind,
     /// `dir` sources: a path relative to the recipe file.
     pub path: Option<String>,
+    /// `http-zip`/`git` sources: where the bytes come from. A git url may
+    /// also be a local path (git itself accepts both — tests rely on it).
     pub url: Option<String>,
+    /// `git` sources: a pinned commit sha, or absent to track remote HEAD.
+    pub rev: Option<String>,
     pub glob: String,
     pub format: Format,
     /// Carried onto every record from this source as record DATA — the tool
@@ -97,6 +101,8 @@ pub struct SourceSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
     Dir,
+    HttpZip,
+    Git,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +245,8 @@ struct RawSource {
     path: Option<String>,
     #[serde(default)]
     url: Option<String>,
+    #[serde(default)]
+    rev: Option<String>,
     #[serde(default = "d_glob")]
     glob: String,
     format: String,
@@ -372,12 +380,12 @@ fn compile(path: &Path, file: RawRecipe) -> Result<Recipe> {
         }
         let kind = match s.kind.as_str() {
             "dir" => SourceKind::Dir,
-            other @ ("http-zip" | "git") => bail!(at(&format!(
-                "source '{}' kind '{other}' is not supported yet (planned: incremental \
-                 network sources)",
+            "http-zip" => SourceKind::HttpZip,
+            "git" => SourceKind::Git,
+            other => bail!(at(&format!(
+                "source '{}': unknown kind '{other}' (supported: dir, http-zip, git)",
                 s.slug
             ))),
-            other => bail!(at(&format!("source '{}': unknown kind '{other}'", s.slug))),
         };
         let format = match s.format.as_str() {
             "osv" => Format::Osv,
@@ -387,17 +395,55 @@ fn compile(path: &Path, file: RawRecipe) -> Result<Recipe> {
                 s.slug
             ))),
         };
-        if kind == SourceKind::Dir {
-            if s.path.as_deref().unwrap_or("").is_empty() {
-                bail!(at(&format!(
-                    "dir source '{}' needs a 'path' (relative to the recipe file)",
-                    s.slug
-                )));
-            }
-            if let Some(p) = &s.path {
-                if Path::new(p).is_absolute() {
+        let url = s.url.as_deref().unwrap_or_default().to_string();
+        let rev = s.rev.as_deref().unwrap_or_default().to_string();
+        match kind {
+            SourceKind::Dir => {
+                if s.path.as_deref().unwrap_or("").is_empty() {
                     bail!(at(&format!(
-                        "dir source '{}' path must be recipe-relative, got absolute '{p}'",
+                        "dir source '{}' needs a 'path' (relative to the recipe file)",
+                        s.slug
+                    )));
+                }
+                if let Some(p) = &s.path {
+                    if Path::new(p).is_absolute() {
+                        bail!(at(&format!(
+                            "dir source '{}' path must be recipe-relative, got absolute '{p}'",
+                            s.slug
+                        )));
+                    }
+                }
+                if !url.is_empty() || !rev.is_empty() {
+                    bail!(at(&format!(
+                        "dir source '{}' takes 'path', not 'url'/'rev'",
+                        s.slug
+                    )));
+                }
+            }
+            SourceKind::HttpZip => {
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    bail!(at(&format!(
+                        "http-zip source '{}' needs an http(s) 'url', got '{url}'",
+                        s.slug
+                    )));
+                }
+                if s.path.is_some() || !rev.is_empty() {
+                    bail!(at(&format!(
+                        "http-zip source '{}' takes 'url' only — no 'path'/'rev'",
+                        s.slug
+                    )));
+                }
+            }
+            SourceKind::Git => {
+                if url.is_empty() {
+                    bail!(at(&format!(
+                        "git source '{}' needs a 'url' (a git URL or local path)",
+                        s.slug
+                    )));
+                }
+                if s.path.is_some() {
+                    bail!(at(&format!(
+                        "git source '{}' takes 'url' (+optional 'rev'), not 'path'",
                         s.slug
                     )));
                 }
@@ -409,6 +455,7 @@ fn compile(path: &Path, file: RawRecipe) -> Result<Recipe> {
             kind,
             path: s.path.clone(),
             url: s.url.clone(),
+            rev: if rev.is_empty() { None } else { Some(rev) },
             glob: s.glob.clone(),
             format,
             licence: s.licence.clone(),
@@ -634,12 +681,34 @@ edges = [{ field = "id" }]
     }
 
     #[test]
-    fn unknown_source_kind_names_the_planned_one() {
+    fn unknown_source_kind_is_loud() {
         let tmp = tempfile::tempdir().unwrap();
-        let bad = MINIMAL.replace("kind = \"dir\"", "kind = \"git\"");
+        let bad = MINIMAL.replace("kind = \"dir\"", "kind = \"svn\"");
         let err = load(&write(tmp.path(), &bad)).unwrap_err().to_string();
-        assert!(err.contains("not supported yet"), "{err}");
-        assert!(err.contains("'git'"), "{err}");
+        assert!(err.contains("unknown kind 'svn'"), "{err}");
+    }
+
+    #[test]
+    fn network_kinds_validate_their_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        // http-zip without an http(s) url
+        let bad = MINIMAL.replace(
+            "kind = \"dir\"\npath = \"data/a\"",
+            "kind = \"http-zip\"\nurl = \"ftp://x/y.zip\"",
+        );
+        let err = load(&write(tmp.path(), &bad)).unwrap_err().to_string();
+        assert!(err.contains("http(s) 'url'"), "{err}");
+        // git with a stray path
+        let bad = MINIMAL.replace("kind = \"dir\"", "kind = \"git\"\nurl = \"https://x/y\"");
+        let err = load(&write(tmp.path(), &bad)).unwrap_err().to_string();
+        assert!(err.contains("not 'path'"), "{err}");
+        // dir with a url
+        let bad = MINIMAL.replace(
+            "path = \"data/a\"",
+            "path = \"data/a\"\nurl = \"https://x/y\"",
+        );
+        let err = load(&write(tmp.path(), &bad)).unwrap_err().to_string();
+        assert!(err.contains("not 'url'/'rev'"), "{err}");
     }
 
     #[test]
