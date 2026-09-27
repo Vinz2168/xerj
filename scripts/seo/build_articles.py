@@ -673,7 +673,7 @@ def render_article_sections(article: article_data.Article, context: BuildContext
 
 def primary_nav() -> str:
     return """<nav class="nav" aria-label="Primary">
-  <a href="/" class="brand">XERJ.AI</a>
+  <a href="/" class="brand">XERJ</a>
   <a href="/">HOME</a>
   <a href="/product">PRODUCT</a>
   <span class="nav-drop">

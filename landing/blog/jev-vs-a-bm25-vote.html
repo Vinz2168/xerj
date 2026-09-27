@@ -63,7 +63,7 @@
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
   "datePublished": "2026-09-22",
-  "dateModified": "2026-09-22",
+  "dateModified": "2026-09-27",
   "author": {
     "@id": "https://xerj.org/#organization"
   },
@@ -108,7 +108,7 @@
 </head>
 <body>
 <nav class="nav" aria-label="Primary">
-  <a href="/" class="brand">XERJ.AI</a>
+  <a href="/" class="brand">XERJ</a>
   <a href="/">HOME</a>
   <a href="/product">PRODUCT</a>
   <span class="nav-drop"><a href="/use-cases">USE CASES</a></span>
@@ -129,7 +129,7 @@
   <p class="blog-crumb"><a href="/blog/">&larr; ALL POSTS · /BLOG</a></p>
   <div class="uc-eyebrow">BENCHMARKS · DECISIONS · SMS SPAM + BANKING77 · RUNS 2026-09-21</div>
   <h1>A BM25 VOTE TIES JEV ON SPAM<br><span class="accent">AND BEATS IT ON INTENT</span></h1>
-  <p class="blog-byline">XERJ ENGINEERING · PUBLISHED 2026-09-22</p>
+  <p class="blog-byline">XERJ ENGINEERING · PUBLISHED 2026-09-22 · UPDATED 2026-09-27</p>
 
   <p class="lede">We gave <a href="https://docs.typesafe.ai" rel="external">TypeSafe's Jev</a> five hundred support
   messages to classify, then answered the same set from a XERJ index with no model at all. On spam the
@@ -330,14 +330,45 @@
   <p>Every item was a short English text with a single label, in one language. Nothing here shows that
   the result transfers to long documents or multilingual corpora, and that claim stays unmade until
   somebody measures it.</p>
+</section>
 
-  <p>The full write-up, every arm and the per-item predictions live in the study. The endpoints are
+<section class="scene-section">
+  <div class="kicker">08 · THE TAKEAWAY</div>
+  <h2 class="scene">Count your labels before you pay for a model</h2>
+
+  <p>Read together, the three datasets answer the question this post opened with. If the task is a closed
+  vocabulary you already hold thousands of examples of, looking the answer up is not the budget option:
+  on Banking77 it was the more accurate one, and it costs zero API tokens. If the task is binary spam,
+  there is no detectable difference, and the tie is the finding. If the taxonomy is semantic rather than
+  lexical, as on DBpedia, the model is the one to reach for.</p>
+
+  <p>The operational form of all of it is the crossover: twenty-five labelled examples per class on
+  Banking77, the only dataset we measured it on. Below that line it is worth paying for the model; above
+  it you are, on this evidence, paying a vendor to do worse than your own archive.</p>
+
+  <div class="loss">
+    <strong>A vote is not a reasoner.</strong> A vote can only return a label it has already seen; Jev
+    answers zero-shot, with the best calibration we measured on any zero-shot arm. The rule this post
+    earns is compositional, not a substitution: on a labelled workload, try the lookup you already own
+    first, and keep the model for what the archive cannot see.
+  </div>
+
+  <p>Every number above traces to the runs in sections 02&ndash;06 &mdash; the spam tie at
+  p&nbsp;=&nbsp;0.75, the Banking77 win at p&nbsp;&lt;&nbsp;0.0001, the DBpedia loss, and the two
+  defects now filed as
+  <a href="https://github.com/xerj-org/xerj/issues/1000" rel="external">#1000</a> and
+  <a href="https://github.com/xerj-org/xerj/issues/1001" rel="external">#1001</a>. The full write-up,
+  every arm and the per-item predictions live in the study; the endpoints are
   <code class="inline">/v1/systemone</code> and <code class="inline">/_decide</code>, both documented in
-  the <a href="/docs/">docs</a>, and the retrieval side of the story continues in
+  the <a href="/docs/">docs</a>; the retrieval side of the story continues in
   <a href="/blog/does-xerj-beat-jev">our earlier post on reranking</a> and on the
-  <a href="/benchmarks/">benchmarks page</a>. If you would rather check the claim than read about it,
-  the shortest path is <a href="/docs/quickstart">the quickstart</a>, an
-  <a href="/docs/recipes/">index recipe</a> and your own labelled archive.</p>
+  <a href="/benchmarks/">benchmarks page</a>.</p>
+
+  <p>If you would rather check the claim than read about it, the shortest path is
+  <a href="/docs/quickstart">the quickstart</a>, an <a href="/docs/recipes/">index recipe</a>, and your
+  own labelled archive: index the history, hold five hundred items back, ask
+  <code class="inline">/_decide</code>, and score the disagreements the way we did. Your archive is the
+  benchmark that matters.</p>
 </section>
 
 </main>

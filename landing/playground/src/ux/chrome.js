@@ -110,7 +110,7 @@ export const Nav = ({
 
   return `
 <nav class="nav" aria-label="Product">
-  <span class="brand">XERJ.AI · OBSERVE</span>
+  <span class="brand">XERJ · OBSERVE</span>
   ${primaryLinks}
   <span class="spacer"></span>
   ${EditCtrl({ active: edit })}

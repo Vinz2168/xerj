@@ -64,7 +64,7 @@
   "image": "https://xerj.org/og/does-xerj-beat-jev.png",
   "inLanguage": "en",
   "datePublished": "2026-09-21",
-  "dateModified": "2026-09-21",
+  "dateModified": "2026-09-27",
   "author": {
     "@id": "https://xerj.org/#organization"
   },
@@ -110,7 +110,7 @@
 <body>
 
 <nav class="nav" aria-label="Primary">
-  <a href="/" class="brand">XERJ.AI</a>
+  <a href="/" class="brand">XERJ</a>
   <a href="/">HOME</a>
   <a href="/product">PRODUCT</a>
   <span class="nav-drop"><a href="/use-cases">USE CASES</a></span>
@@ -126,11 +126,12 @@
   <span class="theme"><button type="button" data-theme="day" class="active">DAY</button><span class="dash">·</span><button type="button" data-theme="night">NIGHT</button></span>
 </nav>
 
+<main>
 <div class="uc-hero">
   <p class="blog-crumb"><a href="/blog/">&larr; ALL POSTS · /BLOG</a></p>
   <div class="uc-eyebrow">BENCHMARKS · ONE JUDGE MODEL, MEASURED · ONE WIRE, ANSWERED · RUNS 2026-09-19..21</div>
   <h1>DOES XERJ BEAT JEV?<br><span class="accent">ON THE BILL, OUTRIGHT. ON FIQA, NO.</span></h1>
-  <p class="blog-byline">AUTHOR · XERJ ENGINEERING TEAM · PUBLISHED · 2026-09-21 · UPDATED · 2026-09-21</p>
+  <p class="blog-byline">AUTHOR · XERJ ENGINEERING TEAM · PUBLISHED · 2026-09-21 · UPDATED · 2026-09-27</p>
 
   <!-- The verdict, first. Every figure below it is verbatim from the runs
        cited in §01–§04; the two run dates stay 2026-09-20 throughout. -->
@@ -566,6 +567,53 @@ GATE PASSED: unmodified jev-reranker ranked from the XERJ node</span></pre>
     related: <a href="/benchmarks/">the benchmarks hub</a> · <a href="/answers/rerank-search-results-calibrated-judge">the rerank stage, documented</a> ·
     <a href="/benchmarks/elasticsearch">the ES scorecard</a>.</p>
 </section>
+
+<!-- ============================ 05 · THE ANSWER ============================ -->
+<section class="scene-section" id="answer">
+  <div class="kicker"><span class="accent">05</span><span class="dash">·</span><span>THE ANSWER · FOUR SECTIONS, ONE ARGUMENT</span></div>
+  <h2 class="scene" style="font-size:var(--fs-56);">THE TITLE ASKED FOR A WINNER.<br><span class="accent">THE MEASUREMENT FOUND A WIRE.</span></h2>
+
+  <p class="wide">Read in order, the four sections are one argument, and the title's question was never
+  going to have a single winner. Measured over <strong>1,271 judged queries</strong> the scoreboard is a
+  split: the hosted judge takes SciFact and FiQA &mdash; <strong>+0.126</strong> on FiQA, the biggest lift
+  we measured &mdash; and the local hybrid keeps NFCorpus, <strong>0.3448 to 0.3312</strong>. On the bill
+  XERJ wins outright: the FiQA rerank run cost <strong>15,178,758 judge input tokens</strong> and
+  <strong>$0.6375</strong>, while the vote over your own history spends no tokens and sends no text off
+  the node. What turns that split into something an operator can act on is §03: both ends now speak the
+  same wire, so the same client &mdash; unmodified, as the gate proved &mdash; can take either answer.</p>
+
+  <p class="wide">Three lessons outlast the tables. First, <strong>measure the integration, not the
+  model</strong>: our stage scored 0.3822 where plain BM25 scored 0.7750, the defect was our request
+  shape, and a judge answers the question you actually sent. Second, <strong>know your noise
+  floor</strong>: the provider is not deterministic, any gap within &plusmn;0.01 nDCG@10 is noise, and a
+  single-shot benchmark of a hosted judge is a coin. Third, <strong>a judge probability is an ordering,
+  not a probability</strong> &mdash; ECE 0.3109 on FiQA, where documents rated 0.93 confidence were
+  relevant 34% of the time.</p>
+
+  <div class="loss">
+    <strong>Carry these three rules out of the post.</strong> Measure the integration at the raw wire
+    before you trust any number that comes back. Treat any hosted-judge comparison inside
+    &plusmn;0.01 nDCG@10 as a tie. Order by the judge's probability; never threshold it with
+    <code class="inline">min_score</code>.
+    Each rule cost us a run to learn, and every run behind them is linked in the sections above.
+  </div>
+
+  <p class="wide">If you would rather check the claim than read about it: the gate recipe directly above
+  is the whole verification path, and the engine behind it is <a href="/docs/install">one binary</a> with
+  a <a href="/docs/quickstart">quickstart</a> &mdash; or start in the <a href="/playground">playground</a>
+  before installing anything. The benchmark that matters is the one this post keeps pointing at:
+  <strong>your own labelled history</strong>. Index it, ask <code class="inline">/_decide</code>, and read
+  the neighbours that ride along with every answer. And if a System One client is already in your stack,
+  the switch is one environment variable &mdash; point <code class="inline">TYPESAFE_ENDPOINT</code> at
+  your node, exactly as the gate does, and keep the hosted API for the questions with no history behind
+  them.</p>
+
+  <p class="src">Every number on this page is verbatim from the runs cited section by section above ·
+    the wire-conformance board lives on <a href="/benchmarks/">the benchmarks hub</a> ·
+    most recent from this repository: <a href="/blog/cutting-the-index-28-percent">cutting the index 28%</a>.</p>
+</section>
+
+</main>
 
 <!-- seo:footer-begin — generated by scripts/seo/fix_links.py · do not hand-edit -->
 <nav class="footer-map" aria-label="Site map">
