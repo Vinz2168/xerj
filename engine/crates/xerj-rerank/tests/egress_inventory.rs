@@ -107,6 +107,14 @@ const KNOWN: &[(&str, Role)] = &[
         "xerj-autoindex/src/objwatch/s3.rs",
         Role::Client("`xerj autoindex s3:// --watch`"),
     ),
+    // The corpus builder's http-zip fetcher (#1046). Read-only: sources come
+    // IN (a GET per http-zip source per build); no document text is ever
+    // sent upstream, so DATA_EGRESS and the air-gapped rows do not change.
+    // Git sources shell out to `git`, which the marker list does not track.
+    (
+        "xerj-autoindex/src/harvest/httpget.rs",
+        Role::Client("`xerj corpus build`"),
+    ),
     (
         "xerj-autoindex/src/objsource_minio_tests.rs",
         Role::TestOnly,
