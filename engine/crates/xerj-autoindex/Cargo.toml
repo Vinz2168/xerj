@@ -58,6 +58,11 @@ reqwest = { workspace = true, features = ["blocking"] }
 # needs exactly two S3 verbs. See objwatch/s3.rs for why not the SDK.
 sha2 = "0.10"
 hmac = "0.12"
+# ed25519 detached signatures over pack SHA256SUMS (`harvest/sign.rs`).
+# Already in the lock file via the TLS stack (rustls→ring 0.17), so this adds
+# no new native build; here it is only a direct dependency of the corpus-pack
+# publish/verify path.
+ring.workspace = true
 
 
 # --- AST code extraction (tree-sitter). Grammars expose a tree-sitter-language

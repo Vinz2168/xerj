@@ -10,6 +10,11 @@
 //!             ─→ merge     (precedence + array union + strictest licence)
 //!             ─→ suggest   (mapping + join-key hints from a sample — never applied)
 //!             ─→ pack      (deterministic sharded JSONL + manifest + SUMS)
+//!
+//! Publishing is a separate step, never part of a build:
+//! `xerj corpus sign <pack-dir> --key <seed-file>` writes the detached
+//! ed25519 signature over SHA256SUMS (see `sign.rs`); `xerj corpus add
+//! --from <pack> --verify-sig <pubkey-file>` checks it on the way in.
 //! ```
 //!
 //! Incrementality is not a mode, it is the storage layout: every normalized
@@ -29,6 +34,7 @@ pub mod identity;
 pub mod normalize;
 pub mod pack;
 pub mod recipe;
+pub mod sign;
 pub mod source;
 pub mod store;
 pub mod suggest;

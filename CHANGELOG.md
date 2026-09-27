@@ -58,6 +58,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`xerj corpus build` — portable, signed corpus packs, and the first one:
+  `rust-vulns`.** The records half of the corpus-hub roadmap item (#1030): a
+  declarative TOML recipe (sources with licences, identity edges, merge
+  precedence, derived fields — the tool is domain-agnostic; what a record *is*
+  lives in the recipe, never the code) drives harvest → normalize →
+  content-addressed store (file presence is the skip-already-stored dedup —
+  incremental by construction, no sync mode to get wrong) → union-find
+  identity resolution (alias chains close for free) → merge (declared scalar
+  precedence, array union, most-restrictive licence, auditable `sources[]`)
+  → a deterministic sharded pack whose manifest carries a `format_version`
+  readers refuse when unknown, per-file SHA-256 verified on
+  `xerj corpus add --from <dir|zip>`, the recipe verbatim as provenance, and
+  mapping/relation *suggestions* that are never applied. The showcase pack
+  `tools/packs/rust-vulns/` collapses 4,107 osv.dev + RustSec filings to
+  1,950 identity-resolved records (1,221 merged from both sources) carrying
+  RustSec's curated vulnerable-function paths, which no export ships; every
+  README number is measured (`pack-stats.json`, `provenance: measured`) and
+  pinned by a test. Publishing is a separate step, never part of a build:
+  `xerj corpus keygen`/`sign` write a raw 64-byte ed25519 detached signature
+  over SHA256SUMS (the public key travels beside the recipe, never inside the
+  pack), `corpus add --verify-sig <pubkey>` checks origin *before* anything is
+  materialized, and a scheduled workflow rebuilds, signs, and publishes the
+  pack to a rolling GitHub Release — verifying its own output against the
+  committed `.pub` first, so a half-rotated key fails the build. The attack
+  the signature exists for is pinned by a test: a self-consistent rebuild
+  (tampered records, honestly rewritten checksums) passes every checksum and
+  fails the signature. No vulnerability database in our prior-art survey
+  ships a consumer-verifiable signature. (PRs
+  [#1046](https://github.com/xerj-org/xerj/pull/1046) and
+  [#1047](https://github.com/xerj-org/xerj/pull/1047) for the builder and
+  showcase; the signing/publish half is
+  [#1048](https://github.com/xerj-org/xerj/pull/1048).)
 - **An on-disk size harness for force-merged indexes**
   (`benchmarks/index-size/`) — the measurement half of the index-size
   effort (epic [#1038](https://github.com/xerj-org/xerj/issues/1038)):

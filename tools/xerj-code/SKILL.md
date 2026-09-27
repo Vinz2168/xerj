@@ -192,9 +192,13 @@ xerj corpus add rust-vulns --from ~/.xerj-code/builds/rust-vulns/pack/rust-vulns
 The recipe declares sources, identity edges (the same vulnerability arriving as
 RUSTSEC/GHSA/CVE becomes ONE record), merge precedence and derived fields; the
 pack it emits is checksummed and installs with the same `corpus add --from` as
-a corpus definition. The in-repo example is
-[`tools/packs/rust-vulns/`](../packs/rust-vulns/) — see its README for what a
-measured pack looks like.
+a corpus definition. A pack from someone else (e.g. the rolling
+[rust-vulns release](https://github.com/xerj-org/xerj/releases/tag/pack-rust-vulns))
+carries an ed25519 signature over its SHA256SUMS — add it with
+`--verify-sig <pubkey-file>` to check origin before anything is indexed
+(the key ships beside the recipe, never inside the pack). The in-repo example
+is [`tools/packs/rust-vulns/`](../packs/rust-vulns/) — see its README for what
+a measured pack looks like.
 
 ### 2. Index it
 

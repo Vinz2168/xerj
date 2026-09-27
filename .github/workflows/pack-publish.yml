@@ -1,0 +1,150 @@
+# Scheduled publish of the rust-vulns corpus pack (M6 of the corpus-builder
+# arc). A pack's freshness is whatever its last build fetched — that is an
+# operational promise this workflow keeps, not a README claim: the pack's own
+# 30-day staleness refusal applies to our published corpus exactly as it does
+# to a user's reference corpora, so a build that stops here shows up as a
+# stale badge, not a silently aging artifact.
+#
+# Chain of custody, in job order:
+#   build (recipe.toml, committed) → sign (PACK_SIGNING_SEED secret)
+#   → verify against the COMMITTED public key → publish
+# The verify step is load-bearing: it proves the secret still matches
+# tools/packs/keys/rust-vulns.pub in the same run that publishes, so a
+# rotated key that forgot to update the .pub fails HERE instead of shipping
+# a pack no consumer can verify.
+#
+# Manual runs welcome: workflow_dispatch built the first release and rebuilds
+# after a recipe change without waiting for the cron tick.
+
+name: pack publish
+
+on:
+  schedule:
+    # daily at 04:23 UTC — off the :00/:30 marks; a vuln pack does not need
+    # minute-level freshness (sources update daily at best)
+    - cron: "23 4 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # release assets
+
+# Never two publishes at once: the release tag is rolling, and clobbering
+# uploads from concurrent runs would interleave artifacts from two builds.
+concurrency:
+  group: pack-publish
+  cancel-in-progress: false
+
+jobs:
+  rust-vulns:
+    name: build + sign + publish rust-vulns
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b2c4a3267bf # v4.4.0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      # Same profile the toolkit jobs use: opt-level 3, assertions on. The
+      # binary only builds a pack here, and ci-test binaries land in
+      # target/ci-test/ (see the XERJ_BIN note in ci.yml — do not point
+      # anything at target/release/, which this job never builds).
+      - name: Build the xerj binary
+        working-directory: engine
+        run: cargo build --profile ci-test -p xerj-server
+
+      # Build state under the workspace, not /tmp: the same rule the skill
+      # teaches users. The path is fixed by the build command below:
+      # $XERJ_CODE_HOME/builds/<name>/pack/<name>/
+      - name: Build the pack
+        env:
+          XERJ_CODE_HOME: ${{ github.workspace }}/.pack-home
+        run: |
+          engine/target/ci-test/xerj corpus build rust-vulns \
+            --recipe tools/packs/rust-vulns/recipe.toml
+
+      - name: Sign the pack
+        env:
+          XERJ_CODE_HOME: ${{ github.workspace }}/.pack-home
+          PACK_SIGNING_SEED: ${{ secrets.PACK_SIGNING_SEED }}
+        run: |
+          if [ -z "$PACK_SIGNING_SEED" ]; then
+            echo "PACK_SIGNING_SEED secret is not set. Generate a keypair:"
+            echo "  xerj corpus keygen --out tools/packs/keys/rust-vulns"
+            echo "commit the .pub, set the secret to the .key's hex line, delete the .key"
+            exit 1
+          fi
+          printf '%s' "$PACK_SIGNING_SEED" > "$RUNNER_TEMP/pack.key"
+          engine/target/ci-test/xerj corpus sign \
+            "$XERJ_CODE_HOME/builds/rust-vulns/pack/rust-vulns" \
+            --key "$RUNNER_TEMP/pack.key"
+          rm -f "$RUNNER_TEMP/pack.key"
+
+      # Prove the published artifact installs AND that the secret matches the
+      # committed .pub — the consumer's exact command, against the key file
+      # exactly as a consumer would fetch it from this repo.
+      - name: Verify + install the signed pack (consumer path)
+        env:
+          XERJ_CODE_HOME: ${{ github.workspace }}/.pack-home-verify
+        run: |
+          engine/target/ci-test/xerj corpus add rust-vulns \
+            --from "$GITHUB_WORKSPACE/.pack-home/builds/rust-vulns/pack/rust-vulns" \
+            --verify-sig tools/packs/keys/rust-vulns.pub
+
+      - name: Pack release metadata (freshness.json)
+        env:
+          XERJ_CODE_HOME: ${{ github.workspace }}/.pack-home
+        run: |
+          cd "$XERJ_CODE_HOME/builds/rust-vulns/pack/rust-vulns"
+          RECORDS=$(python3 -c "import json;print(json.load(open('manifest.json'))['counts']['records'])")
+          BUILT=$(python3 -c "import json;print(json.load(open('manifest.json'))['created_at'])")
+          GEN=$(python3 -c "import json;print(json.load(open('manifest.json'))['generation'])")
+          cat > "$RUNNER_TEMP/rust-vulns-freshness.json" <<EOF
+          {
+            "schemaVersion": 1,
+            "label": "rust-vulns pack",
+            "message": "$RECORDS advisories, built ${BUILT%%T*}, gen $GEN",
+            "color": "blue"
+          }
+          EOF
+
+      - name: Zip the pack
+        env:
+          XERJ_CODE_HOME: ${{ github.workspace }}/.pack-home
+        run: |
+          cd "$XERJ_CODE_HOME/builds/rust-vulns/pack/rust-vulns"
+          zip -qr "$RUNNER_TEMP/rust-vulns-pack.zip" .
+          # the checksums and signature also ship as loose assets, so a
+          # consumer can audit a download without unpacking the zip first
+          cp SHA256SUMS "$RUNNER_TEMP/rust-vulns-SHA256SUMS"
+          cp SHA256SUMS.sig "$RUNNER_TEMP/rust-vulns-SHA256SUMS.sig"
+
+      # Rolling prerelease tag: consumers pin one URL that always carries the
+      # latest build. Versioned history lives in the workflow runs and the
+      # release's previous-assets behavior (clobber replaces same-named files).
+      - name: Publish to the rolling release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: pack-rust-vulns
+          name: "rust-vulns corpus pack (rolling)"
+          prerelease: true
+          body: |
+            The `rust-vulns` corpus pack, built and signed by the scheduled
+            `pack publish` workflow from `tools/packs/rust-vulns/recipe.toml`.
+
+            Install (public key: `tools/packs/keys/rust-vulns.pub` in the repo):
+
+                xerj corpus add rust-vulns --from rust-vulns-pack.zip \
+                  --verify-sig rust-vulns.pub
+                xerj corpus index rust-vulns
+
+            `rust-vulns-freshness.json` carries the build date and record
+            count; the badge in `tools/packs/rust-vulns/README.md` reads it.
+          files: |
+            ${{ runner.temp }}/rust-vulns-pack.zip
+            ${{ runner.temp }}/rust-vulns-SHA256SUMS
+            ${{ runner.temp }}/rust-vulns-SHA256SUMS.sig
+            ${{ runner.temp }}/rust-vulns-freshness.json

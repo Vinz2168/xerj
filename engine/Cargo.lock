@@ -7313,6 +7313,7 @@ dependencies = [
  "rayon",
  "regex",
  "reqwest",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

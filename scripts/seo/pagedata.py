@@ -127,10 +127,19 @@ PAGES: dict[str, dict[str, str]] = {
         description="Four file-format changes took our 100k-doc index from 5.52 MB to 3.99 MB (−28%), each gated on dissecting real segments first. The losing rows are in the post.",
         published="2026-09-27", updated="2026-09-27",
     ),
+    # Corpus-pack GTM post, 2026-09-27. Every count traces to tools/packs/
+    # rust-vulns/pack-stats.json (provenance "measured", pinned by test); the
+    # prior-art signature table is our 2026-09 survey, phrased as a survey.
+    "blog/one-vulnerability-three-names.html": dict(
+        label="One vulnerability, three names", kind="article",
+        title="One vulnerability, three names — and a pack we sign",
+        description="The same Rust vulnerability arrives as RUSTSEC, GHSA and CVE. We collapsed 4,107 advisories to 1,950 identity-resolved records, packed them, and signed the pack — because no vulnerability database we surveyed does.",
+        published="2026-09-27", updated="2026-09-27",
+    ),
     "blog/index.html": dict(
         label="Blog", kind="collection",
         title="XERJ.ai — Blog: the engineering log",
-        description="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, benchmark autopsies, and the storage formats that cut the index 28%.",
+        description="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
         updated="2026-09-27",
     ),
     "demo/index.html": dict(
