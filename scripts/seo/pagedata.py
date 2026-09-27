@@ -113,11 +113,19 @@ PAGES: dict[str, dict[str, str]] = {
         description="500 decisions each on SMS Spam and Banking77: a tie on spam (McNemar p=0.75), a 9-point retrieval win on 77-way intent at zero cost, and one dataset Jev wins.",
         published="2026-09-22", updated="2026-09-22",
     ),
+    # Size-epic stage-1 write-up, 2026-09-27. published/updated pinned like the
+    # two posts above; in-body run dates stay 2026-09-26/27.
+    "blog/cutting-the-index-28-percent.html": dict(
+        label="Cutting the index 28%", kind="article",
+        title="Cutting the index 28%: dissect first, write Rust second",
+        description="Four file-format changes took our 100k-doc index from 5.52 MB to 3.99 MB (−28%), each gated on dissecting real segments first. The losing rows are in the post.",
+        published="2026-09-27", updated="2026-09-27",
+    ),
     "blog/index.html": dict(
         label="Blog", kind="collection",
         title="XERJ.ai — Blog: the engineering log",
-        description="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, and benchmark autopsies that name the runs behind every number.",
-        updated="2026-09-22",
+        description="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, benchmark autopsies, and the storage formats that cut the index 28%.",
+        updated="2026-09-27",
     ),
     "demo/index.html": dict(
         label="Real-data demo", kind="software",

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>XERJ.ai — Blog: the engineering log</title>
-<meta name="description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, and benchmark autopsies that name the runs behind every number.">
+<meta name="description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, benchmark autopsies, and the storage formats that cut the index 28%.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@400;700;800;900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -16,7 +16,7 @@
 <meta property="og:site_name" content="XERJ.ai">
 <meta property="og:type" content="website">
 <meta property="og:title" content="XERJ.ai — Blog: the engineering log">
-<meta property="og:description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, and benchmark autopsies that name the runs behind every number.">
+<meta property="og:description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, benchmark autopsies, and the storage formats that cut the index 28%.">
 <meta property="og:url" content="https://xerj.org/blog/">
 <meta property="og:image" content="https://xerj.org/og/xerj-card.png">
 <meta property="og:image:width" content="1200">
@@ -25,7 +25,7 @@
 <meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="XERJ.ai — Blog: the engineering log">
-<meta name="twitter:description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, and benchmark autopsies that name the runs behind every number.">
+<meta name="twitter:description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, benchmark autopsies, and the storage formats that cut the index 28%.">
 <meta name="twitter:image" content="https://xerj.org/og/xerj-card.png">
 <script type="application/ld+json">
 {
@@ -59,11 +59,11 @@
   "@context": "https://schema.org",
   "@type": "CollectionPage",
   "name": "XERJ.ai — Blog: the engineering log",
-  "description": "Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, and benchmark autopsies that name the runs behind every number.",
+  "description": "Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, benchmark autopsies, and the storage formats that cut the index 28%.",
   "url": "https://xerj.org/blog/",
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
-  "dateModified": "2026-09-21",
+  "dateModified": "2026-09-27",
   "isPartOf": {
     "@id": "https://xerj.org/#website"
   },
@@ -126,6 +126,58 @@
   <!-- Reverse-chronological by hand while there is one post; new posts PREPEND.
        Move to a generator only past ~10 posts. -->
   <ol class="blog-list">
+    <li>
+      <a class="bl-card" href="/blog/cutting-the-index-28-percent">
+        <!-- Bar widths share ONE denominator, 2,449 kB (the max across all rows,
+             .post before), so lengths compare across rows. Neutral bar = the
+             stage-0 baseline, accent bar = after that family's format change.
+             Figures verbatim from the post: .post 2,449/2,365 kB · .seg
+             1,671/449 kB · .dv 390/355 kB · .meta 200.8/13.8 kB (the 2 px
+             sliver is the real ratio). -->
+        <div class="bl-preview" aria-hidden="true">
+          <div class="blp-kicker">ON-DISK SIZE · 4 FILE FORMATS · 100K DOCS</div>
+          <div class="blp-row">
+            <div class="blp-ds">.POST</div>
+            <div class="blp-pair">
+              <span class="blp-num">2,449 kB <i>before</i></span><span class="blp-bar b" style="width:100%"></span>
+              <span class="blp-num">2,365 kB <i>after</i></span><span class="blp-bar a" style="width:96.6%"></span>
+            </div>
+          </div>
+          <div class="blp-row">
+            <div class="blp-ds">.SEG</div>
+            <div class="blp-pair">
+              <span class="blp-num">1,671 kB <i>before</i></span><span class="blp-bar b" style="width:68.2%"></span>
+              <span class="blp-num">449 kB <i>after</i> <span class="blp-chip">&minus;73.1%</span></span><span class="blp-bar a" style="width:18.3%"></span>
+            </div>
+          </div>
+          <div class="blp-row">
+            <div class="blp-ds">.DV</div>
+            <div class="blp-pair">
+              <span class="blp-num">390 kB <i>before</i></span><span class="blp-bar b" style="width:15.9%"></span>
+              <span class="blp-num">355 kB <i>after</i></span><span class="blp-bar a" style="width:14.5%"></span>
+            </div>
+          </div>
+          <div class="blp-row">
+            <div class="blp-ds">.META</div>
+            <div class="blp-pair">
+              <span class="blp-num">200.8 kB <i>before</i></span><span class="blp-bar b" style="width:8.2%"></span>
+              <span class="blp-num">13.8 kB <i>after</i> <span class="blp-chip">&minus;93.1%</span></span><span class="blp-bar a" style="width:0.6%"></span>
+            </div>
+          </div>
+          <p class="blp-foot">stage 1: ~5.52 MB &rarr; 3.99 MB (&minus;28%) · committed control pair 5,398,478 &rarr; 3,989,254 B</p>
+        </div>
+        <div class="bl-meta">
+          <p class="bl-date"><time datetime="2026-09-27">2026-09-27</time> · STORAGE · ENGINEERING</p>
+          <h2 class="bl-title">Cutting the index 28%: dissect first, write Rust second</h2>
+          <p class="bl-excerpt">Four file formats, each changed only after a real segment was dissected offline.
+          The stored section fell <strong>&minus;73.1%</strong>, term metadata <strong>&minus;93.1%</strong>, and
+          the whole index went from <strong>5.52 MB to 3.99 MB</strong>. The variant we were most confident
+          about doubled the size it was improving &mdash; that row is in the post too.</p>
+          <p class="bl-byline">AUTHOR · XERJ ENGINEERING TEAM · PUBLISHED · 2026-09-27</p>
+          <span class="bl-read">READ THE POST &rarr;</span>
+        </div>
+      </a>
+    </li>
     <li>
       <a class="bl-card" href="/blog/jev-vs-a-bm25-vote">
         <!-- Bar widths share ONE denominator, 0.9880 (the max across all rows),
