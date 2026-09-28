@@ -236,7 +236,9 @@ clone the repos, detect licences, write corpora/<name>/corpus.json;
 pack's 'pack' field) unless <name> or --as overrides it; a harvested pack
 also checksum-verifies and materializes records per source; --verify-sig
 checks the pack's SHA256SUMS.sig against a public key file first and
-refuses the pack on failure; build harvests recipe sources into a
+refuses the pack on failure (for a pack.zip, the sig cannot travel inside
+— releases ship it loose beside the zip as <pack>-SHA256SUMS.sig, which
+is where the lookup falls back to); build harvests recipe sources into a
 deterministic pack under builds/<name>/ (see tools/xerj-code/); sign/keygen
 are the publish step (ed25519 over SHA256SUMS);
 index builds/verifies/switches the corpus (exit 3 skips junk — normal);
@@ -730,7 +732,16 @@ fn run_corpus_add_pack(
     // Origin check first, before a byte of the pack is trusted: checksums
     // prove integrity, the signature proves who built it. A pack that
     // fails here is refused whole — nothing is materialized, nothing is
-    // indexed.
+    // indexed. The manifest is read only to resolve the pack's name for the
+    // signature lookup — its content is still gated by the signature chain
+    // (sig → SHA256SUMS → manifest.json) before anything below trusts it.
+    let meta = match crate::harvest::pack::read_manifest(pack_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("xerj corpus add: {e:#}");
+            return 2;
+        }
+    };
     if let Some(pubfile) = verify_sig {
         let public = match std::fs::read_to_string(pubfile) {
             Ok(p) => p,
@@ -739,7 +750,32 @@ fn run_corpus_add_pack(
                 return 2;
             }
         };
-        if let Err(e) = crate::harvest::sign::verify_pack(pack_dir, &public) {
+        // A directory pack carries its own SHA256SUMS.sig (what `corpus
+        // sign` writes). A ZIP cannot: the sig is deliberately absent from
+        // the SUMS it signs, so releases ship it as a LOOSE sibling asset,
+        // named <pack-name>-SHA256SUMS.sig (the rust-vulns release asset
+        // name) or plain SHA256SUMS.sig, next to the zip.
+        let sig = if pack_dir.join(crate::harvest::sign::SIG_NAME).is_file() {
+            Some(pack_dir.join(crate::harvest::sign::SIG_NAME))
+        } else {
+            let beside = Path::new(share_path).parent().unwrap_or(Path::new("."));
+            [
+                beside.join(format!("{}-SHA256SUMS.sig", meta.name)),
+                beside.join("SHA256SUMS.sig"),
+            ]
+            .into_iter()
+            .find(|p| p.is_file())
+        };
+        let verdict = match sig {
+            Some(path) => crate::harvest::sign::verify_sig_at(pack_dir, &path, &public),
+            None => Err(anyhow::anyhow!(
+                "no SHA256SUMS.sig to verify — not in the pack, and no \
+                 {}-SHA256SUMS.sig beside {}",
+                meta.name,
+                share_path
+            )),
+        };
+        if let Err(e) = verdict {
             eprintln!("xerj corpus add: {e:#}");
             return 2;
         }
@@ -752,13 +788,6 @@ fn run_corpus_add_pack(
              its origin before indexing"
         );
     }
-    let meta = match crate::harvest::pack::read_manifest(pack_dir) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("xerj corpus add: {e:#}");
-            return 2;
-        }
-    };
     let name = match resolve_corpus_name(explicit_name, &meta.name, &pack_dir.display().to_string())
     {
         Ok(n) => n,
@@ -2405,6 +2434,68 @@ precedence = ["a", "b"]
             run_corpus_add(&["--from".to_string(), pack.display().to_string()]),
             0
         );
+    }
+
+    #[test]
+    fn a_pack_zip_picks_up_the_loose_release_signature() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let pack = build_demo_pack(home.path());
+
+        // Sign, then ship the signature the way a release does: LOOSE,
+        // beside the zip, named <pack>-SHA256SUMS.sig — never inside the
+        // zip (the sig is deliberately absent from the SUMS it signs, and
+        // signing runs after the zip is built).
+        let (seed, public) = crate::harvest::sign::generate_keypair().unwrap();
+        crate::harvest::sign::sign_pack(&pack, &seed).unwrap();
+        let sig = std::fs::read(pack.join(crate::harvest::sign::SIG_NAME)).unwrap();
+        std::fs::remove_file(pack.join(crate::harvest::sign::SIG_NAME)).unwrap();
+        let good = home.path().join("good.pub");
+        std::fs::write(&good, &public).unwrap();
+        let (_, other) = crate::harvest::sign::generate_keypair().unwrap();
+        let wrong = home.path().join("wrong.pub");
+        std::fs::write(&wrong, &other).unwrap();
+
+        use std::io::Write;
+        let zip_path = home.path().join("demo-pack.zip");
+        {
+            let f = std::fs::File::create(&zip_path).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+            for e in std::fs::read_dir(&pack).unwrap().flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                z.start_file(name, opts).unwrap();
+                z.write_all(&std::fs::read(e.path()).unwrap()).unwrap();
+            }
+            z.finish().unwrap();
+        }
+        std::fs::write(home.path().join("demo-SHA256SUMS.sig"), sig).unwrap();
+
+        let corpus = home.path().join("corpora/demo");
+        let add = |key: &Path| {
+            run_corpus_add(&[
+                "--from".to_string(),
+                zip_path.display().to_string(),
+                "--verify-sig".to_string(),
+                key.display().to_string(),
+            ])
+        };
+
+        // wrong key: refused whole, nothing materialized
+        assert_eq!(add(&wrong), 2);
+        assert!(
+            !corpus.exists(),
+            "a failed zip verification must not materialize anything"
+        );
+
+        // right key: the loose sig beside the zip is found and verifies
+        assert_eq!(add(&good), 0);
+        assert!(corpus.join("corpus.json").is_file());
+
+        // sig missing entirely (neither inside nor beside): verification
+        // cannot start — a clear failure, never a silent skip to unsigned
+        std::fs::remove_file(home.path().join("demo-SHA256SUMS.sig")).unwrap();
+        assert_eq!(add(&good), 2);
     }
 
     #[test]

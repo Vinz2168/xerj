@@ -79,9 +79,17 @@ pub fn sign_pack(pack_dir: &Path, seed_hex: &str) -> Result<()> {
 /// `verify_pack` is called BEFORE the pack is materialized, so a failure
 /// means nothing was indexed.
 pub fn verify_pack(pack_dir: &Path, public_hex: &str) -> Result<()> {
+    verify_sig_at(pack_dir, &pack_dir.join(SIG_NAME), public_hex)
+}
+
+/// Same verification with an explicit signature path — `corpus add --from
+/// <pack.zip>` uses this with the LOOSE signature a release ships beside the
+/// zip: the sig is never packed inside the zip (it is deliberately absent
+/// from the SUMS it signs, and the signing step runs after the zip is
+/// built), so a zip consumer's signature lives in a sibling file.
+pub fn verify_sig_at(pack_dir: &Path, sig_path: &Path, public_hex: &str) -> Result<()> {
     let at = |what: &str| format!("{}: {what}", pack_dir.display());
-    let sig_path = pack_dir.join(SIG_NAME);
-    let sig = std::fs::read(&sig_path).with_context(|| at("no SHA256SUMS.sig to verify"))?;
+    let sig = std::fs::read(sig_path).with_context(|| at("no SHA256SUMS.sig to verify"))?;
     if sig.len() != 64 {
         bail!(at(&format!(
             "{SIG_NAME} is {} bytes, expected a 64-byte ed25519 signature",
