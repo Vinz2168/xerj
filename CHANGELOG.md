@@ -80,7 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   over SHA256SUMS (the public key travels beside the recipe, never inside the
   pack), `corpus add --verify-sig <pubkey>` checks origin *before* anything is
   materialized, and a scheduled workflow rebuilds, signs, and publishes the
-  pack to a rolling GitHub Release — verifying its own output against the
+  pack to a dated GitHub Release per build day (immutable releases make
+  release tags single-use, so there is no one rolling URL) — verifying its
+  own output against the
   committed `.pub` first, so a half-rotated key fails the build. The attack
   the signature exists for is pinned by a test: a self-consistent rebuild
   (tampered records, honestly rewritten checksums) passes every checksum and

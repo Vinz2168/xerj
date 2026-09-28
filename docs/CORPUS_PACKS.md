@@ -153,8 +153,13 @@ procedure is in
 
 The [pack publish workflow](../.github/workflows/pack-publish.yml) rebuilds
 and signs `rust-vulns` daily and attaches the zip, the loose checksums, the
-signature, and a freshness badge file to a rolling GitHub Release
-([pack-rust-vulns](https://github.com/xerj-org/xerj/releases/tag/pack-rust-vulns)).
+signature, and a freshness file to a GitHub Release per build day — dated
+tags `pack-rust-vulns-YYYY-MM-DD`, newest first at
+[releases?q=pack-rust-vulns](https://github.com/xerj-org/xerj/releases?q=pack-rust-vulns).
+This repository has immutable releases (release tags are single-use), which
+is why the pack ships one release per day instead of one rolling URL —
+each day's release is exactly the bytes that shipped, pinned by its
+signature, and the workflow keeps only the newest 7.
 Freshness is an operational promise the schedule keeps, not a README claim:
 the pack's own 30-day staleness refusal applies to our published corpus
 exactly as it does to a user's reference corpora.

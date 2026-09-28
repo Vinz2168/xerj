@@ -1,7 +1,7 @@
 # rust-vulns — the showcase corpus pack
 
 [![pack publish](https://github.com/xerj-org/xerj/actions/workflows/pack-publish.yml/badge.svg)](https://github.com/xerj-org/xerj/actions/workflows/pack-publish.yml)
-[![rust-vulns freshness](https://img.shields.io/endpoint?url=https://github.com/xerj-org/xerj/releases/download/pack-rust-vulns/rust-vulns-freshness.json)](https://github.com/xerj-org/xerj/releases/tag/pack-rust-vulns)
+[![rust-vulns pack: signed · daily builds](https://img.shields.io/badge/rust--vulns%20pack-signed%20%C2%B7%20daily%20builds-blue)](https://github.com/xerj-org/xerj/releases?q=pack-rust-vulns)
 
 Rust vulnerability advisories, **identity-resolved across sources**: the same
 vulnerability that arrives as `RUSTSEC-2021-0003`, `GHSA-43w2-9j62-hq99` and
@@ -52,18 +52,25 @@ author owns what goes in a pack.
 
 ## Build, consume, query
 
-The published pack is a rolling GitHub Release
-([pack-rust-vulns](https://github.com/xerj-org/xerj/releases/tag/pack-rust-vulns)),
-rebuilt and signed daily by the
+The published pack is a GitHub Release per build day (dated tags
+`pack-rust-vulns-YYYY-MM-DD`, newest first:
+[releases?q=pack-rust-vulns](https://github.com/xerj-org/xerj/releases?q=pack-rust-vulns)),
+built and signed daily by the
 [pack publish](https://github.com/xerj-org/xerj/actions/workflows/pack-publish.yml)
-workflow.
+workflow. This repository has immutable releases — release tags are
+single-use and yesterday's release is never modified — so there is no
+one-rolling-URL; each day's release is exactly the bytes that shipped,
+pinned by its signature.
 
 ```sh
 # consume the published, signed pack:
-#   1. fetch the zip and the public key (the key travels OUT of band —
-#      next to the recipe in this repo, never inside the pack)
-curl -LO https://github.com/xerj-org/xerj/releases/download/pack-rust-vulns/rust-vulns-pack.zip
-curl -LO https://github.com/xerj-org/xerj/releases/download/pack-rust-vulns/rust-vulns-SHA256SUMS.sig
+#   1. fetch the zip and signature from the newest pack release, and the
+#      public key (the key travels OUT of band — next to the recipe in
+#      this repo, never inside the pack)
+gh release download -R xerj-org/xerj \
+  -p 'rust-vulns-pack.zip' -p 'rust-vulns-SHA256SUMS.sig' \
+  "$(gh release list -R xerj-org/xerj -L 100 --json tagName \
+     --jq '[.[].tagName | select(startswith("pack-rust-vulns-"))] | .[0]')"
 curl -LO https://raw.githubusercontent.com/xerj-org/xerj/main/tools/packs/keys/rust-vulns.pub
 
 #   2. install it with signature verification — refuses the pack whole if
@@ -131,9 +138,10 @@ the new one.
 ## Honest limits
 
 - **Freshness is whatever the last build fetched.** The scheduled workflow
-  rebuilds daily; the badge above shows the last build's date and record
-  count. Between the sources updating and the next cron tick, the pack lags
-  by up to a day — a rebuild you run yourself is always current.
+  rebuilds daily; the newest release's `rust-vulns-freshness.json` carries
+  its build date and record count. Between the sources updating and the next
+  cron tick, the pack lags by up to a day — a rebuild you run yourself is
+  always current.
 - **Not a security product.** This is a searchable corpus of advisories for
   agents and humans; it is not a scanner and makes no completeness claim
   beyond "what these two sources carried at build time".
