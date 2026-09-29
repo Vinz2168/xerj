@@ -59,6 +59,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   *In flight* and GA-program sections to match and pointed the two zero-token
   items it subsumes at their new trackers (PR
   [#1066](https://github.com/xerj-org/xerj/pull/1066)).
+- Rolled the corpus-pack status in the agent-facing index files
+  `landing/llms.txt` and `landing/llms-full.txt`, which still said
+  "planned, no code": the records half shipped in rc.78 — `xerj corpus
+  build`, per-file checksums, the detached ed25519 signature over
+  SHA256SUMS, the daily dated `rust-vulns` release — while stating
+  plainly that the pre-indexed half and the hub directory remain
+  unbuilt, and linking `docs/CORPUS_PACKS.md` as the proving file (PR
+  [#1068](https://github.com/xerj-org/xerj/pull/1068)).
 
 ## [1.0.0-rc.78] - 2026-09-29
 
