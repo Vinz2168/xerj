@@ -544,6 +544,15 @@ pub struct AppState {
     /// the environment again. A test points a node at its own stub by replacing
     /// this field, so parallel tests never race on process-wide env state.
     pub rerank: Arc<xerj_rerank::ProviderSettings>,
+    /// The System One decide-ladder settings (tier 2 local head armed or
+    /// not) — the same injection seam as `rerank`, for
+    /// [`crate::systemone_api`].
+    ///
+    /// Resolved once here from `XERJ_DECIDE_MODE` / `XERJ_DECIDE_MODEL_DIR`
+    /// (the env half of a future `--decide-mode` server flag) and never read
+    /// from the environment again. A test arms a node by replacing this
+    /// field, so parallel tests never race on process-wide env state.
+    pub decide: Arc<crate::systemone_api::DecideSettings>,
 }
 
 impl AppState {
@@ -582,8 +591,10 @@ impl AppState {
             &config.rerank.api_key,
             &config.rerank.endpoint,
         ));
+        let decide = Arc::new(crate::systemone_api::DecideSettings::from_env());
         Self {
             rerank,
+            decide,
             config: Arc::new(config),
             engine: Arc::new(engine),
             metrics: Arc::new(metrics),

@@ -30,16 +30,48 @@ So the node speaks the wire:
 
 Both surfaces are one mechanism, in
 `engine/crates/xerj-api/src/systemone_api.rs`; the end-to-end tests are
-`engine/crates/xerj-api/tests/systemone_http.rs`. The acceptance gate for the
-wire — the pip-installed `jev-reranker`, unmodified, ranking off a XERJ node —
-is [benchmarks/systemone-gate](../benchmarks/systemone-gate).
+`engine/crates/xerj-api/tests/systemone_http.rs`, and the local tier's are
+`engine/crates/xerj-api/tests/systemone_local_decide.rs`. The acceptance gate
+for the wire — the pip-installed `jev-reranker`, unmodified, ranking off a
+XERJ node — is [benchmarks/systemone-gate](../benchmarks/systemone-gate).
+
+## The decide ladder
+
+Both surfaces answer through one ordered ladder, per question (#1057):
+
+1. **History vote** — where `[decisions] index` returns labelled support, the
+   vote wins. It is the measured tier and it shows its evidence.
+2. **Local zero-shot head** (off by default; feature `decide-local` +
+   `XERJ_DECIDE_MODE=local` + `XERJ_DECIDE_MODEL_DIR`) — a ModernBERT-class
+   candle classifier loaded from a local model directory holding
+   `config.json`, `tokenizer.json` and `model.safetensors`. It answers every
+   no-support outcome: no `[decisions] index` at all, a configured index that
+   is missing, a question whose payload retrieves no labelled neighbour. No
+   download path, no outbound client — the directory arrives the way any other
+   air-gapped asset does.
+3. **Hosted key** — reserved, not built. When tiers 1 and 2 cannot answer, the
+   documented errors stand rather than a fabricated probability.
+
+Tier 2 scores one NLI (premise, hypothesis) pair per candidate label — premise
+= the payload, hypothesis = "This example is {label}." — reads the entailment
+probability, and renormalises across the question's labels. A `noul` is scored
+as two competing statements (the positive label and its negation); a `choice`
+scores its own options. The trained model is the open `xerj-decide` artifact
+([#1064](https://github.com/xerj-org/xerj/issues/1064)); the loader here is
+validated end to end against a deterministic test fixture, so **no accuracy,
+ECE, or latency number is claimed for tier 2 until that artifact is measured**.
+
+The tier that answered is per-question evidence: `decisions.evidence.<id>.tier`
+is `history` or `local`, and a local answer carries
+`model: "xerj-decide-local-1"` — the same never-a-Jev-name discipline as the
+vote's own id.
 
 ## Set it up
 
 ```toml
 # xerj.toml
 [decisions]
-index          = "judgements"   # an index of labelled examples; empty (the default) = both endpoints 503
+index          = "judgements"   # an index of labelled examples; empty (the default) = both endpoints 503 (unless the local tier below is armed)
 k              = 10
 label_field    = "label"
 text_field     = "text"
@@ -121,19 +153,26 @@ Two deliberate breaks from the hosted API, both tested so they cannot regress:
    A question whose vote finds no labelled neighbour carries no information;
    inventing a probability is the silent-fake defect class this project
    treats as a bug. `/_decide` says the same thing as `abstain` + `reason`.
+   The local tier is the documented exception: armed, it answers those same
+   questions with the head's probabilities instead (200 where the vote 422'd,
+   and no 503 on a node with no `[decisions] index` at all). Request-shape
+   refusals — no payload to classify — are never rescued by it.
 
 `score` questions (2–10 ordinal levels) have no vote analogue and no
 benchmark: 422, naming the alternative.
 
 ## `POST /_decide`
 
-The audit surface. Per request: `index` (required), `question` (required),
-`k` (default the configured 10, clamped 1..100), `positive_label` (default
-the configured one). The response returns the label, its confidence, the
-verdict (`abstain` below `decisions.min_confidence`, or when no labelled
-neighbour exists), and the **neighbours** — each with `_id`, `label`,
-`_score` (the engine's own BM25 score), `weight` (1/rank), and the text — so
-every answer can be checked against the evidence that produced it.
+The audit surface. Per request: `index` (required — optional when the local
+tier is armed), `question` (required), `k` (default the configured 10,
+clamped 1..100), `positive_label` (default the configured one). The response
+returns the label, its confidence, the verdict (`abstain` below
+`decisions.min_confidence`, or when no labelled neighbour exists), the **tier**
+that answered, and the **neighbours** — each with `_id`, `label`, `_score`
+(the engine's own BM25 score), `weight` (1/rank), and the text — so every
+answer can be checked against the evidence that produced it. A local-tier
+answer has no neighbours (having none is what tier 2 means) and carries
+`tier: "local"`, `model: "xerj-decide-local-1"`.
 
 ```sh
 curl -s localhost:9200/_decide -H 'content-type: application/json' \

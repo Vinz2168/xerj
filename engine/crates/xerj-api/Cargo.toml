@@ -10,6 +10,12 @@ authors.workspace = true
 # example (#903) and for anyone linking this crate directly. The shipped
 # binary turns it on through `xerj-server`'s own `neural` feature.
 neural = ["xerj-engine/neural"]
+# Local zero-shot decision head (issue #1057): tier 2 of the System One
+# decide ladder, answering /v1/systemone and /_decide when the history
+# index has no support. Mirrors how `neural` is gated — off by default,
+# enabled by whoever links this crate (the xerj-server wiring is a
+# follow-up).
+decide-local = ["dep:xerj-ai", "xerj-ai/decide-local"]
 onnx-experimental = ["xerj-engine/onnx-experimental"]
 
 [dependencies]
@@ -18,6 +24,9 @@ xerj-engine  = { path = "../xerj-engine" }
 xerj-query   = { path = "../xerj-query" }
 xerj-rerank = { path = "../xerj-rerank" }
 xerj-wasm    = { path = "../xerj-wasm" }
+# Local decision head (feature `decide-local`); no other purpose, so the
+# dependency itself is optional.
+xerj-ai      = { path = "../xerj-ai", optional = true }
 # Note: this crate intentionally does NOT depend on xerj-console-api.
 # Xerj Console is a peer product mounted at the server level (`xerj-server`)
 # via Router::merge. Engine API and Xerj Console API are decoupled — the
