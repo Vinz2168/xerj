@@ -287,7 +287,10 @@ For a complete disconnected deployment procedure, including current GitHub relea
       pipeline naming an unimplemented processor is stored as unrunnable and every
       ingest through it is refused.
     * A log-specific index mode (the xerj-logs crate has zero call sites outside its
-      tests) and downloadable signed corpus packs: planned, no code.
+      tests). Corpus-pack records left this list in v1.0.0-rc.78 (paragraph below);
+      what stays on it is the pre-indexed half - an already-indexed bundle you mount
+      instead of spending your own CPU-hours - and a hub directory of packs beyond
+      the first.
   Object storage left this list in v1.0.0-rc.77 (2026-09-21, PR #1008, issue #965;
   ROADMAP's own row for it was last checked there 2026-09-18 and still says unwired):
   `storage.backend = "s3"` really stores indices in a bucket — one immutable ZBM1
@@ -299,6 +302,17 @@ For a complete disconnected deployment procedure, including current GitHub relea
   requires storage.s3_bucket to name an existing bucket` (xerj-common/src/config.rs).
   Still true of this build: single-writer, the WAL stays local, bundles are packed in
   memory, and bucket orphans have no GC command (docs/OBJECT_STORAGE.md).
+  Corpus-pack records left this list in v1.0.0-rc.78 (2026-09-29, PRs #1046, #1047,
+  #1048, publish hardening #1049-#1051; this list said "planned, no code" before):
+  `xerj corpus build` turns a declarative TOML recipe (sources with licences,
+  identity edges, merge precedence) into a deterministic, checksummed pack of
+  records — the manifest carries a `format_version` readers refuse when unknown,
+  licence and provenance ride on every record, `xerj corpus add --from <dir|zip>`
+  verifies the per-file SHA-256, and `--verify-sig <pubkey>` checks a detached
+  ed25519 signature over SHA256SUMS before anything is materialized. The first
+  pack is `rust-vulns` (4,107 osv.dev + RustSec filings identity-resolved to
+  1,950 records), rebuilt, signed and published by a scheduled workflow as a
+  dated GitHub Release per build day (docs/CORPUS_PACKS.md).
   The opt-in neural path (`--embed-mode neural`) had four measured limits, each a
   filed issue (#938, #939, #940, #937 in the order below) with a reproduction under
   benchmarks/neural-path-triage/ — all four FIXED on `main` before the v1.0.0-rc.77
