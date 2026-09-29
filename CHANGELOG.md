@@ -84,6 +84,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory contains zero measured numbers by design — every F1/token cell
   in its README is a gate definition until a real run lands (PR
   [#1071](https://github.com/xerj-org/xerj/pull/1071)).
+### Changed
+
+- **`xerj autoindex` now creates prose indexes with a stemming analyzer
+  ([#1059](https://github.com/xerj-org/xerj/issues/1059)).** When the
+  profiler marks a dataset's prose semantic — the same measured predicate
+  that gates the semantic-body election (`word_ratio >= 0.55 &&
+  mean_tokens >= 3.0`; measured `word_ratio` 0.00 for `trace_id`-shaped
+  identifiers, 0.78–1.00 for prose) — the index CREATE body declares the
+  built-in Snowball English `stemmer` analyzer as
+  `settings.analysis.analyzer.default`, the surface #937/#991 made
+  honoured at flush, segment query and merge. Plurals and inflections now
+  match on the lexical arm (`databases` ↔ `database`); `stemmer` was
+  chosen over `english` because it adds no stop-word removal and so
+  changes no BM25 length norm. Identifier/enum/numeric datasets keep the
+  exact `standard` term space, keyword fields are never stemmed, and
+  existing indexes are untouched by construction (analysis settings are
+  immutable after creation and a CREATE that finds the index already
+  there does not re-send). The declaration rides the plan outside the
+  frozen identity hashes, so no existing state dir aborts on upgrade.
+  The BEIR/NFCorpus zero-hit measurement (7 of 323 NFCorpus queries
+  return no hits on plural-only mismatches) remains the release-time
+  gate. (PR
+  [#1070](https://github.com/xerj-org/xerj/pull/1070).)
 
 ### Documentation
 
