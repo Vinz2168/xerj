@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.78] - 2026-09-29
+
+The index-size and corpus-packs release. Two headline changes: stage 1 of the
+index-size epic [#1038](https://github.com/xerj-org/xerj/issues/1038) lands four
+measured format changes (ZNV2, ZPS2, ZBS4, ZFM5 — the committed same-day pair
+5,398,478 → 3,989,254 B durable on the 100k harness, −26.1 %), and
+`xerj corpus build` ships portable, signed corpus packs with the first showcase
+pack, `rust-vulns`, published from a scheduled workflow. The same window closes
+the idle-cost arc (#874 met at ~3× margin, idle 206 → 64 kB per index) and the
+by-query truncation class (#1019, #1022).
+
 ### Fixed
 
 - **An idle node no longer spends CPU per index on Prometheus gauges (#874).**
@@ -80,9 +91,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   over SHA256SUMS (the public key travels beside the recipe, never inside the
   pack), `corpus add --verify-sig <pubkey>` checks origin *before* anything is
   materialized, and a scheduled workflow rebuilds, signs, and publishes the
-  pack to a dated GitHub Release per build day (immutable releases make
-  release tags single-use, so there is no one rolling URL) — verifying its
-  own output against the
+  pack to a dated GitHub Release per build day (immutable releases accept
+  asset uploads only before a release is published — so the workflow uploads
+  to a draft and publishes it last — and make release tags single-use, so
+  there is no one rolling URL; the draft-then-publish mechanics are
+  [#1049](https://github.com/xerj-org/xerj/pull/1049), the dated
+  per-build-day tags [#1050](https://github.com/xerj-org/xerj/pull/1050)) —
+  verifying its own output against the
   committed `.pub` first, so a half-rotated key fails the build. The attack
   the signature exists for is pinned by a test: a self-consistent rebuild
   (tampered records, honestly rewritten checksums) passes every checksum and
@@ -91,7 +106,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [#1046](https://github.com/xerj-org/xerj/pull/1046) and
   [#1047](https://github.com/xerj-org/xerj/pull/1047) for the builder and
   showcase; the signing/publish half is
-  [#1048](https://github.com/xerj-org/xerj/pull/1048).)
+  [#1048](https://github.com/xerj-org/xerj/pull/1048); the loose
+  `<pack>-SHA256SUMS.sig` release asset that `--verify-sig` requires beside a
+  pack zip — without which the documented zip consumer flow failed — is
+  [#1051](https://github.com/xerj-org/xerj/pull/1051).)
 - **An on-disk size harness for force-merged indexes**
   (`benchmarks/index-size/`) — the measurement half of the index-size
   effort (epic [#1038](https://github.com/xerj-org/xerj/issues/1038)):
@@ -143,7 +161,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and then per-term length varints only.  Measured on the 100 k-doc
   harness (LEVEL=balanced, forcemerge 1, same-day control): the `.meta`
   family drops 200,826 → 13,774 B (−93.1 %), total durable −3.5 %, with
-  every other extension byte-identical; the win scales
+  every other extension byte-identical except 3 B of `.jsonl` state noise;
+  the win scales
   with term cardinality, which is exactly the shape of unique-id fields
   on large deployments.  Measured again on a tree carrying ZBS4 as well
   (`results/result-zbs4-zfm5-balanced.json` vs
@@ -151,7 +170,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   3,989,254 B — the two stages together take the pre-stage baseline
   5,398,478 → 3,989,254 B (**−26.1 %**), with the four staged deltas
   (ZNV2, ZPS2, ZBS4, ZFM5) summing to within 12 B of the directly
-  measured endpoint.  ZFM4-and-older segments decode unchanged.
+  measured endpoint.  ZFM4-and-older segments decode unchanged. (PR
+  [#1043](https://github.com/xerj-org/xerj/pull/1043).)
 
 - **Stored sections get typed-int columns, duplicate-column references and
   a merge-path zstd effort chooser (`ZBS4`)** — stage 1 of the index-size
@@ -199,7 +219,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   storage unit tests cover typed-int round-trips (nulls, negatives,
   i64-extreme clusters), copy-of decode across full/projection/hydration
   paths, form-1 decode on all four read paths, and the malformed-payload
-  rejections.
+  rejections. (PR [#1042](https://github.com/xerj-org/xerj/pull/1042).)
 - **`.post` block framing slimmed (ZPS2)** ([#1038](https://github.com/xerj-org/xerj/issues/1038)):
   the packed doc-id-delta and term-freq streams in every 128-doc posting
   block switch to frame-of-reference coding — `[width][vbyte min]` with the
@@ -223,7 +243,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `benchmarks/index-size` harness at LEVEL=balanced against a same-day base
   control: total −1.5 % (5,517,127 → 5,432,531 B), `.post` −3.4 %
   (2,449,405 → 2,364,905 B), `body.post` −4.3 % (1,828,102 → 1,749,695 B);
-  the widest keyword family (`top_doc`, 12 terms × df ≈ 8.3 k) moved +1.5 %.
+  the widest keyword family (`top_doc`, 12 terms × df ≈ 8.3 k) moved +1.5 % (PR
+  [#1041](https://github.com/xerj-org/xerj/pull/1041)).
 - **`.dv` numeric columns get a bit-packed codec (`ZNV2`), chosen per
   column by measured size** — stage 1 of the index-size epic
   [#1038](https://github.com/xerj-org/xerj/issues/1038)). The column is
@@ -252,7 +273,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   array is exactly what `from_iter` builds and the f64-ordered `sorted`
   index is rebuilt unchanged. `ZNV1` and the pre-magic legacy layout
   still decode via magic dispatch, so indexes written by older builds
-  remain readable.
+  remain readable. (PR [#1040](https://github.com/xerj-org/xerj/pull/1040).)
 - **The request-cache seen-set no longer allocates on the first tracked
   search** ([#1024](https://github.com/xerj-org/xerj/issues/1024)): a lazy
   seen-set took idle per-index RSS from 206 to 64 kB — ~3× margin under the
@@ -271,6 +292,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-segment cache retention is re-anchored to #1032
   ([#1028](https://github.com/xerj-org/xerj/issues/1028)). (PR
   [#1033](https://github.com/xerj-org/xerj/pull/1033).)
+- **The CHANGELOG's rc.19–rc.70 gap is closed (ROADMAP GA gate item).** The 52
+  releases of 2026-08-19 → 2026-08-26 are reconstructed in
+  [CHANGELOG.md](./CHANGELOG.md) from per-release manifests of `git log` (merge
+  subjects and commit bodies) plus each tag's GitHub release record — 143
+  entries carrying 281 issue/PR links, every link checked to sit inside its
+  release window, 52/52 sections verified against their manifest (51 first
+  pass, 1 rewritten). They are honestly drier than ship-time entries — numbers
+  quoted only where a commit body recorded them — under a "Reconstructed
+  2026-09-26" banner, and nothing was force-fitted: the three entries still
+  unreleased at rc.71 stay under rc.72's "Recorded late". The same PR wrote
+  the post-rc.77 window into [Unreleased] above and made three audit
+  corrections, notably that the #874 idle gate is calibrated to 256 kB/idx,
+  not the 0.2 MB line (that is #1024). (PR
+  [#1035](https://github.com/xerj-org/xerj/pull/1035).)
+- **`ROADMAP.md` rolled forward to a 2026-09-26 review — the stale-evening
+  corrections, plus the rc.78 queue.** The 2026-09-21 review of the file was
+  stale within hours: #950, #941 and #1015 closed that same evening, #874 the
+  next day, and the zero-token stage-1 gating trio #937–#939 closed the same
+  evening — every one recorded in the file as open or "under way". This pass
+  re-checks every status claim against live tracker state: the *Next release*
+  section now records what actually landed since the rc.77 tag (#1009, #1017,
+  #1018, #1020, #1021, #1023, #1025, #1026, #1033, #1034) with PR links —
+  including #874's idle budget met at ~3× margin (206 → 64 kB per idle index)
+  and discussion #1012's email-labelling measurement (1.000 on the templated
+  tier, 0.625 at 0.902 mean confidence on the hard one) — the open-defects
+  shortlist shrinks to #1031 and #1032, the CHANGELOG-gap GA item is marked
+  closed 2026-09-26 (the rc.19–rc.70 backfill, PR
+  [#1035](https://github.com/xerj-org/xerj/pull/1035)), the stage-2
+  object-storage bullet stops contradicting the file's own *Shipping today*
+  section (#965 wired in rc.77), and the mail-ingest line is corrected to
+  "shipped in rc.75", carrying the post-#1002 memory numbers (variant-C
+  retention ~677 → ~108 MB) with #1032 named as the residual. The review line
+  itself is scoped honestly as a desk review of post-rc.77 `main` and the
+  live tracker — not a live re-verification — and the milestones claim is
+  true again (rc.78 milestone created, all four open issues triaged). (PR
+  [#1036](https://github.com/xerj-org/xerj/pull/1036).)
 - **Every other public surface caught up too — the 2026-09-26 status sweep.**
   A 70-agent post-merge audit confirmed 58 stale-status findings beyond the
   `llms.txt` set #1033 fixed; this sweep corrects them all: `llms-full.txt`'s
@@ -290,6 +347,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `build_articles.py --write`. Verified per-group adversarially and by a final
   gate (constants guard, `--check` for articles and sitemap, stale-phrase
   greps clean). (PR [#1037](https://github.com/xerj-org/xerj/pull/1037).)
+- **A stage-1 index-size write-up on the blog: "Cutting the index 28%".** The
+  post covers epic
+  [#1038](https://github.com/xerj-org/xerj/issues/1038) stage 1 (ZNV2
+  [#1040](https://github.com/xerj-org/xerj/pull/1040), ZPS2
+  [#1041](https://github.com/xerj-org/xerj/pull/1041), ZBS4
+  [#1042](https://github.com/xerj-org/xerj/pull/1042), ZFM5
+  [#1043](https://github.com/xerj-org/xerj/pull/1043)): the dissect-first
+  method, the four per-family A/B tables, the raw-vs-index baselines
+  (63,461,256 B raw → 3,989,254 B durable, with the repetitive-corpus caveat
+  stated), the final composition, and a losing-rows table (bitpack-always
+  2.02×, the window knee 679 → 330 kB, ids 54 → 143 kB at level 19,
+  `top_doc` +1.5 %, the stride-kept `.meta` at 138,727 B). The headline is
+  anchored to the committed same-day pair 5,398,478 → 3,989,254 B (−26.1 %),
+  with the −27.7 % reconstruction as the rounding behind "28%", and
+  `doc_id.meta` after ZFM5 is the on-disk 216 B, not the 193 B offline
+  estimate. The pre-publish verification pass also corrected two CHANGELOG
+  numbers in place: ZBS4's total is −22.6 % from its own printed pair, and
+  the byte-identical claim gained its 1 B `.json` exception. (PR
+  [#1044](https://github.com/xerj-org/xerj/pull/1044).)
+- **The xerj.org corner brand says XERJ, not XERJ.AI — and every blog post now ends on a
+  conclusion plus a way to try the engine.** The top-left `<a class="brand">` nav link had been
+  rendering the domain instead of the product name; it now reads "XERJ" on 179 hand-written and
+  generated pages, in the print-header stamp on the 44 docs pages, in the dashboards corner span
+  (`landing/playground/src/ux/chrome.js` and the committed `landing/playground/app.bundle.js`,
+  edited identically — no node in this sandbox to rebuild), and in the
+  `scripts/seo/build_articles.py:676` template, so regeneration cannot reintroduce the domain.
+  Footers, tab titles, `og:site_name`/JSON-LD `alternateName` and brand-book specimens
+  deliberately still read XERJ.AI — the scope was the corner, not a de-domain sweep. The blog
+  endings review (user ask 2026-09-27) gave *does-xerj-beat-jev* a "05 · THE ANSWER" section and
+  *jev-vs-a-bm25-vote* an "08 · THE TAKEAWAY", each scoped where the posts' evidence is (the
+  ±0.01 tie rule to hosted-judge comparisons, the label-count crossover to Banking77, the
+  calibration superlative to zero-shot arms; the superseded links-dump removed), and added a
+  try-it paragraph to the blog hub (one binary, quickstart, playground, your own corpus as the
+  benchmark that matters); `dateModified`/UPDATED bylines bumped to 2026-09-27 on the two edited
+  posts with published dates unchanged, and every figure in the new copy verified against the
+  posts' own bodies. Gates build_articles, heads, links, og card, seo_lint (0 violations) and
+  the constants guard all green; sitemap regenerated in the same push to dodge the lastmod
+  trap. (PR [#1045](https://github.com/xerj-org/xerj/pull/1045).)
 
 ## [1.0.0-rc.77] - 2026-09-21
 
