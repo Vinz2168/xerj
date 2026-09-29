@@ -76,6 +76,16 @@
 //!
 //! Diagnostics go to **stderr**; stdout is reserved exclusively for the
 //! JSON-RPC stream.
+//!
+//! ## Token budgets (#1058)
+//!
+//! The five search tools accept `max_tokens` and are held to it: the response
+//! text NEVER exceeds the budget. Enforcement lives in [`token_budget`],
+//! counted with one named tokenizer (XERJ's `StandardTokenizer`, UAX #29
+//! words), with overlapping file:line passages deduped before budgeting and
+//! over-budget hits reduced to locators.
+
+mod token_budget;
 
 use std::time::Duration;
 
@@ -509,6 +519,37 @@ fn rerank_arg_schema(query_required: bool) -> Value {
     json!({ "type": ["object", "boolean"], "description": description })
 }
 
+/// JSON-schema fragment for the optional `max_tokens` argument, shared by all
+/// five search tools (`xerj_search`, `xerj_hybrid_search`,
+/// `xerj_semantic_search`, `xerj_vector_search`, `xerj_code_search`) so the
+/// budget contract cannot drift between them.
+///
+/// The description answers the three questions an agent deciding to spend a
+/// budget has: what a token IS here (one named tokenizer, honestly scoped as
+/// an approximation), what happens when the budget binds (locators, not
+/// silent loss — and an accounting block that says exactly what was cut), and
+/// the floor below which the tool refuses rather than lie.
+fn max_tokens_arg_schema() -> Value {
+    json!({
+        "type": "integer",
+        "minimum": token_budget::MIN_MAX_TOKENS,
+        "description": format!(
+            "Token budget for this response: the returned text NEVER exceeds it. Tokens are \
+             counted with {} — the same word split the engine's own analyzer uses for BM25. \
+             Honest scope: that under-counts model-context subwords (snake_case is ONE token \
+             here), so treat it as a deterministic proxy, not a BPE count. The budget covers \
+             the whole response text (JSON keys and syntax included). Overlapping file:line \
+             passages are deduped first (higher-ranked wins). Hits that no longer fit are \
+             listed as LOCATORS ONLY (file:line, index/id) rather than dropped, and the \
+             response's `_token_budget` block accounts for every hit: kept, locator-only, \
+             deduped, dropped. Errors are never truncated — a refusal you cannot read \
+             end-to-end is worse than a long response. Minimum {}.",
+            token_budget::TOKENIZER_NAME,
+            token_budget::MIN_MAX_TOKENS,
+        )
+    })
+}
+
 /// The ten tool specifications advertised via `tools/list`. Input schemas are
 /// plain JSON Schema; every property maps onto a field the engine accepts.
 ///
@@ -531,7 +572,9 @@ pub fn tool_specs() -> Value {
                  Optional `rerank` adds a second stage that re-judges the top hits with \
                  an external relevance model — read that argument's description before \
                  using it: it needs a provider the operator configured, and it sends \
-                 document text off the machine.",
+                 document text off the machine. \
+                 Pass `max_tokens` to cap the response at a token budget (never exceeded; \
+                 see that argument for the tokenizer and the locator-only rule).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -549,7 +592,8 @@ pub fn tool_specs() -> Value {
                     "from": { "type": "integer", "description": "Offset for pagination." },
                     "sort": { "description": "ES sort clause (array or object)." },
                     "_source": { "description": "Source filtering (bool, field, or {includes,excludes})." },
-                    "rerank": rerank_arg_schema(false)
+                    "rerank": rerank_arg_schema(false),
+                    "max_tokens": max_tokens_arg_schema()
                 }
             }
         },
@@ -559,7 +603,9 @@ pub fn tool_specs() -> Value {
                 "Meaning-based search over a `semantic_text` field. The query text is \
                  embedded SERVER-SIDE by XERJ's built-in lexical embedder (no external \
                  API key), then matched by vector similarity. Proxies POST /{index}/_search \
-                 with {\"query\":{\"semantic\":{...}}}.",
+                 with {\"query\":{\"semantic\":{...}}}. \
+                 Pass `max_tokens` to cap the response at a token budget (never exceeded; \
+                 see that argument for the tokenizer and the locator-only rule).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -567,7 +613,8 @@ pub fn tool_specs() -> Value {
                     "field": { "type": "string", "description": "Name of the semantic_text field." },
                     "query": { "type": "string", "description": "Natural-language query text to embed and match." },
                     "k": { "type": "integer", "description": "Number of nearest results (default 10)." },
-                    "filter": { "type": "object", "description": "Optional ES query clause applied as a pre-filter." }
+                    "filter": { "type": "object", "description": "Optional ES query clause applied as a pre-filter." },
+                    "max_tokens": max_tokens_arg_schema()
                 },
                 "required": ["index", "field", "query"]
             }
@@ -581,7 +628,9 @@ pub fn tool_specs() -> Value {
                  official bench query; num_candidates sets the beam width (floored at \
                  800). Filtered kNN, non-cosine metrics, SQ8 fields, and small indexes \
                  run an exact brute-force scan. \
-                 Proxies POST /{index}/_search with a top-level {\"knn\":{...}}.",
+                 Proxies POST /{index}/_search with a top-level {\"knn\":{...}}. \
+                 Pass `max_tokens` to cap the response at a token budget (never exceeded; \
+                 see that argument for the tokenizer and the locator-only rule).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -594,7 +643,8 @@ pub fn tool_specs() -> Value {
                     },
                     "k": { "type": "integer", "description": "Number of nearest neighbours (default 10)." },
                     "num_candidates": { "type": "integer", "description": "Optional candidate pool size." },
-                    "filter": { "type": "object", "description": "Optional ES query clause applied as a pre-filter." }
+                    "filter": { "type": "object", "description": "Optional ES query clause applied as a pre-filter." },
+                    "max_tokens": max_tokens_arg_schema()
                 },
                 "required": ["index", "field", "query_vector"]
             }
@@ -608,7 +658,9 @@ pub fn tool_specs() -> Value {
                  {\"query\":{\"hybrid\":{\"queries\":[...],\"fusion\":...}}}. \
                  Optional `rerank` re-judges the fused top hits with an external \
                  relevance model; here `rerank.query` is REQUIRED, because a hybrid \
-                 search has several sub-queries and no single question to read.",
+                 search has several sub-queries and no single question to read. \
+                 Pass `max_tokens` to cap the response at a token budget (never exceeded; \
+                 see that argument for the tokenizer and the locator-only rule).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -633,7 +685,8 @@ pub fn tool_specs() -> Value {
                         "description": "Fusion strategy (default rrf)."
                     },
                     "size": { "type": "integer", "description": "Max fused hits to return." },
-                    "rerank": rerank_arg_schema(true)
+                    "rerank": rerank_arg_schema(true),
+                    "max_tokens": max_tokens_arg_schema()
                 },
                 "required": ["index", "queries"]
             }
@@ -837,6 +890,8 @@ pub fn tool_specs() -> Value {
                 "warnings — AGPL/SSPL/Elastic/BUSL/GPL/LGPL/MPL sources are approach-only. ",
                 "Refuses indices older than 30 days (override with stale_ok). ",
                 "A no-match is NOT an error: it says the corpus is wrong for the task. ",
+                "Pass `max_tokens` to cap the response at a token budget (never exceeded; ",
+                "see that argument for the tokenizer and the locator-only rule). ",
                 "Corpora: `xerj corpus list`."),
             "inputSchema": {
                 "type": "object",
@@ -849,7 +904,8 @@ pub fn tool_specs() -> Value {
                     "full": { "type": "integer", "description": "Max chars per passage (default 800; 0 = file head only)." },
                     "no_symbol": { "type": "boolean", "description": "Window selection instead of the matching definition." },
                     "stale_ok": { "type": "boolean", "description": "Override the 30-day staleness refusal." },
-                    "licence_policy": { "type": "string", "enum": ["warn", "strict"], "description": "strict strips passage text from restricted-licence hits, keeping locator + warning (default warn)." }
+                    "licence_policy": { "type": "string", "enum": ["warn", "strict"], "description": "strict strips passage text from restricted-licence hits, keeping locator + warning (default warn)." },
+                    "max_tokens": max_tokens_arg_schema()
                 },
                 "required": ["corpus", "query"]
             }
@@ -874,6 +930,23 @@ async fn call_tool(ctx: &Ctx, msg: &Value) -> Value {
         .cloned()
         .unwrap_or_else(|| json!({}));
 
+    // #1058: `max_tokens` is enforced PROXY-SIDE on the response — the engine
+    // never sees it (the builders copy only their own known keys), so the
+    // request bodies are bit-identical with and without a budget. Only the
+    // four `_search`-proxying tools take it here; `xerj_code_search` reads it
+    // itself and budgets its rendered text.
+    let budget = if matches!(
+        name,
+        "xerj_search" | "xerj_hybrid_search" | "xerj_semantic_search" | "xerj_vector_search"
+    ) {
+        match token_budget::opt_max_tokens(&args) {
+            Ok(b) => b,
+            Err(msg) => return tool_text(msg, true),
+        }
+    } else {
+        None
+    };
+
     let result = match name {
         "xerj_search" => build_search(&args),
         "xerj_semantic_search" => build_semantic(&args),
@@ -890,7 +963,7 @@ async fn call_tool(ctx: &Ctx, msg: &Value) -> Value {
     };
 
     match result {
-        Ok((method, path, body)) => engine_request(ctx, method, &path, body).await,
+        Ok((method, path, body)) => engine_request(ctx, method, &path, body, budget).await,
         Err(msg) => tool_text(msg, true),
     }
 }
@@ -1441,6 +1514,13 @@ async fn run_code_search(ctx: &Ctx, args: &Value) -> Value {
         Some(q) if !q.is_empty() => q.to_string(),
         _ => return tool_text("xerj_code_search: `query` is required", true),
     };
+    // #1058: the budget is enforced on the RENDERED text (this tool's payload
+    // is the shared renderer's output, not the engine JSON). Refused here so
+    // a mistyped budget never silently means "no budget".
+    let budget = match token_budget::opt_max_tokens(args) {
+        Ok(b) => b,
+        Err(msg) => return tool_text(format!("xerj_code_search: {msg}"), true),
+    };
     let mut p = xerj_common::xccode::CodeParams::new(&corpus, &query);
     if let Some(k) = args.get("k") {
         match k.as_u64().filter(|n| (1..=50).contains(n)) {
@@ -1500,6 +1580,14 @@ async fn run_code_search(ctx: &Ctx, args: &Value) -> Value {
         text.push('\n');
     }
     text.push_str(&out.text);
+    // Budget only successful retrievals — errors pass through in full. A
+    // no-match is not an error, but its text has no hit blocks, so the text
+    // budgeter passes it through unchanged unless it alone exceeds the budget.
+    if !out.is_error {
+        if let Some(max_tokens) = budget {
+            text = token_budget::budget_code_text(&text, max_tokens);
+        }
+    }
     tool_text(text, out.is_error)
 }
 
@@ -1521,7 +1609,18 @@ fn code_root() -> std::path::PathBuf {
 /// an MCP tool result. Non-2xx responses (and transport errors) come back as
 /// `isError:true` with the engine's text verbatim, so the agent sees exactly
 /// what the engine said (including its "not a graph database" refusals).
-async fn engine_request(ctx: &Ctx, method: Method, path: &str, body: Option<Value>) -> Value {
+///
+/// `budget` (#1058): when `Some(max_tokens)`, a SUCCESSFUL response is held
+/// to that token budget by [`token_budget::budget_json_response`]. Errors are
+/// never budgeted — a refusal the agent cannot read end-to-end is worse than
+/// a long response, and refusals are small anyway.
+async fn engine_request(
+    ctx: &Ctx,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+    budget: Option<usize>,
+) -> Value {
     let url = format!("{}{}", ctx.base_url, path);
     let mut req = match method {
         Method::Get => ctx.client.get(&url),
@@ -1540,7 +1639,12 @@ async fn engine_request(ctx: &Ctx, method: Method, path: &str, body: Option<Valu
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if status.is_success() {
-                tool_text(text, false)
+                match budget {
+                    Some(max_tokens) => {
+                        tool_text(token_budget::budget_json_response(&text, max_tokens), false)
+                    }
+                    None => tool_text(text, false),
+                }
             } else {
                 tool_text(format!("XERJ returned HTTP {status}: {text}"), true)
             }
@@ -1791,6 +1895,180 @@ mod tests {
                     .map(|r| r.iter().any(|r| r == "rerank"))
                     .unwrap_or(false),
                 "{tool}: `rerank` is optional"
+            );
+        }
+    }
+
+    // ── `max_tokens` argument (#1058) ─────────────────────────────────────
+
+    #[test]
+    fn the_argument_never_reaches_the_engine() {
+        // The budget is enforced proxy-side on the RESPONSE; a request body
+        // that carried it would be forwarded to a node that never heard of
+        // it (and might 400 as an unknown key). Builders copy only their own
+        // known keys, so `max_tokens` cannot leak — pinned per builder.
+        let with_budget = json!({ "max_tokens": 200 });
+        let (_, _, body) = built(build_search(&with_budget));
+        assert!(body.get("max_tokens").is_none(), "{body}");
+        let (_, _, body) = built(build_semantic(&json!({
+            "index": "kb", "field": "f", "query": "q", "max_tokens": 200
+        })));
+        assert!(body.get("max_tokens").is_none(), "{body}");
+        let (_, _, body) = built(build_vector(&json!({
+            "index": "e", "field": "v", "query_vector": [0.1], "max_tokens": 200
+        })));
+        assert!(body.get("max_tokens").is_none(), "{body}");
+        let (_, _, body) = built(build_hybrid(&json!({
+            "index": "h", "queries": [{ "query": { "match": { "b": "x" } } }], "max_tokens": 200
+        })));
+        assert!(body.get("max_tokens").is_none(), "{body}");
+    }
+
+    #[test]
+    fn exactly_the_five_search_tools_advertise_max_tokens() {
+        let specs = tool_specs();
+        let search_tools = [
+            "xerj_search",
+            "xerj_hybrid_search",
+            "xerj_semantic_search",
+            "xerj_vector_search",
+            "xerj_code_search",
+        ];
+        for tool in specs.as_array().unwrap() {
+            let name = tool["name"].as_str().unwrap();
+            let prop = &tool["inputSchema"]["properties"]["max_tokens"];
+            if search_tools.contains(&name) {
+                assert!(prop.is_object(), "{name} must advertise `max_tokens`");
+                let d = prop["description"].as_str().expect("described");
+                // One NAMED tokenizer, stated in the description, plus the
+                // never-exceed promise and the floor.
+                assert!(
+                    d.contains(token_budget::TOKENIZER_NAME),
+                    "{name}: the tokenizer must be named: {d}"
+                );
+                assert!(d.contains("NEVER exceeds"), "{name}: {d}");
+                assert!(d.contains("LOCATORS ONLY"), "{name}: {d}");
+                assert!(
+                    d.contains(&token_budget::MIN_MAX_TOKENS.to_string()),
+                    "{name}: the floor must be stated: {d}"
+                );
+                assert_eq!(
+                    prop["minimum"],
+                    token_budget::MIN_MAX_TOKENS,
+                    "{name}: schema minimum matches the parsed floor"
+                );
+                assert!(
+                    !tool["inputSchema"]["required"]
+                        .as_array()
+                        .map(|r| r.iter().any(|r| r == "max_tokens"))
+                        .unwrap_or(false),
+                    "{name}: `max_tokens` is optional"
+                );
+            } else {
+                assert!(
+                    prop.is_null(),
+                    "{name} is not a search tool; no `max_tokens` there (#{name})"
+                );
+            }
+        }
+    }
+
+    /// The dispatch seam: a mistyped or under-floor budget is an `isError`
+    /// tool result BEFORE any request is made (no node needed for this test).
+    #[tokio::test]
+    async fn a_bad_budget_is_refused_at_dispatch() {
+        let ctx = Ctx {
+            client: reqwest::Client::new(),
+            base_url: "http://127.0.0.1:1".to_string(),
+            auth: None,
+        };
+        for tool in [
+            "xerj_search",
+            "xerj_hybrid_search",
+            "xerj_semantic_search",
+            "xerj_vector_search",
+        ] {
+            for bad in [json!("500"), json!(31)] {
+                let msg = json!({
+                    "params": { "name": tool, "arguments": {
+                        // Minimal valid args per tool, so the ONLY failure is
+                        // the budget.
+                        "index": "i",
+                        "field": "f",
+                        "query": "q",
+                        "query_vector": [0.1],
+                        "queries": [{ "query": { "match": { "b": "x" } } }],
+                        "max_tokens": bad
+                    } }
+                });
+                let res = call_tool(&ctx, &msg).await;
+                assert_eq!(res["isError"], true, "{tool} {bad}: {res}");
+                let text = res["content"][0]["text"].as_str().unwrap();
+                assert!(text.contains(">= 32"), "{tool} {bad}: {text}");
+            }
+        }
+        // And the code-search surface refuses the same way, naming the tool.
+        let msg = json!({
+            "params": { "name": "xerj_code_search", "arguments": {
+                "corpus": "c", "query": "q", "max_tokens": 31
+            } }
+        });
+        let res = call_tool(&ctx, &msg).await;
+        assert_eq!(res["isError"], true);
+        assert!(res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("xerj_code_search"));
+    }
+
+    /// #1058's hard rule, per tool: run a tool-shaped engine response through
+    /// the exact budgeter its dispatch path applies, at a binding budget, and
+    /// the result NEVER exceeds it. (The full budget sweep across many budgets
+    /// lives in token_budget's own tests; this pins which surface each tool
+    /// uses, so a future rewiring that drops one fails here.)
+    #[test]
+    fn every_search_tool_response_path_enforces_the_budget() {
+        let code_corpus_response = serde_json::to_string(&json!({
+            "took": 3,
+            "hits": { "total": { "value": 3, "relation": "eq" }, "max_score": 9.0,
+                "hits": [
+                    { "_index": "ax-rust", "_id": "a", "_score": 9.0,
+                      "_source": { "ax_path": "repo/a.rs", "line": 10,
+                                   "body": "pub fn a() { ".to_string().repeat(20) } },
+                    { "_index": "ax-rust", "_id": "b", "_score": 8.0,
+                      "_source": { "ax_path": "repo/b.rs", "line": 20,
+                                   "body": "pub fn b() { ".to_string().repeat(20) } },
+                    { "_index": "ax-rust", "_id": "c", "_score": 7.0,
+                      "_source": { "ax_path": "repo/c.rs", "line": 30,
+                                   "body": "pub fn c() { ".to_string().repeat(20) } }
+                ] }
+        }))
+        .unwrap();
+        for (tool, engine_text) in [
+            ("xerj_search", code_corpus_response.as_str()),
+            ("xerj_hybrid_search", code_corpus_response.as_str()),
+            ("xerj_semantic_search", code_corpus_response.as_str()),
+            ("xerj_vector_search", code_corpus_response.as_str()),
+        ] {
+            for max_tokens in [48usize, 96, 160] {
+                let out = token_budget::budget_json_response(engine_text, max_tokens);
+                assert!(
+                    token_budget::count_tokens(&out) <= max_tokens,
+                    "{tool} @ {max_tokens}: used {}",
+                    token_budget::count_tokens(&out)
+                );
+                let v: serde_json::Value =
+                    serde_json::from_str(&out).expect("still one JSON document");
+                assert!(v["_token_budget"].is_object(), "{tool}: accounting present");
+            }
+        }
+        // The rendered-text surface (xerj_code_search) uses the text budgeter.
+        let rendered = "\n─── repo/a.rs:10  (score 9.00, Apache-2.0)\n    [fn a — 300 of 12,000 chars]\nfn a() { long body here }\n─── repo/b.rs:20  (score 8.00)\nfn b() { long body here }\n\n2 passages from 'x'\nCite file:line for anything you rely on.\n";
+        for max_tokens in [48usize, 96, 160] {
+            let out = token_budget::budget_code_text(rendered, max_tokens);
+            assert!(
+                token_budget::count_tokens(&out) <= max_tokens,
+                "xerj_code_search @ {max_tokens}"
             );
         }
     }

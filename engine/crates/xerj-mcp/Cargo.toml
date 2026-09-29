@@ -38,6 +38,13 @@ xerj-common = { path = "../xerj-common" }
 # ceilings and the builder refuses exactly what the node would refuse — the
 # two cannot drift. A light leaf: it adds no dependency this crate lacks.
 xerj-rerank = { path = "../xerj-rerank" }
+# The `max_tokens` budget (#1058) counts with XERJ's StandardTokenizer —
+# UAX #29 word boundaries via `unicode_words()`. Depended on directly (the
+# same crate and the same call xerj-fts's StandardTokenizer makes,
+# engine/crates/xerj-fts/src/analyzer.rs) rather than pulling the whole FTS
+# stack into this thin proxy; the count is identical by construction.
+# See src/token_budget.rs.
+unicode-segmentation = "1"
 
 [dev-dependencies]
 # The loopback admin-key fallback tests sandbox cwd + HOME so discovery sees
