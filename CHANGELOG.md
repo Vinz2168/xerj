@@ -36,6 +36,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   published schema `landing/docs/agents/schemas/mcp-tools.json` was
   regenerated from the binary; `published_schema_drift` stays green. (PR
   [#1067](https://github.com/xerj-org/xerj/pull/1067).)
+### Fixed
+
+- **Release notes now compare against the previous engine release instead of
+  the latest corpus pack.** GitHub anchors auto-generated notes ("Full
+  Changelog") on the most recently published release, so since the daily
+  `pack-rust-vulns-*` scheduled releases started, every cut's compare base
+  drifted: `v1.0.0-rc.78` shipped comparing
+  `pack-rust-vulns-2026-09-29...v1.0.0-rc.78` and had to be hand-patched via
+  REST. The release job now computes the base itself (highest `v[0-9]*` tag by
+  version sort that is not the tag being cut) and pre-renders the notes with an
+  explicit `previous_tag_name`, falling back to auto-generation only when no
+  previous v-tag exists (PR
+  [#1069](https://github.com/xerj-org/xerj/pull/1069)).
 
 ### Documentation
 
