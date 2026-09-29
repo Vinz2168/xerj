@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that section's issue links against the live tracker at every cut), and the
   corpus-hub and mail-ingest lines state the closed statuses (PR
   [#1053](https://github.com/xerj-org/xerj/pull/1053)).
+- Filed the ten-item program to the first official release
+  ([discussion #1054](https://github.com/xerj-org/xerj/discussions/1054)) as
+  issues #1055–#1064 with acceptance criteria, measured gates, and code refs
+  verified against the tree (two ref paths corrected; the plan's rc.78 targets
+  slid to rc.79 — rc.78 shipped before the discussion posted); created
+  milestones rc.79/rc.80/v1.1.0 and labels (mcp, agents, autoindex, search,
+  systemone, zero-token, roadmap); stood up the pinned plan tracker
+  [#1065](https://github.com/xerj-org/xerj/issues/1065); rolled ROADMAP's
+  *In flight* and GA-program sections to match and pointed the two zero-token
+  items it subsumes at their new trackers (PR
+  [#1066](https://github.com/xerj-org/xerj/pull/1066)).
 
 ## [1.0.0-rc.78] - 2026-09-29
 
