@@ -668,6 +668,62 @@ pub fn elect_time_field(specs: &[FieldSpec]) -> Option<String> {
         .map(|s| s.name.clone())
 }
 
+/// The analyzer autoindex declares as `settings.analysis.analyzer.default`
+/// when a dataset's sample carries profiler-marked semantic prose (#1059).
+///
+/// `"stemmer"` is the built-in `standard` pipeline (Unicode word split +
+/// lowercase) plus the Snowball English stemmer and NOTHING else — see
+/// `AnalyzerRegistry::register_defaults` (xerj-fts). It is the minimal delta
+/// from today's default: the only change to the term space is that plurals
+/// and inflections collapse onto their stems, which is exactly the recall the
+/// issue is after. `"english"` was considered and rejected as the default
+/// because it additionally drops stop words, which changes every document's
+/// BM25 length norm — a scoring change, not just a recall change, and one
+/// that would have to be re-measured against the same BEIR arms before it
+/// could be honest.
+pub const STEMMING_TEXT_ANALYZER: &str = "stemmer";
+
+/// Does this dataset's index get the stemming analyzer at create time?
+///
+/// `Some(STEMMING_TEXT_ANALYZER)` when at least one field the profiler typed
+/// as text (`text` or `semantic_text`) is marked semantic by the SAME
+/// measured predicate that gates the embedding election —
+/// [`FieldAcc::looks_natural_language`]: `word_ratio >= 0.55 &&
+/// mean_tokens >= 3.0`. That predicate is what separates prose from
+/// identifiers (measured: `word_ratio` 0.00 for `trace_id`/`user_id`/
+/// numerics, 0.78–1.00 for prose, log messages and source code — see the
+/// `word_tokens` field's doc comment), so a dataset of identifiers or enums
+/// keeps the unstemmed `standard` analyzer and its exact term space.
+///
+/// The unit of the declaration is the INDEX, not the field: the honoured
+/// surface (#937, fixed by #991) is a declared DEFAULT analyzer, which the
+/// engine applies to every `Text` field at flush, segment query and merge
+/// (keyword fields keep the whole-value `keyword` analyzer regardless), so a
+/// dataset with any semantic prose gets stemming on all of its text fields —
+/// including non-elected ones like `defs`. That is deliberate: stemming an
+/// identifier token is a no-op or a consistent fold on both sides of the
+/// match, and the alternative (a per-field `analyzer` in the mapping) is the
+/// accepted-and-ignored surface the #937 audit named as still open.
+///
+/// This does NOT consult `no_semantic`: stemming is a LEXICAL-arm property
+/// (BM25 recall on plurals), and a `--no-semantic` run is precisely the run
+/// whose retrieval is all lexical.
+pub fn elected_default_analyzer(
+    specs: &[FieldSpec],
+    fields: &HashMap<String, FieldAcc>,
+) -> Option<&'static str> {
+    specs
+        .iter()
+        .any(|s| {
+            matches!(s.es_type.as_str(), "text" | "semantic_text")
+                && fields
+                    .get(&s.name)
+                    .map(|a| a.looks_natural_language())
+                    .unwrap_or(false)
+        })
+        .then_some(STEMMING_TEXT_ANALYZER)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -872,5 +928,88 @@ mod tests {
         fields.insert("addr".to_string(), acc);
         let specs = infer_fields(&fields, 30, true);
         assert_eq!(specs[0].semantic, None, "neither side holds 90% of 30");
+    }
+
+    /// #1059: a dataset whose text field the profiler marks semantic
+    /// (`looks_natural_language` — the same measured predicate that gates the
+    /// embedding election) elects the stemming analyzer; a dataset of
+    /// identifiers, enums and numerics does not, keeping `standard`'s exact
+    /// term space.
+    #[test]
+    fn a_semantic_prose_dataset_elects_the_stemming_analyzer_and_an_id_dataset_does_not() {
+        let prose = "The connection pool retries every failed handshake with backoff. \
+                     Each worker owns one socket and never shares it across threads.";
+        let mut prose_acc = FieldAcc::default();
+        for _ in 0..20 {
+            prose_acc.add(&Value::String(format!("{prose} {prose}")));
+        }
+        assert!(prose_acc.looks_natural_language());
+
+        // Identifier/enum/numeric shapes: word_ratio ~0 — the measured
+        // `trace_id` case the `word_tokens` doc comment records.
+        let mut id_acc = FieldAcc::default();
+        for i in 0..20 {
+            id_acc.add(&Value::String(format!(
+                "741e7b6b-dbd2-4a7f-93a9-4ba50fb561{i:02}"
+            )));
+            id_acc.add(&Value::Number(i.into()));
+        }
+        assert!(!id_acc.looks_natural_language());
+
+        let mut fields = HashMap::new();
+        fields.insert("body".to_string(), prose_acc);
+        fields.insert("trace_id".to_string(), id_acc.clone());
+        let specs = infer_fields(&fields, 40, false);
+        assert_eq!(
+            elected_default_analyzer(&specs, &fields),
+            Some("stemmer"),
+            "{specs:#?}"
+        );
+
+        // The id-only dataset elects nothing.
+        let mut id_fields = HashMap::new();
+        id_fields.insert("trace_id".to_string(), id_acc);
+        let id_specs = infer_fields(&id_fields, 20, true);
+        assert_eq!(elected_default_analyzer(&id_specs, &id_fields), None);
+    }
+
+    /// #1059: a prose field that the profiler marks semantic but that the
+    /// election left LEXICAL (here: `--no-semantic` elects no
+    /// `semantic_text`) still elects the stemming analyzer — stemming is a
+    /// lexical-arm property and does not ride the embedding election.
+    #[test]
+    fn a_no_semantic_run_still_elects_the_stemming_analyzer_for_prose() {
+        let prose = "The connection pool retries every failed handshake with backoff. \
+                     Each worker owns one socket and never shares it across threads.";
+        let mut acc = FieldAcc::default();
+        for _ in 0..20 {
+            acc.add(&Value::String(format!("{prose} {prose}")));
+        }
+        let mut fields = HashMap::new();
+        fields.insert("body".to_string(), acc);
+        let specs = infer_fields(&fields, 40, true);
+        assert_eq!(specs[0].es_type, "text", "no_semantic keeps it lexical");
+        assert_eq!(elected_default_analyzer(&specs, &fields), Some("stemmer"));
+    }
+
+    /// #1059: prose sampled on a field the profiler types KEYWORD does not
+    /// elect the analyzer through that field — the declaration targets text
+    /// fields, and a keyword field's whole-value term space must not be part
+    /// of the decision. (A dataset whose ONLY natural language rides keyword
+    /// fields keeps `standard`.)
+    #[test]
+    fn prose_on_a_keyword_typed_field_does_not_elect_the_stemming_analyzer() {
+        let mut acc = FieldAcc::default();
+        for _ in 0..20 {
+            acc.add(&Value::String(
+                "the connection pool retries the failed handshake".into(),
+            ));
+        }
+        assert!(acc.looks_natural_language());
+        let mut fields = HashMap::new();
+        fields.insert("status".to_string(), acc);
+        let specs = infer_fields(&fields, 20, true);
+        assert_eq!(specs[0].es_type, "keyword", "{specs:#?}");
+        assert_eq!(elected_default_analyzer(&specs, &fields), None);
     }
 }

@@ -1827,6 +1827,7 @@ mod tests {
             specs: Vec::new(),
             time_field: None,
             semantic_field: None,
+            text_analyzer: None,
             sampled_records: 0,
             file_count: 0,
         });

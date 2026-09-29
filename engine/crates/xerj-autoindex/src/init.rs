@@ -331,6 +331,14 @@ mod tests {
 
     #[test]
     fn second_run_is_idempotent() {
+        // The pair must see ONE `HOME`: `run_init_in` reads it through
+        // `dirs_home()` to decide whether the Claude skill is in scope, and
+        // the auth-note `Sandbox` tests below swap `HOME` under the same
+        // `ENV_LOCK`. Without the lock, a sandboxed test landing between the
+        // two runs makes the first see no `~/.claude` (skill out of scope)
+        // and the second see one (skill "wrote") — a scheduling-dependent
+        // failure, not an idempotency failure.
+        let _env = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let d = tmp();
         run_init_in(d.path(), "http://x:1", false).unwrap();
         let first = fs::read_to_string(d.path().join("AGENTS.md")).unwrap();

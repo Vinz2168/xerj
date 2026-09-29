@@ -44,6 +44,28 @@ pub struct PlanDataset {
     pub time_field: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_field: Option<String>,
+    /// The analyzer this dataset's index declares at CREATE time for its text
+    /// fields (#1059): `Some("stemmer")` when the profiler marked at least one
+    /// of the dataset's text fields as natural-language prose, else `None`.
+    ///
+    /// It rides the PLAN and not [`crate::infer::FieldSpec`] on purpose: the
+    /// specs are hashed into every committed generation's `schema_identity`
+    /// (`generation_contract_identities` serializes `dataset.specs` verbatim),
+    /// so a new serialized spec field would move that digest for every
+    /// prose-carrying dataset and abort the next run of every existing state
+    /// dir on the incremental no-change arm — the exact upgrade-abort class
+    /// the frozen-contract work removed. This struct is serialized into the
+    /// journal but the identity digests read it through named keys only, so a
+    /// new field here is invisible to them.
+    ///
+    /// `#[serde(default)]` so a plan frozen by an older build deserializes
+    /// with `None` — which is also the honest value: an index that an older
+    /// build created was written with the `standard` analyzer, and the
+    /// analysis settings of an existing index are immutable server-side, so
+    /// the declaration only ever lands on an index THIS build creates
+    /// (`install_dataset_mappings`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_analyzer: Option<String>,
     pub sampled_records: u64,
     pub file_count: usize,
 }
@@ -1581,6 +1603,7 @@ mod sync_journal_tests {
             specs: Vec::new(),
             time_field: None,
             semantic_field: None,
+            text_analyzer: None,
             sampled_records: 1,
             file_count: 0,
         });
@@ -1600,6 +1623,7 @@ mod sync_journal_tests {
                 specs: Vec::new(),
                 time_field: None,
                 semantic_field: None,
+                text_analyzer: None,
                 sampled_records: 1,
                 file_count: 1,
             });
