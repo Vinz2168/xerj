@@ -1,0 +1,53 @@
+# Data provenance — benchmarks/ask-plan
+
+STATUS: DESIGN, NOTHING MEASURED. This directory ships raw public datasets,
+licence notes, and derivation scripts. It contains zero measured numbers; every
+F1 / token / latency figure in the README is a gate definition, not a result.
+
+## What is here
+
+| dataset | index the harness builds | docs | raw file | sha256 (first 16) |
+|---|---|---:|---|---|
+| usgs-earthquakes | `ax-usgs-earthquakes` | 655 | `raw/usgs-earthquakes/usgs-earthquakes.csv` | `2f52fcc27e5e199b` |
+| nasa-exoplanets | `ax-nasa-exoplanets` | 3,000 | `raw/nasa-exoplanets/nasa-exoplanets.csv` | `2d18679052b6c876` |
+| gapminder | `ax-gapminder` | 1,704 | `raw/gapminder/gapminder.tsv` | `f74275b4a2f4a7c8` |
+
+All three were downloaded from this sandbox on 2026-09-29 (UTC) (HTTP 200, full
+body); the pinned URLs and full sha256s live in each directory's
+`provenance.json` and are re-checked by `scripts/fetch_data.py --check`.
+Licences: [usgs-earthquakes](./raw/usgs-earthquakes/LICENCE) (USGS public
+domain), [nasa-exoplanets](./raw/nasa-exoplanets/LICENCE) (NASA public
+domain by statute + requested acknowledgment, no explicit licence statement on
+the service pages — read the caveat there),
+[gapminder](./raw/gapminder/LICENCE) (CC BY 4.0). All three permit
+redistribution; the USGS and Gapminder credits are printed in their licence
+notes as requested.
+
+**Why the raw files are committed:** gold result sets must be reproducible from
+pinned bytes. Both upstreams move (the exoplanet composite table refreshes
+monthly; USGS revises historical windows as solutions improve), so the committed
+snapshot — not the live URL — is the canonical input to
+`scripts/derive_pairs.py`. `scripts/fetch_data.py` exists to re-acquire and to
+report drift, not to redefine gold.
+
+## Rejected during acquisition (and why, for the record)
+
+- SSA baby names (`ssa.gov/oact/babynames/names.zip`) — HTTP 403 from this
+  sandbox.
+- NHTSA recalls flat file (`static.nhtsa.gov/.../FLAT_RCL.zip`) — HTTP 404.
+- BLS CPI series (`download.bls.gov`) — HTTP 403.
+
+These were rejected on reachability, not licence; none is redistributed here.
+
+## Layout
+
+```
+data/
+  raw/<dataset>/            committed upstream snapshot + LICENCE + provenance.json
+  gold/pairs.jsonl          >= 200 (prompt, gold result set) pairs — GENERATED,
+                            deterministically, by scripts/derive_pairs.py; never
+                            edited by hand and never derived from an engine
+  gold/negative-prompts.jsonl  prompts naming values that do NOT exist in the data;
+                            #1056 says these must 422 naming the phrase. Not counted
+                            in the 200; DESIGN only.
+```

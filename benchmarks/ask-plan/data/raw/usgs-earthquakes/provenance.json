@@ -1,0 +1,9 @@
+{
+ "dataset": "usgs-earthquakes",
+ "url": "https://earthquake.usgs.gov/fdsnws/event/1/query?format=csv&starttime=2026-09-01&endtime=2026-09-08&minmagnitude=2.5&orderby=time-asc",
+ "file": "usgs-earthquakes.csv",
+ "sha256": "2f52fcc27e5e199b3ecae7b232a35c55980e91e30a0b92ca60ec3c0415df60f9",
+ "bytes": 124525,
+ "fetched_utc": "2026-09-29T20:13:22+00:00",
+ "licence": "LICENCE (in this directory)"
+}

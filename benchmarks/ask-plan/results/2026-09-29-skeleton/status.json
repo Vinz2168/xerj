@@ -1,0 +1,6 @@
+{
+ "endpoint": "POST /_ask",
+ "http": 405,
+ "measured": false,
+ "note": "POST /_ask is not implemented (issue #1056 open); the harness ran zero measurement passes"
+}
