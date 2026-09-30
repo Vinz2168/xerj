@@ -37,6 +37,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tier ships absent, not merely flagged off, until release.yml enables the
   feature.
 
+- **Console: one knowledge surface — size, structure, relations and
+  capabilities after indexing (PR
+  [#1095](https://github.com/xerj-org/xerj/pull/1095)).** The moment
+  `xerj brain` finishes, the Console's landing view (CORPUS) now answers
+  the three questions a person has, in one session-authorized read —
+  `GET /_xerj-console/api/v1/knowledge` (`xerj-console-api/src/knowledge.rs`):
+  whole-corpus totals (datasets/records/files/source bytes plus the
+  engine's live doc count), every catalog dataset with its FULL field list
+  (type, semantic flag, cardinality, null%, coverage, example values — the
+  same `FieldSpec` data `xerj autoindex map` serves agents) joined with
+  live doc counts and on-disk store bytes, the cross-dataset relations
+  autoindex actually inferred (key overlaps, time alignments — none
+  inferred is shown as none, never guessed), other user indices, and a
+  capability strip grounded in real surfaces (console routes, CLI
+  commands, `POST /_ask`, `POST /_decide`; `graph` only when a readable
+  brain exists, `ask`/`map` only when a catalog exists). Simplifications
+  in the same PR: the fabricated clusters/index/field mocks behind the
+  DATA section are deleted (real-only, failures yield empty lists), its
+  field table drops type-guessed encoding/ratio columns, Second Brain is
+  reworded into the graph layer of the corpus rather than a notes-flavored
+  mode, and `xerj mcp` help now says 13 tools (it said 11). Pinned on
+  payloads by `xerj-console-api/tests/knowledge_surface.rs` (5) and
+  `xerj-ux/test/knowledge-surface.test.mjs` (7).
 - **`xerj-decide-v1`: the open tier-2 decide model — training/export harness,
   measured eval card, upload-ready bundle
   ([#1064](https://github.com/xerj-org/xerj/issues/1064), PR
