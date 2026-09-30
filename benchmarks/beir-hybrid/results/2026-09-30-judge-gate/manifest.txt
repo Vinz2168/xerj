@@ -76,3 +76,16 @@ Incidents during the run (recorded, none change a gate number)
      by SIGKILL of the old process + clean restart before ANY measurement;
      SciFact's index replayed from WAL and counted 5,183 both before and
      after. No measurement ran against the contended state.
+
+FiQA bm30-arms re-run (2026-09-30, verifier follow-up):
+  The first FiQA quality attempt aborted mid-bm30+judge (node died under the
+  runaway hybrid client — fiqa-quality-aborted.log), leaving the cited
+  0.1650 without a raw log. Re-run clean: same fiqa.zip (sha256 above),
+  fresh throwaway node --embed-mode lexical :9646, load.py mapping identical,
+  ARMS=bm30,bm30+judge (hybrid arms excluded: 13-26 s/query, issue #1091).
+  bm30 0.2380/0.2382/0.2382 (run-1 warm-up wobble 0.0002; the aborted run's
+  single bm30 pass was 0.2382); bm30+judge 0.1650/0.1650/0.1650, spread
+  0.0000, W/L/T 86/209/353, mean per-query delta -0.0731. Raw log:
+  fiqa-quality-bm30arms.log. The judge arm is embedder-independent (the
+  stage scores BM25 shortlists), which is why the lexical boot is valid for
+  these two arms; the hybrid arms were never measured on FiQA.
