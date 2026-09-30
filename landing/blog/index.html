@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>XERJ.ai — Blog: the engineering log</title>
-<meta name="description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
+<meta name="description" content="Measured results with the losses left in: the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@400;700;800;900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -16,7 +16,7 @@
 <meta property="og:site_name" content="XERJ.ai">
 <meta property="og:type" content="website">
 <meta property="og:title" content="XERJ.ai — Blog: the engineering log">
-<meta property="og:description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
+<meta property="og:description" content="Measured results with the losses left in: the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
 <meta property="og:url" content="https://xerj.org/blog/">
 <meta property="og:image" content="https://xerj.org/og/xerj-card.png">
 <meta property="og:image:width" content="1200">
@@ -25,7 +25,7 @@
 <meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="XERJ.ai — Blog: the engineering log">
-<meta name="twitter:description" content="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
+<meta name="twitter:description" content="Measured results with the losses left in: the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
 <meta name="twitter:image" content="https://xerj.org/og/xerj-card.png">
 <script type="application/ld+json">
 {
@@ -59,11 +59,11 @@
   "@context": "https://schema.org",
   "@type": "CollectionPage",
   "name": "XERJ.ai — Blog: the engineering log",
-  "description": "Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
+  "description": "Measured results with the losses left in: the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
   "url": "https://xerj.org/blog/",
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
-  "dateModified": "2026-09-27",
+  "dateModified": "2026-09-30",
   "isPartOf": {
     "@id": "https://xerj.org/#website"
   },
@@ -126,6 +126,61 @@
   <!-- Reverse-chronological by hand while there is one post; new posts PREPEND.
        Move to a generator only past ~10 posts. -->
   <ol class="blog-list">
+    <li>
+      <a class="bl-card" href="/blog/the-rc80-gates">
+        <!-- Bar widths are normalized WITHIN each row against that row's own
+             max (the card mixes units — F1, a count, an ECE — so one global
+             denominator would be meaningless). Neutral bar = the bar or the
+             before, accent bar = the measured value, verbatim from the post:
+             /_ask 0.9975 vs bar 0.9 · map 400s 20/30 -> 0/30 · ECE 0.3109
+             raw -> 0.0088 isotonic · judge SciFact 0.7045 -> 0.5967 (the row
+             we lose, kept in). -->
+        <div class="bl-preview" aria-hidden="true">
+          <div class="blp-kicker">RELEASE GATES · TEN FEATURES · EIGHT GATES</div>
+          <div class="blp-row">
+            <div class="blp-ds">/_ASK F1</div>
+            <div class="blp-pair">
+              <span class="blp-num">0.9975 <i>measured</i></span><span class="blp-bar a" style="width:100%"></span>
+              <span class="blp-num b">0.9000 <i>the bar</i></span><span class="blp-bar b" style="width:90%"></span>
+            </div>
+          </div>
+          <div class="blp-row">
+            <div class="blp-ds">MAP 400S</div>
+            <div class="blp-pair">
+              <span class="blp-num">20/30 <i>guessed</i></span><span class="blp-bar b" style="width:100%"></span>
+              <span class="blp-num">0/30 <i>map-informed</i></span><span class="blp-bar a" style="width:2%; min-width:3px"></span>
+            </div>
+          </div>
+          <div class="blp-row">
+            <div class="blp-ds">FIQA ECE</div>
+            <div class="blp-pair">
+              <span class="blp-num">0.3109 <i>raw</i></span><span class="blp-bar b" style="width:100%"></span>
+              <span class="blp-num">0.0088 <i>isotonic</i></span><span class="blp-bar a" style="width:2.8%"></span>
+            </div>
+          </div>
+          <div class="blp-row">
+            <div class="blp-ds">JUDGE</div>
+            <div class="blp-pair">
+              <span class="blp-num">0.7045 <i>hybrid</i></span><span class="blp-bar a" style="width:100%"></span>
+              <span class="blp-num b">0.5967 <i>+ judge</i> <span class="blp-chip">&minus;0.108</span></span><span class="blp-bar b" style="width:84.7%"></span>
+            </div>
+          </div>
+          <p class="blp-foot">3 PASS · 3 FAIL · 1 SPLIT · four issues filed (#1091&ndash;#1094) · runs 2026-09-30</p>
+        </div>
+        <div class="bl-meta">
+          <p class="bl-date"><time datetime="2026-09-30">2026-09-30</time> · RELEASE GATES · ENGINEERING</p>
+          <h2 class="bl-title">The rc.80 gates: three passed outright, three failed, one split</h2>
+          <p class="bl-excerpt">The ten-item program shipped, and every gate that could carry a number was run in
+          public. <strong>/_ask</strong> scored macro-F1 <strong>0.9975</strong> at p50 1.129 ms;
+          <strong>xerj_map</strong> took unknown-field 400s from <strong>20/30 to 0/30</strong>; calibration took
+          FiQA ECE from <strong>0.3109 to 0.0088</strong>. The local judge lost everywhere it was measured, the
+          flywheel covered <strong>19.72%</strong> against an 80% bar, and the decide head missed its accuracy
+          bars &mdash; those rows are in the post too, and they filed four issues.</p>
+          <p class="bl-byline">AUTHOR · XERJ ENGINEERING TEAM · PUBLISHED · 2026-09-30</p>
+          <span class="bl-read">READ THE POST &rarr;</span>
+        </div>
+      </a>
+    </li>
     <li>
       <a class="bl-card" href="/blog/one-vulnerability-three-names">
         <!-- Bar widths share ONE denominator, 4,107 envelopes (the max across
