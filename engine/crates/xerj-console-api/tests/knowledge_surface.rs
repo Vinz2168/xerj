@@ -376,7 +376,7 @@ async fn get(app: &TestApp, cookie: Option<&str>) -> (axum::http::StatusCode, Va
     (status, v)
 }
 
-fn data<'a>(v: &'a Value) -> &'a Value {
+fn data(v: &Value) -> &Value {
     v.get("data").expect("console envelope {data}")
 }
 
