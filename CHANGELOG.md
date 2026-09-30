@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **systemone: calibration layer — `p_cal` beside every `p_raw`, published
-  reliability curve ([#1063](https://github.com/xerj-org/xerj/issues/1063)).** A ladder
+  reliability curve ([#1063](https://github.com/xerj-org/xerj/issues/1063), PR
+  [#1080](https://github.com/xerj-org/xerj/pull/1080)).** A ladder
   probability ranks before it odds — on the FiQA rerank baseline a hosted
   noul of 0.93 meant relevance 34% of the time (ECE 0.3109). The new
   `[decisions] calibration = isotonic | temperature` setting (default `none`,
