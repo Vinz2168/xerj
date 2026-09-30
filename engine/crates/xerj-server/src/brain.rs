@@ -644,6 +644,7 @@ fn index_cfg(cfg: &BrainCfg, brain: &str, api_key: Option<String>) -> IndexCfg {
         progress: xerj_autoindex::progress::ProgressMode::Auto,
         progress_interval: None,
         watch: false,
+        label: None,
         debounce: std::time::Duration::from_millis(0),
     }
 }

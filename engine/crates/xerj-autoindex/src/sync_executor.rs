@@ -1825,6 +1825,9 @@ pub fn create_snapshot(
         &crate::progress::Progress::silent(),
         None,
         "",
+        // The source-snapshot wrapper has no plan and therefore never runs
+        // `prepare_artifact`; a labeler would have nothing to vote on.
+        None,
     )
 }
 
@@ -1852,6 +1855,8 @@ pub fn create_prepared_snapshot(
         // source, so the chunker identity they seal is a fixed label.
         None,
         "prepared-records-v1",
+        // Test-only wrapper: no `--label` in these snapshots' contracts.
+        None,
     )
 }
 
@@ -1880,6 +1885,7 @@ pub fn create_prepared_snapshot_reporting(
     pr: &crate::progress::Progress,
     reuse: Option<&SourceSnapshot>,
     chunker_identity: &str,
+    labeler: Option<&crate::label::Labeler>,
 ) -> Result<SourceSnapshot> {
     create_snapshot_inner(
         state_dir,
@@ -1891,6 +1897,7 @@ pub fn create_prepared_snapshot_reporting(
         pr,
         reuse,
         chunker_identity,
+        labeler,
     )
 }
 
@@ -1905,6 +1912,7 @@ fn create_snapshot_inner(
     pr: &crate::progress::Progress,
     reuse: Option<&SourceSnapshot>,
     chunker_identity: &str,
+    labeler: Option<&crate::label::Labeler>,
 ) -> Result<SourceSnapshot> {
     validate_tx_id(tx_id)?;
     ensure_inventory_lengths(inventory)?;
@@ -2096,6 +2104,7 @@ fn create_snapshot_inner(
                             &destination,
                             plan.expect("assignment implies a plan"),
                             &mut budget,
+                            labeler,
                         )?),
                         None => None,
                     },
@@ -2125,6 +2134,7 @@ fn create_snapshot_inner(
                         &destination,
                         plan.expect("assignment implies a plan"),
                         &mut budget,
+                        labeler,
                     )?),
                     None => None,
                 };
@@ -2263,6 +2273,15 @@ fn prepare_artifact(
     snapshot_blob: &Path,
     plan: &Plan,
     budget: &mut PayloadBudget,
+    // #1062: `--label` runs each record's payload through the node's
+    // `/_decide` HERE, before the record is sealed, so the labels become part
+    // of the durable artifact — replays and hardlink reuse carry them without
+    // a second vote. The question-set bytes are in the run's
+    // `chunker_identity` (`lib.rs::prepared_records_identity`), which is what
+    // makes a changed set re-prepare instead of hardlinking unlabelled (or
+    // differently-labelled) NDJSON. `None` — the default, and every caller
+    // without `--label` — seals unlabelled exactly as before.
+    labeler: Option<&crate::label::Labeler>,
 ) -> Result<PreparedArtifact> {
     let assignment = plan
         .files
@@ -2357,6 +2376,29 @@ fn prepare_artifact(
                 |extension| extension.to_string_lossy().to_ascii_lowercase(),
             )),
         );
+        // #1062: the decide vote runs after coercion and provenance stamping
+        // and before the record is written, on the same `fields` map that is
+        // about to be sealed — the question templates see the record exactly
+        // as the index will. A FAILED vote fails the seal (sink_error), which
+        // fails the run: sealing the record unlabelled would hand the index a
+        // document the operator believes was judged. An abstention is an
+        // answer and stamps `label: null` with the raw p (see `label.rs`).
+        if let Some(labeler) = labeler {
+            match labeler.label_fields(&fields) {
+                Ok(pairs) => {
+                    for (name, value) in pairs {
+                        fields.insert(name, value);
+                    }
+                }
+                Err(error) => {
+                    sink_error = Some(error.context(format!(
+                        "--label {} (record {})",
+                        source.rel, record.locator
+                    )));
+                    return false;
+                }
+            }
+        }
         let id = crate::ids::doc_id(slug, content_id, &record.locator);
         let action = serde_json::json!({"index": {"_index": dataset.index, "_id": id}});
         if let Err(error) = writeln!(writer, "{action}")
@@ -2792,6 +2834,7 @@ mod tests {
             &crate::progress::Progress::silent(),
             None,
             "chunker-v1",
+            None,
         )
         .unwrap();
         assert_eq!(first.files.len(), 3);
@@ -2827,6 +2870,7 @@ mod tests {
             &crate::progress::Progress::silent(),
             Some(&first),
             "chunker-v1",
+            None,
         )
         .unwrap();
 
@@ -2965,6 +3009,7 @@ mod tests {
             &crate::progress::Progress::silent(),
             None,
             "chunker-v1",
+            None,
         )
         .unwrap();
         std::fs::write(corpus.path().join("b.md"), "bravo contents CHANGED\n").unwrap();
@@ -2980,6 +3025,7 @@ mod tests {
             &crate::progress::Progress::silent(),
             Some(&first),
             "chunker-v1",
+            None,
         )
         .unwrap();
 
@@ -3016,6 +3062,7 @@ mod tests {
             &crate::progress::Progress::silent(),
             None,
             "chunker-v1",
+            None,
         )
         .unwrap();
         let second = create_prepared_snapshot_reporting(
@@ -3028,6 +3075,7 @@ mod tests {
             &crate::progress::Progress::silent(),
             Some(&first),
             "chunker-v2",
+            None,
         )
         .unwrap();
         let key = &inventory.keys[0];
