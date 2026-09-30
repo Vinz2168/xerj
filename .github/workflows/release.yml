@@ -307,11 +307,17 @@ jobs:
         run: |
           set -euo pipefail
           CURRENT="${GITHUB_REF_NAME}"
-          # Highest version tag that is not the one being cut: --sort=-v:refname
-          # orders v1.0.0-rc.78 > v1.0.0-rc.77 > ... (and v1.0.0 > v1.0.0-rc.N,
-          # so a future final sorts above its rcs). pack-rust-vulns-*, backup/*
-          # and rb* tags never match the v[0-9]* glob.
-          PREV="$(git tag -l 'v[0-9]*' --sort=-v:refname | grep -vxF "${CURRENT}" | head -n1 || true)"
+          # The derivation lives in .github/scripts/prev_tag.sh so the code
+          # CI runs and the code under test are the same file: the
+          # version-successor of this cut among ^vX.Y.Z tags (an rc suffix
+          # counts — an rc is a real xerj release). pack-rust-vulns-*, backup/*
+          # and rb* never match. versionsort.suffix=-rc keeps a final vX.Y.Z
+          # above its own -rc.N — plain --sort=-v:refname does NOT, which
+          # would have pinned the first v1.0.1 cut to v1.0.0-rc.79 instead of
+          # v1.0.0. The self-test locks that ordering in before the output is
+          # trusted (and fails on a runner git too old for versionsort.suffix).
+          bash .github/scripts/prev_tag.sh --self-test
+          PREV="$(bash .github/scripts/prev_tag.sh "${CURRENT}")"
           if [ -n "${PREV}" ]; then
             echo "release-notes compare base: ${PREV}...${CURRENT}"
             # Renders the notes without creating anything; previous_tag_name

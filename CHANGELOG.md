@@ -233,6 +233,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit `previous_tag_name`, falling back to auto-generation only when no
   previous v-tag exists (PR
   [#1069](https://github.com/xerj-org/xerj/pull/1069)).
+- **Release notes: the pinned compare base now orders a final above its own
+  rcs, and the derivation is fixture-tested.** The PR #1069 pin derived the
+  base with plain `--sort=-v:refname`, which orders `v1.0.0-rc.79` above
+  `v1.0.0` — the opposite of what that PR's message claims — so the first
+  `v1.0.1` cut would have compared against `v1.0.0-rc.79` rather than
+  `v1.0.0`, and re-dispatching an old tag would have compared against the
+  newest tag instead of that release's own predecessor. The derivation now
+  lives in `.github/scripts/prev_tag.sh`: `versionsort.suffix=-rc` puts a
+  prerelease below its final, the base is the version-successor of the tag
+  being cut, and a five-assertion fixture self-test (pack-tag noise,
+  `rc.9` created after `rc.78`, final among rcs, old-tag rebuild, first-ever
+  cut) runs in the release job before the base is trusted. Measured against
+  the live tag set on 2026-09-30: a hypothetical cut selects
+  `v1.0.0-rc.78`, while GitHub's auto-detection would anchor on
+  `pack-rust-vulns-2026-09-30`, published 10:47Z that morning (PR
+  [#1081](https://github.com/xerj-org/xerj/pull/1081)).
 - **`benchmarks/ask-plan/` — the harness behind issue #1056's gate, shipped
   before the endpoint so the gate is designed in the open**: 230 (prompt,
   gold result set) pairs over three committed public tabular snapshots
