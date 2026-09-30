@@ -39,6 +39,26 @@
 //! as before: 503 with no `[decisions]` index, 422 `no_support` / on a
 //! history that cannot answer.
 //!
+//! # The decision cache flywheel (#1061)
+//!
+//! Every tier-2 (and, when it is built, tier-3) answer is written back to
+//! the `[decisions]` index as an ordinary document — the configured
+//! `text_field`/`label_field` plus `p`, `source`, `ts` — so the answers a
+//! node computes once become the history that answers the next request.
+//! History-tier answers are not written: they ARE the index already, and
+//! double-writing them would double-count their vote. The write-back is
+//! spawned, never awaited by the request, and cannot fail it: a missing or
+//! unwritable index is a log line, not an error the caller sees. Every
+//! answer names its tier in a `source` field (`/_decide` top level,
+//! `/v1/systemone` per-question in `decisions.evidence.*.source` — the same
+//! string as `tier`, under the flywheel's name).
+//!
+//! Human corrections ride the same index: a history document carrying
+//! `human: true` (written through the ordinary indexing API) is weighted
+//! [`DecisionsConfig::human_weight`]× (default 2.0, the issue's ≥ 2x floor)
+//! in the vote — see [`neighbour_weight`]. The weight is read in the vote
+//! aggregation, so a correction outranks the cached answers it corrects.
+//!
 //! # The wire contract, and where we deliberately break it
 //!
 //! Request: `{ state, model, questions: { id: { type, instructions, criteria } } }`.
@@ -170,6 +190,118 @@ pub(crate) fn resolve_tier(support: &HistorySupport, local_enabled: bool) -> Opt
             }
         }
     }
+}
+
+impl DecideTier {
+    /// The tier's wire name — the `tier`/`source` field value on both
+    /// surfaces and the `source` written into every cached answer, so all
+    /// three name the same thing by construction.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            DecideTier::History => "history",
+            DecideTier::Local => "local",
+            DecideTier::Hosted => "hosted",
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The decision cache flywheel (#1061)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One answer bound for the decisions index: the payload as decided, the
+/// label it won, the probability that was served, and the tier that produced
+/// it. History-tier answers never appear here — they are the index already,
+/// and writing them back would double their vote on the next request.
+struct CachedAnswer {
+    /// The text that was decided (the question's vote text, clipped).
+    text: String,
+    /// The winning label.
+    label: String,
+    /// The probability served for that label.
+    p: f64,
+    /// The tier that produced the answer — [`DecideTier::as_str`].
+    source: &'static str,
+}
+
+/// The document one cached answer writes back as. Pure, and unit-tested: the
+/// field names ARE the flywheel's contract — the configured text/label fields
+/// (so the cached answer is retrievable and votable exactly like a seeded
+/// example) plus the fixed `p`, `source`, `ts` of issue #1061.
+fn write_back_doc(answer: &CachedAnswer, cfg: &DecisionsConfig, ts: &str) -> Value {
+    // Built by hand, not json!: two of the keys are configuration, not
+    // syntax, and the json! macro only takes literal keys.
+    let mut doc = serde_json::Map::new();
+    doc.insert(cfg.text_field.clone(), json!(answer.text));
+    doc.insert(cfg.label_field.clone(), json!(answer.label));
+    doc.insert("p".into(), json!(round6(answer.p)));
+    doc.insert("source".into(), json!(answer.source));
+    doc.insert("ts".into(), json!(ts));
+    Value::Object(doc)
+}
+
+/// Cache `answers` into the configured decisions index — the flywheel's
+/// write-back. Spawned and never awaited by the request, so it can neither
+/// delay nor fail it: every error (index cannot be created or reached,
+/// document rejected) is a log line naming the index, and the answer the
+/// caller already holds stands. Skipped outright when no index is configured
+/// — a node with no `[decisions] index` has nowhere to cache, which is the
+/// documented state the local tier answers for.
+fn spawn_write_back(state: &AppState, cfg: &DecisionsConfig, answers: Vec<CachedAnswer>) {
+    if answers.is_empty() || cfg.index.is_empty() {
+        return;
+    }
+    let state = state.clone();
+    let cfg = cfg.clone();
+    tokio::spawn(async move {
+        // The same write path PUT /{index}/_doc takes, including
+        // auto-creating a configured-but-missing index: that is how a node
+        // armed with the local tier bootstraps its own history.
+        let idx = match state.engine.get_or_create_index(&cfg.index) {
+            Ok(idx) => idx,
+            Err(e) => {
+                tracing::warn!(
+                    index = %cfg.index, error = %e,
+                    "decide flywheel: could not open the decisions index for write-back; the \
+                     answer was served but not cached"
+                );
+                return;
+            }
+        };
+        for answer in &answers {
+            let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            match idx
+                .index_document(None, write_back_doc(answer, &cfg, &ts))
+                .await
+            {
+                Ok(_) => state.metrics.record_doc_indexed(&cfg.index),
+                Err(e) => tracing::warn!(
+                    index = %cfg.index, error = %e,
+                    "decide flywheel: one cached answer was not written; the answer was served"
+                ),
+            }
+        }
+    });
+}
+
+/// One neighbour's vote weight: reciprocal rank, scaled by
+/// [`DecisionsConfig::human_weight`] when the history document carries
+/// `human: true` — a correction outranks the answers it corrects. Pure, and
+/// unit-tested: this is the flywheel's correction arithmetic.
+fn neighbour_weight(rank: usize, human: bool, human_weight: f64) -> f64 {
+    let base = 1.0 / (rank as f64 + 1.0);
+    if human {
+        base * human_weight
+    } else {
+        base
+    }
+}
+
+/// Whether a history document is a human correction. Strict — `human: true`
+/// as a JSON boolean, exactly — because a correction's weight is trust, and
+/// "true"/1/yes must not silently earn it.
+fn is_human_correction(source: &Value) -> bool {
+    source.get("human") == Some(&Value::Bool(true))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -503,7 +635,8 @@ pub async fn systemone(
                 evidence.insert(
                     id.clone(),
                     json!({
-                        "tier": "history",
+                        "tier": DecideTier::History.as_str(),
+                        "source": DecideTier::History.as_str(),
                         "label": best_label,
                         "support": round6(best_weight / total),
                         "neighbours": labelled.len(),
@@ -538,6 +671,11 @@ pub async fn systemone(
     // from.
     #[cfg_attr(not(feature = "decide-local"), allow(unused_mut))]
     let mut local_answered = 0usize;
+    // The flywheel's cargo (#1061): every answer tiers 2+ produced here is
+    // written back to the decisions index after the response is built. The
+    // hosted tier, when it is built, pushes into the same vector.
+    #[cfg_attr(not(feature = "decide-local"), allow(unused_mut))]
+    let mut cached: Vec<CachedAnswer> = Vec::new();
     #[cfg(feature = "decide-local")]
     if !local_needed.is_empty() {
         let Some(local) = state.decide.local_tier() else {
@@ -618,16 +756,28 @@ pub async fn systemone(
             evidence.insert(
                 id.clone(),
                 json!({
-                    "tier": "local",
+                    "tier": DecideTier::Local.as_str(),
+                    "source": DecideTier::Local.as_str(),
                     "model": LOCAL_MODEL_ID,
                     "label": best_label,
                     "support": round6(*best_score as f64),
                     "hypotheses": Value::Object(by_label),
                 }),
             );
+            cached.push(CachedAnswer {
+                text: question.vote_text.clone(),
+                label: best_label.clone(),
+                p: *best_score as f64,
+                source: DecideTier::Local.as_str(),
+            });
             local_answered += 1;
         }
     }
+
+    // The flywheel's write-back (#1061): cache what tiers 2+ answered, after
+    // the answer is complete and without ever holding the response for it.
+    // History-tier answers are not in `cached` — they are the index already.
+    spawn_write_back(&state, &cfg, cached);
 
     let index_echo = if cfg.index.is_empty() {
         LOCAL_MODEL_ID.to_string()
@@ -768,7 +918,7 @@ pub async fn decide(
             let Some(local) = local.as_ref() else {
                 unreachable!("resolve_tier names Local only when the tier is armed");
             };
-            return decide_local(&state, local, &question, &positive, &index, k, started).await;
+            return decide_local(&state, local, &question, &cfg, started).await;
         }
     }
     let neighbours = match neighbours {
@@ -834,7 +984,8 @@ pub async fn decide(
         "confidence": round6(confidence),
         "abstain": abstain,
         "neighbours": neighbour_list,
-        "tier": "history",
+        "tier": DecideTier::History.as_str(),
+        "source": DecideTier::History.as_str(),
         "took_ms": started.elapsed().as_millis() as u64,
     });
     if let Some(r) = reason {
@@ -846,18 +997,22 @@ pub async fn decide(
 /// The local tier's `/_decide` answer: the head's probabilities over the
 /// positive label and its negation, tier-tagged, abstaining by the same
 /// `decisions.min_confidence` rule the history vote uses. `neighbours` is
-/// empty — having none is exactly what tier 2 means here.
+/// empty — having none is exactly what tier 2 means here. A non-abstaining
+/// answer over a named index is cached into it (the flywheel, #1061); an
+/// abstain is not — it was not an answer, and caching it would seed the
+/// history with a doubt.
 #[cfg(feature = "decide-local")]
 async fn decide_local(
     state: &AppState,
     local: &LocalTier,
     question: &str,
-    positive: &str,
-    index: &str,
-    k: usize,
+    cfg: &DecisionsConfig,
     started: Instant,
 ) -> axum::response::Response {
-    let defaults = &state.config.decisions;
+    // `cfg` is the caller's per-request view: its index is the index THIS
+    // request named (empty when it named none), so the flywheel caches into
+    // the index the question was asked of — never a different one.
+    let (index, k, positive) = (&cfg.index, cfg.k, cfg.positive_label.as_str());
     let labels = [positive.to_string(), format!("not {positive}")];
     let requests = vec![xerj_ai::decide::ScoreRequest {
         premise: clip(question, MAX_VOTE_TEXT_CHARS),
@@ -876,7 +1031,19 @@ async fn decide_local(
     } else {
         (labels[1].clone(), scores[1] as f64)
     };
-    let abstain = confidence < defaults.min_confidence;
+    let abstain = confidence < cfg.min_confidence;
+    if !abstain {
+        spawn_write_back(
+            state,
+            cfg,
+            vec![CachedAnswer {
+                text: clip(question, MAX_VOTE_TEXT_CHARS),
+                label: label.clone(),
+                p: confidence,
+                source: DecideTier::Local.as_str(),
+            }],
+        );
+    }
     state.metrics.record_query(
         LOCAL_MODEL_ID,
         "decide_local",
@@ -890,14 +1057,15 @@ async fn decide_local(
         "confidence": round6(confidence),
         "abstain": abstain,
         "neighbours": [],
-        "tier": "local",
+        "tier": DecideTier::Local.as_str(),
+        "source": DecideTier::Local.as_str(),
         "model": LOCAL_MODEL_ID,
         "took_ms": started.elapsed().as_millis() as u64,
     });
     if abstain {
         resp["reason"] = json!(format!(
             "confidence {:.3} below decisions.min_confidence {:.3}",
-            confidence, defaults.min_confidence
+            confidence, cfg.min_confidence
         ));
     }
     Json(resp).into_response()
@@ -1077,7 +1245,13 @@ async fn vote_neighbours(
     let mut out = Vec::with_capacity(result.hits.len());
     for (i, hit) in result.hits.into_iter().enumerate() {
         if let Some(label) = hit.source.get(&cfg.label_field).and_then(Value::as_str) {
-            out.push((1.0 / (i as f64 + 1.0), label.to_string(), hit));
+            // The flywheel's one refinement to the raw vote (#1061): a
+            // document the operator marked `human: true` — a correction,
+            // indexed through the ordinary write path — weighs
+            // `decisions.human_weight`× its reciprocal rank. Everything else
+            // keeps the 1/rank arithmetic the published measurements used.
+            let w = neighbour_weight(i, is_human_correction(&hit.source), cfg.human_weight);
+            out.push((w, label.to_string(), hit));
         }
     }
     Ok(out)
@@ -1369,5 +1543,118 @@ mod tests {
             },
         };
         assert_eq!(labels_for(&choice, &cfg), vec!["billing", "tech"]);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // The flywheel (#1061)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// The issue's arithmetic, exactly: at the default 2× a correction's
+    /// vote weight doubles, and doubling flips a concrete two-label vote the
+    /// 1/rank arithmetic settles the other way. Ranks are BM25 ranks; the
+    /// label sums are what `/_decide` and `/v1/systemone` aggregate.
+    #[test]
+    fn two_x_human_weight_changes_the_vote() {
+        // Rank 0 is a plain `billing` neighbour; ranks 1 and 2 are human
+        // corrections saying `tech`.
+        let billing = neighbour_weight(0, false, 2.0);
+        let tech_at_1 = neighbour_weight(1, true, 2.0);
+        let tech_at_2 = neighbour_weight(2, true, 2.0);
+        // Sanity: plain weights are the reciprocal-rank arithmetic the
+        // published measurements used, untouched.
+        assert_eq!(neighbour_weight(0, false, 9.9), 1.0);
+        assert_eq!(neighbour_weight(1, false, 9.9), 0.5);
+        // With the boost disabled (weight 1.0) billing wins: 1.0 against
+        // 0.5 + 1/3.
+        let tech_unboosted = neighbour_weight(1, true, 1.0) + neighbour_weight(2, true, 1.0);
+        assert!(
+            billing > tech_unboosted,
+            "at weight 1.0 corrections are ordinary neighbours: {billing} vs {tech_unboosted}"
+        );
+        // At the default 2× the corrections win: 0.5·2 + (1/3)·2 > 1.0.
+        let tech_boosted = tech_at_1 + tech_at_2;
+        assert!(
+            tech_boosted > billing,
+            "at weight 2.0 corrections outrank the vote they correct: {tech_boosted} vs {billing}"
+        );
+        // And the default IS 2.0 — the issue's ≥ 2x floor.
+        assert_eq!(DecisionsConfig::default().human_weight, 2.0);
+    }
+
+    /// The weight is configuration: `[decisions] human_weight` parses, and a
+    /// value that would erase or invert a correction's vote is refused at
+    /// config load, not discovered in a wrong answer.
+    #[test]
+    fn human_weight_is_configurable_and_range_checked() {
+        let cfg = xerj_common::config::Config::from_toml_str(
+            "[decisions]\nindex = \"judgements\"\nhuman_weight = 3.5\n",
+        )
+        .expect("toml");
+        assert_eq!(cfg.decisions.human_weight, 3.5);
+        assert_eq!(
+            cfg.decisions.index, "judgements",
+            "the rest of the section parses unchanged"
+        );
+        for bad in ["0.0", "-2.0", "nan"] {
+            let err = xerj_common::config::Config::from_toml_str(&format!(
+                "[decisions]\nhuman_weight = {bad}\n"
+            ))
+            .expect_err(bad);
+            assert!(err.to_string().contains("human_weight"), "{bad}: {err}");
+        }
+    }
+
+    /// The cached answer's document is the flywheel's contract: the
+    /// configured text/label fields (so it votes like any seeded example) and
+    /// the fixed p / source / ts the issue names. Nothing else — a cached
+    /// answer is NOT marked human, or it would outrank itself forever.
+    #[test]
+    fn write_back_doc_carries_the_flywheel_fields() {
+        let cfg = DecisionsConfig {
+            text_field: "message".into(),
+            label_field: "intent".into(),
+            ..DecisionsConfig::default()
+        };
+        let doc = write_back_doc(
+            &CachedAnswer {
+                text: "refund my subscription".into(),
+                label: "refund".into(),
+                p: 0.8712345678,
+                source: DecideTier::Local.as_str(),
+            },
+            &cfg,
+            "2026-09-30T00:00:00.123Z",
+        );
+        assert_eq!(doc["message"], "refund my subscription");
+        assert_eq!(doc["intent"], "refund");
+        assert_eq!(doc["p"], 0.871235, "probability rounded like the wire");
+        assert_eq!(doc["source"], "local");
+        assert_eq!(doc["ts"], "2026-09-30T00:00:00.123Z");
+        assert_eq!(
+            doc.as_object().map(|o| o.len()),
+            Some(5),
+            "exactly the five fields: {doc}"
+        );
+    }
+
+    /// Only a JSON boolean `true` earns the correction weight — "true", 1,
+    /// and a missing field are ordinary history.
+    #[test]
+    fn only_a_boolean_true_marks_a_human_correction() {
+        assert!(is_human_correction(&json!({"human": true})));
+        assert!(!is_human_correction(&json!({"human": "true"})));
+        assert!(!is_human_correction(&json!({"human": 1})));
+        assert!(!is_human_correction(&json!({"human": false})));
+        assert!(!is_human_correction(&json!({"text": "no human field"})));
+        assert!(!is_human_correction(&Value::Null));
+    }
+
+    /// Every tier's wire name is stable — it is `tier`, `source`, and the
+    /// cached document's `source` all at once.
+    #[test]
+    fn tier_names_are_the_source_names() {
+        assert_eq!(DecideTier::History.as_str(), "history");
+        assert_eq!(DecideTier::Local.as_str(), "local");
+        assert_eq!(DecideTier::Hosted.as_str(), "hosted");
     }
 }

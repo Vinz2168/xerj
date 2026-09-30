@@ -67,6 +67,58 @@ is `history` or `local`, and a local answer carries
 `model: "xerj-decide-local-1"` — the same never-a-Jev-name discipline as the
 vote's own id.
 
+## The flywheel: every tier-2+ answer is cached (#1061)
+
+The ladder's answers are not spent when served. Every tier-2 (local head)
+answer — and every tier-3 answer, when that tier exists — is written back to
+the `[decisions]` index as an ordinary document, so the answers a node
+computes become the history that answers the next request:
+
+- **What is written**: the configured `text_field` (the payload as decided),
+  the configured `label_field` (the winning label), and the fixed `p`
+  (probability served), `source` (the tier that produced it) and `ts` (RFC
+  3339) fields. Because the text and label ride the configured fields, a
+  cached answer is retrievable and votable exactly like a seeded example.
+- **When**: after the response is complete. The write-back is spawned, never
+  awaited by the request, and can neither delay nor fail it — an index that
+  cannot be created or written is a log line, not an error the caller sees.
+  A configured-but-missing index is created by the write-back itself, which
+  is how a node armed with the local tier bootstraps its own history.
+- **What is not written**: history-tier answers (they are the index already —
+  re-writing them would double their vote), and `/_decide` abstains (an
+  abstain was not an answer; caching it would seed the history with a doubt).
+  A node with no `[decisions] index` at all has nowhere to cache.
+- **`source` on the wire**: every answer names its tier — `/_decide` at the
+  top level, `/v1/systemone` per-question in `decisions.evidence.*.source`
+  (the same string as `tier`, under the flywheel's name, and the value
+  written into the cached document).
+
+No replay claim is made yet: the Banking77 replay gate in the issue (after
+2,000 cached hosted answers, ≥ 80 % of later traffic answered by history at
+≥ 0.8 confidence and ≥ 0.97 accuracy) is a release-time measurement, and the
+TypeSafe/Jev API-terms question on retaining provider outputs must be
+answered before a tier-3 write-back ships.
+
+## Human corrections: `human: true`, weighted `decisions.human_weight`×
+
+A correction is an ordinary document with one extra field:
+
+```sh
+curl -X PUT localhost:9200/judgements/_doc/fix-42 -H 'content-type: application/json' \
+  -d '{"text": "the message that was mislabelled", "label": "refund", "human": true}'
+```
+
+No new endpoint — the ordinary indexing path is the corrections path. In the
+vote, a `human: true` neighbour weighs `decisions.human_weight`× (default
+2.0, the issue's ≥ 2x floor; 1.0 makes corrections ordinary neighbours) its
+reciprocal rank, so one correction outranks the cached answers it corrects.
+Everything else keeps the 1/rank arithmetic the published measurements used.
+Only a JSON boolean `true` earns the weight — `"true"`, `1`, and a missing
+field are ordinary history — and `decisions.human_weight` must be a positive
+number or the config refuses to boot (0 would erase a correction from the
+vote, a negative value would invert it). The boosted weight is the weight the
+vote used, so `/_decide` shows it in each neighbour's `weight`.
+
 ## Set it up
 
 ```toml
@@ -78,6 +130,7 @@ label_field    = "label"
 text_field     = "text"
 positive_label = "true"         # the label whose share a noul answers
 min_confidence = 0.0            # /_decide abstains below this
+human_weight   = 2.0            # vote-weight multiplier for history docs carrying human: true
 ```
 
 The history index is ordinary documents: one per example, with the text the
@@ -141,9 +194,9 @@ name are `choice` answers, not query vocabulary.
 Response: `{model, answers, usage}` with `answers` keyed exactly by the
 question ids sent, each answer carrying only its documented fields (clients
 validate strictly). XERJ's extras ride at the top level in `decisions` — the
-index, k, the requested model, and per-question evidence (winning label, its
-support, how many neighbours were found and voted) — where every verified
-client ignores them.
+index, k, the requested model, and per-question evidence (the tier and source
+that answered, winning label, its support, how many neighbours were found and
+voted) — where every verified client ignores them.
 
 Two deliberate breaks from the hosted API, both tested so they cannot regress:
 
@@ -169,11 +222,14 @@ tier is armed), `question` (required), `k` (default the configured 10,
 clamped 1..100), `positive_label` (default the configured one). The response
 returns the label, its confidence, the verdict (`abstain` below
 `decisions.min_confidence`, or when no labelled neighbour exists), the **tier**
-that answered, and the **neighbours** — each with `_id`, `label`, `_score`
-(the engine's own BM25 score), `weight` (1/rank), and the text — so every
-answer can be checked against the evidence that produced it. A local-tier
-answer has no neighbours (having none is what tier 2 means) and carries
-`tier: "local"`, `model: "xerj-decide-local-1"`.
+and **source** that answered (the same tier name under both fields), and the
+**neighbours** — each with `_id`, `label`, `_score` (the engine's own BM25
+score), `weight` (1/rank, × `decisions.human_weight` for a `human: true`
+document), and the text — so every answer can be checked against the evidence
+that produced it. A local-tier answer has no neighbours (having none is what
+tier 2 means) and carries `tier: "local"`, `source: "local"`,
+`model: "xerj-decide-local-1"`; when it did not abstain and the request named
+an index, it is cached into that index (the flywheel above).
 
 ```sh
 curl -s localhost:9200/_decide -H 'content-type: application/json' \

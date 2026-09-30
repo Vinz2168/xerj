@@ -1,6 +1,6 @@
 //! xerj configuration system.
 //!
-//! Configuration is intentionally minimal: **128 settings** versus
+//! Configuration is intentionally minimal: **129 settings** versus
 //! Elasticsearch's 3000+. Every option is named, documented, and has a sensible
 //! production-ready default. The format is TOML, loaded from a single file.
 //!
@@ -98,12 +98,12 @@ pub struct Config {
     /// Second-stage reranking provider — 3 settings. Inert until a key is set.
     pub rerank: RerankProviderConfig,
     /// Typed decisions answered from a labelled-history index by
-    /// nearest-neighbour vote — 6 settings. Inert until `decisions.index`
+    /// nearest-neighbour vote — 7 settings. Inert until `decisions.index`
     /// names an index that exists.
     pub decisions: DecisionsConfig,
 }
 
-// 23 sub-configs, 128 leaf settings in total. Do not maintain that sum by hand
+// 23 sub-configs, 129 leaf settings in total. Do not maintain that sum by hand
 // — `journey_zero_config` in xerj-engine/tests/product_experience.rs counts a
 // serialised `Config::default()` and fails if this comment and the module
 // header stop matching. `Default` is derived: every field is a sub-config that
@@ -334,6 +334,20 @@ impl Config {
             ));
         }
 
+        // Decisions: a human_weight that is not a positive finite number would
+        // not scale a correction's vote — 0 erases it, a negative value
+        // inverts it, NaN compares false against everything — so the config
+        // refuses to boot instead of silently mis-weighting the one document
+        // class the operator marked as authoritative.
+        if !self.decisions.human_weight.is_finite() || self.decisions.human_weight <= 0.0 {
+            return Err(XerjError::config(format!(
+                "decisions.human_weight must be a positive number (got {}); it multiplies the \
+                 vote weight of history documents carrying human: true, and 1.0 disables the \
+                 boost",
+                self.decisions.human_weight
+            )));
+        }
+
         self.engine.validate()?;
 
         // Cluster: fail closed rather than expose an unauthenticated Raft
@@ -470,7 +484,7 @@ impl Config {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Sub-configs  (128 user-facing settings total; counted by
+// Sub-configs  (129 user-facing settings total; counted by
 // `journey_zero_config`, not by hand)
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -2349,6 +2363,11 @@ pub struct DecisionsConfig {
     /// `/_decide` abstains below this vote share (0 = never abstain; the
     /// `/v1/systemone` wire has no abstain field and errors instead).
     pub min_confidence: f64,
+    /// How much more a human correction weighs in the vote than a cached or
+    /// seeded example, when the history document carries `human: true`
+    /// (issue #1061). 2.0 — the issue's ≥ 2x floor for corrections — is the
+    /// default; 1.0 makes corrections count exactly like any other example.
+    pub human_weight: f64,
 }
 
 impl Default for DecisionsConfig {
@@ -2360,6 +2379,7 @@ impl Default for DecisionsConfig {
             text_field: "text".to_string(),
             positive_label: "true".to_string(),
             min_confidence: 0.0,
+            human_weight: 2.0,
         }
     }
 }
@@ -3170,7 +3190,7 @@ mod tests {
         ("lifecycle", 1),
         ("wal_tap", 10),
         ("rerank", 3),
-        ("decisions", 6),
+        ("decisions", 7),
     ];
 
     /// Count the settings by *counting them*.
@@ -3213,7 +3233,7 @@ mod tests {
             "the section table must sum to the whole config"
         );
         assert_eq!(
-            total, 128,
+            total, 129,
             "the total settings count changed. It is quoted in this module's \
              header, in xerj-common/src/lib.rs, in engine/README.md, in \
              xerj.default.toml and in EXPECTED_SETTINGS in \
