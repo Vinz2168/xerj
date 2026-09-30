@@ -66,6 +66,10 @@ pub struct NativeSearchRequest {
     /// engine's order back under a 200, believing it had been reranked.
     #[serde(default)]
     pub rerank: Option<Value>,
+    /// Same rule for the local judge's block (issue #1060): declared so it is
+    /// refused by name, never silently dropped.
+    #[serde(default)]
+    pub judge: Option<Value>,
 }
 
 fn default_size() -> usize {
@@ -497,11 +501,14 @@ pub async fn search(
     // recorded once at completion via `record_query`.
     let _search_guard = state.metrics.active_search_guard();
 
-    if req.rerank.is_some() {
+    if req.rerank.is_some() || req.judge.is_some() {
         crate::rerank_stage::record_refused(&state.metrics);
-        let error = xerj_common::XerjError::invalid_query(crate::rerank_stage::unsupported_reason(
-            "the native search API",
-        ));
+        let reason = if req.rerank.is_some() {
+            crate::rerank_stage::unsupported_reason("the native search API")
+        } else {
+            crate::judge_stage::unsupported_reason("the native search API")
+        };
+        let error = xerj_common::XerjError::invalid_query(reason);
         return native_error(
             error,
             Some(&request_id),

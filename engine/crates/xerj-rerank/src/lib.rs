@@ -65,6 +65,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+pub mod judge;
+
 /// Hard ceiling on documents per Jev request.
 ///
 /// The `hev/jev-rerank` README reports a ~32k-token request budget and
@@ -197,6 +199,12 @@ pub enum RerankError {
     Config(String),
     #[error("rerank deadline exceeded after {elapsed_ms}ms")]
     Deadline { elapsed_ms: u128 },
+    /// The local judge's model could not be loaded or could not score the
+    /// page ([`crate::judge::ModelJudge`]). Operator state, not the caller's
+    /// request — and never a reason to silently hand back unjudged hits or
+    /// substitute the lexical scorer the response did not name.
+    #[error("the local judge model is unavailable: {0}")]
+    LocalModel(String),
     /// The operator switched reranking off (`[rerank] enabled = false`).
     /// Distinct from [`Self::MissingKey`]: that one is "not set up yet", this
     /// one is "deliberately never" — reranking sends document text to a third
@@ -230,6 +238,7 @@ impl RerankError {
             | Self::UnknownProvider(_)
             | Self::Config(_)
             | Self::Malformed(_)
+            | Self::LocalModel(_)
             | Self::DisabledByOperator
             | Self::Status { .. } => Policy::Surface,
         }
@@ -575,7 +584,7 @@ pub fn longer_than(s: &str, max: usize) -> bool {
 }
 
 /// How much of a caller-supplied NAME (an unknown key) a refusal echoes back.
-const MAX_ECHOED_NAME_CHARS: usize = 64;
+pub(crate) const MAX_ECHOED_NAME_CHARS: usize = 64;
 
 /// A `rerank.<key>` string under its server-side ceiling.
 ///

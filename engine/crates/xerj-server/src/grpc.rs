@@ -134,11 +134,17 @@ impl XerjSearch for GrpcService {
         // Refused by name instead. Checked before the bare-clause wrap below,
         // which would otherwise bury the key inside `query`.
         // `carries_rerank`, the rule every HTTP surface uses: `"rerank": null`
-        // is an absent block, not a rerank request.
-        if xerj_api::rerank_stage::carries_rerank(&body) {
-            return Err(Status::invalid_argument(
-                xerj_api::rerank_stage::unsupported_reason("the gRPC Search RPC"),
-            ));
+        // is an absent block, not a rerank request. A `judge` block (issue
+        // #1060) is refused for the same reason, through the same
+        // second-stage check the raw-JSON HTTP surfaces use — naming the
+        // block the body actually carries.
+        if xerj_api::judge_stage::carries_second_stage(&body) {
+            let reason = if xerj_api::rerank_stage::carries_rerank(&body) {
+                xerj_api::rerank_stage::unsupported_reason("the gRPC Search RPC")
+            } else {
+                xerj_api::judge_stage::unsupported_reason("the gRPC Search RPC")
+            };
+            return Err(Status::invalid_argument(reason));
         }
         if body.get("query").is_none() {
             body = serde_json::json!({ "query": body });

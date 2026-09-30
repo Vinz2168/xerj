@@ -14,8 +14,9 @@ neural = ["xerj-engine/neural"]
 # decide ladder, answering /v1/systemone and /_decide when the history
 # index has no support. Mirrors how `neural` is gated — off by default,
 # enabled by whoever links this crate (the xerj-server wiring is a
-# follow-up).
-decide-local = ["dep:xerj-ai", "xerj-ai/decide-local"]
+# follow-up). Also arms the `judge` stage's model arm (issue #1060): the
+# same loader, the same model directory, the same loaded copy.
+decide-local = ["dep:xerj-ai", "xerj-ai/decide-local", "xerj-rerank/judge-local"]
 onnx-experimental = ["xerj-engine/onnx-experimental"]
 
 [dependencies]

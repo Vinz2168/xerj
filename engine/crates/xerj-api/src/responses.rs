@@ -340,6 +340,16 @@ pub struct EsHit {
     /// original malformed values that triggered `_ignored`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ignored_field_values: Option<Value>,
+    /// `_p_relevant` — XERJ's local-judge probability (issue #1060): the
+    /// judge's `0..=1` relevance probability for this hit, present only on
+    /// a search that carried a `judge` block (and only on hits the judge
+    /// scored). Unlike the hosted `rerank` stage — which REPLACES `_score`
+    /// with its probability — the judge leaves the engine's `_score`
+    /// untouched and adds this field, so a client sorting by `_score` keeps
+    /// the engine's own number and a client thresholding `_p_relevant` gets
+    /// an absolute scale `_score` never had.
+    #[serde(rename = "_p_relevant", skip_serializing_if = "Option::is_none")]
+    pub p_relevant: Option<f64>,
 }
 
 /// The `total` sub-object in `hits`.

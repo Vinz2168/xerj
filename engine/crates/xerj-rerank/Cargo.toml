@@ -14,5 +14,18 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+# The local judge's semantic arm (issue #1060): the node's local decision
+# head — xerj-ai's candle NLI pair scorer — scored against a relevance
+# hypothesis. Optional so the default build of this leaf crate stays
+# dependency-light; the deterministic lexical arm needs none of it.
+xerj-ai = { path = "../xerj-ai", optional = true }
+
+[features]
+default = []
+# Wire the local judge to the candle decision head (same loader, same model
+# directory, same shared registry as `xerj-ai/decide-local`).
+judge-local = ["dep:xerj-ai", "xerj-ai/decide-local"]
+
 [dev-dependencies]
 tokio = { workspace = true }
+tempfile = { workspace = true }
