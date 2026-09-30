@@ -115,10 +115,23 @@ struct CliArgs {
     onnx_tokenizer: Option<String>,
     compat_distribution: Option<String>,
     compat_version: Option<String>,
+    decide_mode: Option<String>,
+    decide_model_dir: Option<String>,
 }
 
 fn parse_args() -> CliArgs {
-    let mut args = std::env::args().skip(1);
+    parse_args_from(std::env::args().skip(1))
+}
+
+/// The body of [`parse_args`], over any iterator of arguments — the same
+/// testable-parse shape as `brain::parse` and `share::parse`, so the CLI
+/// grammar is unit-tested without touching process-wide `argv` (which every
+/// test in the same binary shares).
+fn parse_args_from<I>(args: I) -> CliArgs
+where
+    I: Iterator<Item = String>,
+{
+    let mut args = args;
     let mut config = None;
     let mut data_dir = None;
     let mut bind = None;
@@ -129,6 +142,8 @@ fn parse_args() -> CliArgs {
     let mut onnx_tokenizer = None;
     let mut compat_distribution = None;
     let mut compat_version = None;
+    let mut decide_mode = None;
+    let mut decide_model_dir = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -154,6 +169,8 @@ fn parse_args() -> CliArgs {
             "--onnx-tokenizer" => onnx_tokenizer = args.next(),
             "--compat-distribution" => compat_distribution = args.next(),
             "--compat-version" => compat_version = args.next(),
+            "--decide-mode" => decide_mode = args.next(),
+            "--decide-model-dir" => decide_model_dir = args.next(),
             // Read out of band by `xerj_common::feedback` (which scans the
             // whole argument list, so its position never matters); accepted
             // here only so it is not an "unknown argument".
@@ -184,6 +201,8 @@ fn parse_args() -> CliArgs {
         onnx_tokenizer,
         compat_distribution,
         compat_version,
+        decide_mode,
+        decide_model_dir,
     }
 }
 
@@ -267,6 +286,21 @@ fn help_text(feedback: bool) -> String {
                                       client library versions aren't a reliable stand-in for a\n\
                                       compatible server version, confirmed against a real OSD\n\
                                       container). Example: --compat-version 2.11.0\n\
+             --decide-mode <MODE>   System One decide ladder (/v1/systemone, /_decide):\n\
+                                      history | local (default history — the labelled-history\n\
+                                      vote, today's contract). `local` arms the tier-2 zero-shot\n\
+                                      decision head, which answers the questions the history\n\
+                                      vote cannot (no [decisions] index, no labelled neighbour)\n\
+                                      instead of 503/422. Needs --decide-model-dir (or\n\
+                                      XERJ_DECIDE_MODEL_DIR) naming a directory with\n\
+                                      config.json, tokenizer.json and model.safetensors, and a\n\
+                                      build with the decide-local feature\n\
+                                      (cargo build --release -p xerj-server --features\n\
+                                      decide-local). Env: XERJ_DECIDE_MODE\n\
+             --decide-model-dir <PATH>  Directory holding the tier-2 decide head's\n\
+                                      config.json, tokenizer.json and model.safetensors —\n\
+                                      local file only, no download path. Env:\n\
+                                      XERJ_DECIDE_MODEL_DIR\n\
              --port      <PORT>     Port for the Elasticsearch-compatible API (default 9200).\n\
                                       Also claims PORT+1 for the native REST API and PORT+2\n\
                                       for gRPC, so a second instance needs only this one flag:\n\
@@ -325,6 +359,9 @@ fn help_text(feedback: bool) -> String {
              XERJ_ONNX_TOKENIZER matching tokenizer.json path\n\
              XERJ_COMPAT_DISTRIBUTION  elasticsearch|opensearch — same as --compat-distribution\n\
              XERJ_COMPAT_VERSION       same as --compat-version\n\
+             XERJ_DECIDE_MODE          decide ladder: history|local — same as --decide-mode\n\
+             XERJ_DECIDE_MODEL_DIR     tier-2 decide head's model directory — same as\n\
+                                      --decide-model-dir\n\
              XERJ_INGEST_MEMORY_TRACE  off|summary (default: off); summary emits bounded\n\
                                       periodic NDJSON diagnostics, never per-item events\n\
              XERJ_INGEST_MEMORY_SAMPLE_MS  sampler period, clamped to 25..60000 ms\n\
@@ -1287,6 +1324,10 @@ async fn run_cli_index(cmd: IndexCmdArgs) -> Result<()> {
         onnx_tokenizer: None,
         compat_distribution: None,
         compat_version: None,
+        // `xerj index` builds no AppState, so the decide ladder is not in
+        // play; the fields exist only because CliArgs is shared.
+        decide_mode: None,
+        decide_model_dir: None,
     };
     let mut cfg = load_config(&fake_cli)?;
     // Tracing after config so the [logging] format applies (RC4-W4 item 6).
@@ -1897,6 +1938,204 @@ mod help_text_tests {
     }
 }
 
+/// `--decide-mode` / `--decide-model-dir` (#1057 tier 2): the CLI grammar and
+/// the `DecideSettings::resolve` contract the flags parse into. The parse is
+/// exercised through `parse_args_from` (no process-argv mutation, which every
+/// test in this binary would race on), and the resolve assertions are split by
+/// feature so both builds stay honest: without `decide-local` the warning must
+/// name the rebuild, with it the ladder must actually arm.
+#[cfg(test)]
+mod decide_flag_tests {
+    use super::{help_text, parse_args_from};
+    use xerj_api::systemone_api::DecideSettings;
+
+    fn argv(items: &[&str]) -> std::vec::IntoIter<String> {
+        items
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn decide_flags_parse_with_values() {
+        let args = parse_args_from(argv(&[
+            "--decide-mode",
+            "local",
+            "--decide-model-dir",
+            "/models/xerj-decide",
+        ]));
+        assert_eq!(args.decide_mode.as_deref(), Some("local"));
+        assert_eq!(
+            args.decide_model_dir.as_deref(),
+            Some("/models/xerj-decide")
+        );
+    }
+
+    #[test]
+    fn decide_flags_default_to_none() {
+        let args = parse_args_from(argv(&[]));
+        assert_eq!(args.decide_mode, None);
+        assert_eq!(args.decide_model_dir, None);
+    }
+
+    #[test]
+    fn decide_flags_parse_alongside_the_other_server_flags() {
+        // Same command line an operator actually writes: the decide flags
+        // must not disturb — or be disturbed by — the neighbours.
+        let args = parse_args_from(argv(&[
+            "--insecure",
+            "--embed-mode",
+            "neural",
+            "--decide-mode",
+            "local",
+            "--decide-model-dir",
+            "./decide-model",
+            "--compat-distribution",
+            "opensearch",
+            "-d",
+            "./data",
+        ]));
+        assert!(args.insecure);
+        assert_eq!(args.embed_mode.as_deref(), Some("neural"));
+        assert_eq!(args.compat_distribution.as_deref(), Some("opensearch"));
+        assert_eq!(args.data_dir.as_deref(), Some("./data"));
+        assert_eq!(args.decide_mode.as_deref(), Some("local"));
+        assert_eq!(args.decide_model_dir.as_deref(), Some("./decide-model"));
+    }
+
+    #[test]
+    fn help_documents_both_decide_flags_and_their_env_names() {
+        let help = help_text(true);
+        assert!(
+            help.contains("--decide-mode"),
+            "--decide-mode must be documented, got:\n{help}"
+        );
+        assert!(
+            help.contains("--decide-model-dir"),
+            "--decide-model-dir must be documented, got:\n{help}"
+        );
+        // The ladder's choices and its default, next to the flag that offers
+        // them — an operator must not need DECISIONS.md to spell a valid mode.
+        assert!(
+            help.contains("history | local"),
+            "the help must name the decide modes and the default, got:\n{help}"
+        );
+        // Both env halves, so a container can arm the tier without editing
+        // its command line.
+        assert!(help.contains("XERJ_DECIDE_MODE"));
+        assert!(help.contains("XERJ_DECIDE_MODEL_DIR"));
+    }
+
+    // ── the resolve contract the flags parse into ──────────────────────────
+
+    #[test]
+    fn history_is_the_default_and_silent() {
+        // Untouched boot: no flag, no env — "" resolves exactly like the
+        // named default.
+        for mode in ["", "history"] {
+            let (settings, warning) = DecideSettings::resolve(mode, None);
+            assert_eq!(warning, None, "mode {mode:?} must not warn");
+            assert!(
+                !settings.local_available(),
+                "mode {mode:?} must not arm tier 2"
+            );
+        }
+    }
+
+    #[test]
+    fn mode_is_trimmed_and_case_insensitive() {
+        let (settings, warning) = DecideSettings::resolve("  History  ", None);
+        assert_eq!(warning, None);
+        assert!(!settings.local_available());
+    }
+
+    #[test]
+    fn unknown_mode_warns_and_stays_on_the_history_vote() {
+        let (settings, warning) = DecideSettings::resolve("sometimes", None);
+        let warning = warning.expect("an unknown mode must warn");
+        assert!(
+            warning.contains("not a decide mode"),
+            "the warning must say what is wrong, got: {warning}"
+        );
+        assert!(
+            warning.contains("history or local"),
+            "the warning must name the valid modes, got: {warning}"
+        );
+        assert!(!settings.local_available());
+    }
+
+    /// A default build asked for `--decide-mode local` must boot on the
+    /// history vote AND say which rebuild arms the tier — the operator asked
+    /// for tier 2 and silence here reads as "armed".
+    #[cfg(not(feature = "decide-local"))]
+    #[test]
+    fn local_without_the_feature_warns_naming_the_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let (settings, warning) =
+            DecideSettings::resolve("local", Some(dir.path().to_str().unwrap()));
+        let warning = warning.expect("local on a feature-less build must warn");
+        assert!(
+            warning.contains("decide-local"),
+            "the warning must name the missing feature, got: {warning}"
+        );
+        assert!(
+            warning.contains("xerj-server"),
+            "the warning must name the crate to rebuild, got: {warning}"
+        );
+        assert!(!settings.local_available());
+    }
+
+    /// With the feature compiled in, the flag's promise holds end to end at
+    /// the settings seam: a real directory arms tier 2 silently, a missing
+    /// one arms with the warning that names the path, and no directory at
+    /// all stays on the history vote with the reason.
+    #[cfg(feature = "decide-local")]
+    #[test]
+    fn local_with_a_model_directory_arms() {
+        let dir = tempfile::tempdir().unwrap();
+        let (settings, warning) =
+            DecideSettings::resolve("local", Some(dir.path().to_str().unwrap()));
+        assert_eq!(warning, None, "a present directory must not warn");
+        assert!(settings.local_available(), "tier 2 must be armed");
+    }
+
+    #[cfg(feature = "decide-local")]
+    #[test]
+    fn local_without_a_directory_stays_on_the_history_vote() {
+        let (settings, warning) = DecideSettings::resolve("local", None);
+        let warning = warning.expect("local without a model dir must warn");
+        assert!(
+            warning.contains("XERJ_DECIDE_MODEL_DIR"),
+            "the warning must name the missing input, got: {warning}"
+        );
+        assert!(
+            warning.contains("config.json"),
+            "the warning must say what the directory must hold, got: {warning}"
+        );
+        assert!(!settings.local_available());
+    }
+
+    #[cfg(feature = "decide-local")]
+    #[test]
+    fn local_with_a_missing_directory_arms_with_a_warning() {
+        // Resolve's deliberate choice: the operator explicitly asked for
+        // tier 2, so it arms anyway and the first request names the path —
+        // pin it so the CLI inherits a loud failure, not a silent fallback.
+        let (settings, warning) =
+            DecideSettings::resolve("local", Some("/nonexistent/xerj-decide"));
+        let warning = warning.expect("a missing directory must warn");
+        assert!(
+            warning.contains("is not a directory"),
+            "the warning must name the problem, got: {warning}"
+        );
+        assert!(
+            settings.local_available(),
+            "an explicit local request must arm despite the warning"
+        );
+    }
+}
+
 #[cfg(test)]
 mod runtime_tests {
     use super::build_runtime;
@@ -2439,7 +2678,42 @@ async fn async_main() -> Result<()> {
     };
 
     // 9b. Application state
-    let state = AppState::new(cfg.clone(), engine, metrics);
+    let mut state = AppState::new(cfg.clone(), engine, metrics);
+
+    // 9b-iia. Decide-ladder override (#1057): `--decide-mode` /
+    //   `--decide-model-dir` flags or XERJ_DECIDE_MODE / XERJ_DECIDE_MODEL_DIR
+    //   env (flags win; the flag can fill either half, so `--decide-mode local`
+    //   alone honours an env-set XERJ_DECIDE_MODEL_DIR) — the same
+    //   flag-over-env shape as `--embed-mode`. `AppState::new` already
+    //   resolved the env half; when a decide flag is present we re-resolve
+    //   with it through the same `DecideSettings::resolve` and replace the
+    //   `state.decide` seam (pub, and replaced rather than mutated, so no
+    //   other holder can observe a half-built tier). `resolve` is a warning,
+    //   never a panic: an unarmable request boots on the history vote with
+    //   the reason in the log, exactly as the env path does.
+    if args.decide_mode.is_some() || args.decide_model_dir.is_some() {
+        let mode = args
+            .decide_mode
+            .clone()
+            .or_else(|| std::env::var("XERJ_DECIDE_MODE").ok())
+            .unwrap_or_default();
+        let model_dir = args
+            .decide_model_dir
+            .clone()
+            .or_else(|| std::env::var("XERJ_DECIDE_MODEL_DIR").ok());
+        let (settings, warning) =
+            xerj_api::systemone_api::DecideSettings::resolve(&mode, model_dir.as_deref());
+        info!(
+            mode = %if mode.is_empty() { "history" } else { mode.as_str() },
+            from = "CLI",
+            "decide ladder resolved (tier 2 {})",
+            if settings.local_available() { "armed" } else { "off" }
+        );
+        if let Some(warning) = warning {
+            warn!("{warning}");
+        }
+        state.decide = std::sync::Arc::new(settings);
+    }
 
     // 9b-i. Observability wiring (RC4 W4 item 2).
     //   (a) Install the process-wide metrics handle the engine records

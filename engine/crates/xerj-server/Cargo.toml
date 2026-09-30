@@ -69,6 +69,13 @@ prost.workspace = true
 default = ["neural"]
 neural = ["xerj-engine/neural"]
 onnx-experimental = ["xerj-engine/onnx-experimental"]
+# Tier-2 local decide head (issue #1057): off by default, matching how
+# xerj-api gates it — the shipped default keeps today's history-vote-only
+# decide contract and adds nothing to the build. Arming the tier at runtime
+# needs this feature AND `--decide-mode local --decide-model-dir <path>`
+# (or XERJ_DECIDE_MODE/XERJ_DECIDE_MODEL_DIR); a default build asked for
+# `--decide-mode local` boots on the history vote and says exactly that.
+decide-local = ["xerj-api/decide-local"]
 # Diagnostic-only profiling. It is excluded from all shipped feature sets:
 # jemalloc profiling changes allocator fast paths and pprof installs SIGPROF.
 debug-profiling = [
