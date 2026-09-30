@@ -526,6 +526,52 @@ fn rerank_arg_schema(query_required: bool) -> Value {
     json!({ "type": ["object", "boolean"], "description": description })
 }
 
+/// JSON-schema fragment for the optional `judge` argument (issue #1060),
+/// shared by `xerj_search` and `xerj_hybrid_search` like [`rerank_arg_schema`].
+///
+/// Written for the agent deciding between the two second stages. The one
+/// thing it must never do is blur them: `rerank` is a paid third-party call
+/// that sends text off the node; `judge` is local, free, and sends nothing
+/// anywhere — a different tool for a different budget, with a different
+/// (lower, unproven) quality ceiling, and the description says both.
+fn judge_arg_schema(query_required: bool) -> Value {
+    let question = if query_required {
+        "`query` (string, REQUIRED for this tool): the natural-language question to \
+         judge documents against."
+    } else {
+        "`query` (string): the natural-language question to judge documents against. \
+         Filled in for you when the tool's `query` is a plain string; REQUIRED when \
+         the tool's `query` is a `bool`, a `knn`, or anything else with no single \
+         question in it (the node refuses rather than guess)."
+    };
+    let description = format!(
+        "Optional LOCAL judging of the returned hits — the zero-token second stage. \
+         The node re-scores every hit it was about to return, in process, against the \
+         question: no provider, no API key, no network call, and NO document text \
+         leaves the machine (unlike `rerank`). Each judged hit carries `_p_relevant`, \
+         a 0..1 relevance probability on an absolute scale — the engine's `_score` \
+         stays untouched beside it — and hits are reordered by it. \
+         `min_p` (0..1) drops hits judged below the probability and counts them in the \
+         response's `judged` block (`{{kept, dropped}}`): an absolute relevance cut you \
+         can threshold, which a BM25 score cannot give you. \
+         USE IT WHEN: you want a per-hit relevance number or a keep/drop cut on every \
+         search without cost, or the data must stay on the node. \
+         HONEST CEILING: with no local model armed the judge is a deterministic lexical \
+         scorer — it re-reads the same words the first stage read, with page-local \
+         statistics, and has NO semantic signal. The response's `judged.scorer` says \
+         which judge judged (`lexical` or `model`); read it before treating `_p_relevant` \
+         as understanding. Prefer `rerank` (paid, egress) when semantic judgement is \
+         worth the cost. \
+         Pass true or {{}} for defaults, or an object with: {question} \
+         `min_p` (0..1): drop hits judged below this probability. \
+         Cannot be combined with `sort`. \
+         READ THE RESPONSE'S `judged` BLOCK: `scorer` names the judge, `kept`/`dropped` \
+         count the page, `unjudged` counts hits with no text to judge (they carry no \
+         `_p_relevant` and sort last).",
+    );
+    json!({ "type": ["object", "boolean"], "description": description })
+}
+
 /// JSON-schema fragment for the optional `max_tokens` argument, shared by all
 /// five search tools (`xerj_search`, `xerj_hybrid_search`,
 /// `xerj_semantic_search`, `xerj_vector_search`, `xerj_code_search`) so the
@@ -579,7 +625,10 @@ pub fn tool_specs() -> Value {
                  Optional `rerank` adds a second stage that re-judges the top hits with \
                  an external relevance model — read that argument's description before \
                  using it: it needs a provider the operator configured, and it sends \
-                 document text off the machine. \
+                 document text off the machine. Optional `judge` re-judges the returned \
+                 hits LOCALLY (zero tokens, nothing leaves the node) and adds a \
+                 `_p_relevant` probability per hit — see that argument's description \
+                 for its honest ceiling. \
                  Pass `max_tokens` to cap the response at a token budget (never exceeded; \
                  see that argument for the tokenizer and the locator-only rule).",
             "inputSchema": {
@@ -600,6 +649,7 @@ pub fn tool_specs() -> Value {
                     "sort": { "description": "ES sort clause (array or object)." },
                     "_source": { "description": "Source filtering (bool, field, or {includes,excludes})." },
                     "rerank": rerank_arg_schema(false),
+                    "judge": judge_arg_schema(false),
                     "max_tokens": max_tokens_arg_schema()
                 }
             }
@@ -666,6 +716,9 @@ pub fn tool_specs() -> Value {
                  Optional `rerank` re-judges the fused top hits with an external \
                  relevance model; here `rerank.query` is REQUIRED, because a hybrid \
                  search has several sub-queries and no single question to read. \
+                 Optional `judge` re-judges the fused hits LOCALLY (zero tokens, \
+                 nothing leaves the node); `judge.query` is REQUIRED for the same \
+                 reason. \
                  Pass `max_tokens` to cap the response at a token budget (never exceeded; \
                  see that argument for the tokenizer and the locator-only rule).",
             "inputSchema": {
@@ -693,6 +746,7 @@ pub fn tool_specs() -> Value {
                     },
                     "size": { "type": "integer", "description": "Max fused hits to return." },
                     "rerank": rerank_arg_schema(true),
+                    "judge": judge_arg_schema(true),
                     "max_tokens": max_tokens_arg_schema()
                 },
                 "required": ["index", "queries"]
@@ -1223,6 +1277,67 @@ fn apply_rerank(
     Ok(())
 }
 
+/// Normalise the optional `judge` argument into the `_search` body (issue
+/// #1060) — the local, zero-token counterpart of [`apply_rerank`].
+///
+/// Same shape, same `opt_typed` policy, same plain-question carry: the string
+/// path expands into a `bool` tree the node refuses to read a question from,
+/// so the caller's words are carried into `judge.query` or every plain-string
+/// judged search would be a 400. Refusals mirror the node's, using the node's
+/// own validator ([`xerj_rerank::judge::JudgeConfig::from_json`]), so an agent
+/// is told about a misspelt key without a round trip.
+fn apply_judge(
+    args: &Value,
+    body: &mut serde_json::Map<String, Value>,
+    plain_query: Option<&str>,
+    query_required: bool,
+) -> Result<(), String> {
+    let mut block = match args.get("judge") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => return Ok(()),
+        Some(Value::Bool(true)) => serde_json::Map::new(),
+        Some(Value::Object(o)) => o.clone(),
+        Some(_) => {
+            return Err(
+                "`judge` must be true, or an object such as {\"min_p\": 0.5} \
+                 (pass {} for defaults)"
+                    .to_string(),
+            )
+        }
+    };
+    if body.contains_key("sort") {
+        return Err(
+            "`judge` cannot be combined with `sort`: an explicit sort already fixes the \
+             order, and judging would reorder around it. Drop one of them"
+                .to_string(),
+        );
+    }
+    if !block.contains_key("query") {
+        match plain_query {
+            Some(q) => {
+                block.insert("query".into(), json!(q));
+            }
+            None if query_required => {
+                return Err(
+                    "`judge.query` is required for a hybrid search: it fuses several \
+                     sub-queries, so there is no single question to judge documents \
+                     against. Pass the natural-language question, e.g. \
+                     {\"judge\": {\"query\": \"why did the vpn drop?\"}}"
+                        .to_string(),
+                )
+            }
+            // A DSL object: the node reads the question from `match`,
+            // `match_phrase`, `multi_match`, `semantic` and
+            // `simple_query_string`, and refuses by name for anything else.
+            // Left to it, so there is one implementation of that rule.
+            None => {}
+        }
+    }
+    let block = Value::Object(block);
+    xerj_rerank::judge::JudgeConfig::from_json(&block).map_err(|e| e.to_string())?;
+    body.insert("judge".into(), block);
+    Ok(())
+}
+
 fn build_search(args: &Value) -> Result<BuiltRequest, String> {
     // #962: `index` used to be required, but nothing an agent reads said what
     // to pass — the first real tool call after `xerj autoindex` was an error
@@ -1273,6 +1388,7 @@ fn build_search(args: &Value) -> Result<BuiltRequest, String> {
         _ => None,
     };
     apply_rerank(args, &mut body, plain_query, false)?;
+    apply_judge(args, &mut body, plain_query, false)?;
     // String-mode defaults, only where the caller left them unset: project
     // `_source` down to the citation fields and ask for `_passage` so the
     // response is the matching snippet, not the whole file body (measured ~9x
@@ -1361,6 +1477,7 @@ fn build_hybrid(args: &Value) -> Result<BuiltRequest, String> {
     body.insert("query".into(), json!({ "hybrid": Value::Object(hybrid) }));
     copy_opt(args, &mut body, "size");
     apply_rerank(args, &mut body, None, true)?;
+    apply_judge(args, &mut body, None, true)?;
     Ok((
         Method::Post,
         format!("/{index}/_search"),
@@ -2070,6 +2187,141 @@ mod tests {
                     .map(|r| r.iter().any(|r| r == "rerank"))
                     .unwrap_or(false),
                 "{tool}: `rerank` is optional"
+            );
+        }
+    }
+
+    // ── `judge` argument (issue #1060) ─────────────────────────────────────
+
+    #[test]
+    fn judge_is_absent_unless_asked_for() {
+        for args in [
+            json!({ "index": "d", "query": "how do refunds work" }),
+            json!({ "index": "d", "query": "how do refunds work", "judge": null }),
+            json!({ "index": "d", "query": "how do refunds work", "judge": false }),
+        ] {
+            let (_, _, body) = built(build_search(&args));
+            assert!(
+                body.get("judge").is_none(),
+                "no `judge` block means no judging and an unchanged response: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_string_query_becomes_the_judge_question() {
+        // Same defect class as `rerank`: the string path expands to a `bool`,
+        // which the node refuses to read a question from.
+        let (_, _, body) = built(build_search(&json!({
+            "index": "d", "query": "how do refunds work", "judge": true
+        })));
+        assert!(body["query"]["bool"].is_object(), "still definition-first");
+        assert_eq!(body["judge"]["query"], "how do refunds work");
+
+        let (_, _, body) = built(build_search(&json!({
+            "index": "d", "query": "how do refunds work", "judge": { "min_p": 0.5 }
+        })));
+        assert_eq!(body["judge"]["query"], "how do refunds work");
+        assert_eq!(body["judge"]["min_p"], 0.5);
+    }
+
+    #[test]
+    fn an_explicit_judge_query_is_never_overwritten() {
+        let (_, _, body) = built(build_search(&json!({
+            "index": "d", "query": "refund",
+            "judge": { "query": "What is the refund window for annual plans?" }
+        })));
+        assert_eq!(
+            body["judge"]["query"],
+            "What is the refund window for annual plans?"
+        );
+    }
+
+    #[test]
+    fn judge_and_rerank_compose_on_the_same_search() {
+        // The node runs the hosted stage first, then judges the emitted page.
+        // Both blocks ride the body; neither may drop the other.
+        let (_, _, body) = built(build_search(&json!({
+            "index": "d", "query": "how do refunds work",
+            "rerank": { "window": 20 },
+            "judge": { "min_p": 0.4 }
+        })));
+        assert_eq!(body["rerank"]["window"], 20);
+        assert_eq!(body["judge"]["min_p"], 0.4);
+        assert_eq!(body["judge"]["query"], "how do refunds work");
+    }
+
+    #[test]
+    fn judge_refusals_happen_before_the_round_trip() {
+        let bad = |args: Value| build_search(&args).expect_err("must be refused");
+
+        let e = bad(json!({ "index": "d", "query": "q", "judge": "yes" }));
+        assert!(e.contains("must be true, or an object"), "{e}");
+
+        let e = bad(json!({ "index": "d", "query": "q", "sort": ["_doc"], "judge": true }));
+        assert!(e.contains("sort"), "{e}");
+
+        // The node's own validator: a misspelt key is named, not dropped.
+        let e = bad(json!({ "index": "d", "query": "q", "judge": { "treshold": 0.5 } }));
+        assert!(e.contains("treshold"), "{e}");
+
+        let e = bad(json!({ "index": "d", "query": "q", "judge": { "min_p": 7 } }));
+        assert!(e.contains("between 0 and 1"), "{e}");
+
+        let e = bad(json!({ "index": "d", "query": "q", "judge": { "local": false } }));
+        assert!(e.contains("cannot be false"), "{e}");
+    }
+
+    #[test]
+    fn hybrid_judge_requires_the_question() {
+        let queries = json!([{ "query": { "match": { "body": "vpn" } } }]);
+        let e = build_hybrid(&json!({ "index": "h", "queries": queries, "judge": true }))
+            .expect_err("a hybrid has no single question");
+        assert!(e.contains("judge.query"), "{e}");
+
+        let (_, path, body) = built(build_hybrid(&json!({
+            "index": "h", "queries": queries,
+            "judge": { "query": "why did the vpn drop?", "min_p": 0.3 }
+        })));
+        assert_eq!(path, "/h/_search");
+        assert_eq!(body["judge"]["query"], "why did the vpn drop?");
+        assert_eq!(body["judge"]["min_p"], 0.3);
+        assert!(body["query"]["hybrid"].is_object());
+    }
+
+    #[test]
+    fn the_judge_description_tells_an_agent_what_it_needs_to_decide() {
+        let specs = tool_specs();
+        for tool in ["xerj_search", "xerj_hybrid_search"] {
+            let spec = specs
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == tool)
+                .unwrap();
+            let d = spec["inputSchema"]["properties"]["judge"]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{tool} must describe `judge`"));
+            for needle in [
+                "zero-token",
+                "NO document text leaves the machine",
+                "_p_relevant",
+                "min_p",
+                "judged",
+                // The honest ceiling: the lexical arm is named, never passed
+                // off as a model.
+                "HONEST CEILING",
+                "judged.scorer",
+                "lexical",
+            ] {
+                assert!(d.contains(needle), "{tool}: description lacks `{needle}`");
+            }
+            assert!(
+                !spec["inputSchema"]["required"]
+                    .as_array()
+                    .map(|r| r.iter().any(|r| r == "judge"))
+                    .unwrap_or(false),
+                "{tool}: `judge` is optional"
             );
         }
     }

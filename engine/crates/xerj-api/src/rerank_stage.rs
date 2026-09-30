@@ -86,8 +86,9 @@ pub struct RerankPlan {
 ///
 /// Deliberately shallow. A `bool` tree, a `hybrid` with two different arms or a
 /// `query_string` with operators has no single "question", and picking one
-/// would rank against a guess. Those callers pass `rerank.query`.
-fn infer_query(q: &Value) -> Option<String> {
+/// would rank against a guess. Those callers pass `rerank.query` (or, for the
+/// local judge, `judge.query`).
+pub(crate) fn infer_query(q: &Value) -> Option<String> {
     let obj = q.as_object()?;
     if obj.len() != 1 {
         return None;
@@ -203,14 +204,17 @@ fn fields_requests(fields: Option<&Value>, field: &str) -> bool {
 /// text that could never leave the node (measured in review). Stopping at the
 /// budget here bounds every later copy by `window × 2 × max_doc_chars`
 /// characters, and what is sent is character-for-character what it was.
-struct Prose {
+pub(crate) struct Prose {
     buf: String,
     /// Characters still allowed.
     room: usize,
 }
+// (Fields stay private; the constructor and the pushes below are the whole
+// interface, and the judge stage builds its candidates through the same
+// methods.)
 
 impl Prose {
-    fn new(max_chars: usize) -> Self {
+    pub(crate) fn new(max_chars: usize) -> Self {
         Self {
             buf: String::new(),
             room: max_chars,
@@ -243,7 +247,7 @@ impl Prose {
     /// Append every string under `v` — a string, or an array of strings.
     /// Numbers, booleans, vectors and nested objects are not prose and are not
     /// sent.
-    fn push(&mut self, v: &Value) {
+    pub(crate) fn push(&mut self, v: &Value) {
         match v {
             Value::String(s) => self.push_str(s),
             Value::Array(items) => items
@@ -260,12 +264,71 @@ impl Prose {
 }
 
 /// `a.b.c` looked up first as a literal key, then as a path.
-fn lookup<'a>(obj: &'a serde_json::Map<String, Value>, field: &str) -> Option<&'a Value> {
+pub(crate) fn lookup<'a>(
+    obj: &'a serde_json::Map<String, Value>,
+    field: &str,
+) -> Option<&'a Value> {
     if let Some(v) = obj.get(field) {
         return Some(v);
     }
     let (head, rest) = field.split_once('.')?;
     lookup(obj.get(head)?.as_object()?, rest)
+}
+
+/// The candidate a judge reads when no field list restricts what leaves the
+/// node: the title in its own slot, the matching passage FIRST in the text,
+/// then every string `_source` returns, then the hit's `fields` in name
+/// order.
+///
+/// Free-standing and `pub(crate)` so the local judge stage
+/// ([`crate::judge_stage`]) builds its candidates through the same code the
+/// hosted stage does: one implementation of "the judge sees what the response
+/// returns", so the two stages can never drift on what text a hit carries.
+pub(crate) fn unrestricted_candidate(
+    ordinal: usize,
+    hit: &EsHit,
+    max_doc_chars: usize,
+) -> Candidate {
+    let mut title = Prose::new(max_doc_chars);
+    RerankPlan::field_text(hit, "title", &mut title);
+
+    let mut text = Prose::new(max_doc_chars);
+    // The matching passage goes FIRST when the response carries one. Text is
+    // cut at `max_doc_chars`, so on a long document an appended passage would
+    // be the part that gets cut — and it is the part that says why this hit
+    // matched.
+    let passage = xerj_query::executor::PASSAGE_RESPONSE_FIELD;
+    RerankPlan::field_text(hit, passage, &mut text);
+    let source = hit.source.as_ref().and_then(Value::as_object);
+    if let Some(obj) = source {
+        obj.iter()
+            .filter(|(k, _)| k.as_str() != "title")
+            .for_each(|(_, v)| text.push(v));
+    }
+    // Then what the hit returns under `fields` — where `fields`,
+    // `docvalue_fields`, `stored_fields` and `script_fields` put their
+    // values, once each, in a stable (sorted) order so the same response
+    // always sends the same text. See `RerankPlan::candidate` for the full
+    // rationale.
+    if let Some(returned) = &hit.fields {
+        let mut names: Vec<&String> = returned
+            .keys()
+            .filter(|k| {
+                k.as_str() != "title"
+                    && k.as_str() != passage
+                    && !source.is_some_and(|o| o.contains_key(k.as_str()))
+            })
+            .collect();
+        names.sort();
+        for name in names {
+            text.push(&returned[name]);
+        }
+    }
+    Candidate {
+        ordinal,
+        title: (!title.is_empty()).then_some(title.buf),
+        text: text.buf,
+    }
 }
 
 impl RerankPlan {
@@ -437,7 +500,11 @@ impl RerankPlan {
     /// Collect the prose a hit returns under one field name: `_source` first,
     /// then the hit's `fields` — which is how fetched-not-stored values get
     /// judged.
-    fn field_text(hit: &EsHit, name: &str, out: &mut Prose) {
+    ///
+    /// Free-standing and `pub(crate)` so the judge stage reads exactly the
+    /// same text the hosted provider would: one implementation of "the judge
+    /// sees what the response returns".
+    pub(crate) fn field_text(hit: &EsHit, name: &str, out: &mut Prose) {
         let src = hit.source.as_ref().and_then(Value::as_object);
         if let Some(v) = src
             .and_then(|o| lookup(o, name))
@@ -460,68 +527,25 @@ impl RerankPlan {
     }
 
     fn candidate(&self, ordinal: usize, hit: &EsHit) -> Candidate {
+        // Unrestricted is the reading the local judge stage uses too — see
+        // [`unrestricted_candidate`].
+        let Some(fields) = &self.cfg.fields else {
+            return unrestricted_candidate(ordinal, hit, self.cfg.max_doc_chars);
+        };
         // `rerank.fields` is an egress control, so it is exhaustive: a caller
         // who wrote `["body"]` has said what may leave the machine, and the
-        // title is not on that list. Unrestricted, the title is promoted to its
-        // own slot because a judge reads it differently from body text.
-        let title_allowed = match &self.cfg.fields {
-            None => true,
-            Some(fields) => fields.iter().any(|f| f == "title"),
-        };
+        // title is not on that list.
         // Title and text are each cut at `max_doc_chars` as they are
         // collected — see [`Prose`].
+        let title_allowed = fields.iter().any(|f| f == "title");
         let mut title = Prose::new(self.cfg.max_doc_chars);
         if title_allowed {
             Self::field_text(hit, "title", &mut title);
         }
 
         let mut text = Prose::new(self.cfg.max_doc_chars);
-        match &self.cfg.fields {
-            Some(fields) => {
-                for f in fields.iter().filter(|f| f.as_str() != "title") {
-                    Self::field_text(hit, f, &mut text);
-                }
-            }
-            None => {
-                // The matching passage goes FIRST when the response carries
-                // one. Text is cut at `max_doc_chars`, so on a long document an
-                // appended passage would be the part that gets cut — and it is
-                // the part that says why this hit matched.
-                let passage = xerj_query::executor::PASSAGE_RESPONSE_FIELD;
-                Self::field_text(hit, passage, &mut text);
-                let source = hit.source.as_ref().and_then(Value::as_object);
-                if let Some(obj) = source {
-                    obj.iter()
-                        .filter(|(k, _)| k.as_str() != "title")
-                        .for_each(|(_, v)| text.push(v));
-                }
-                // Then what the hit returns under `fields` — where `fields`,
-                // `docvalue_fields`, `stored_fields` and `script_fields` put
-                // their values. "The judge sees what the response returns"
-                // includes them: the docs and `prepare`'s own refusal both say
-                // "return the text through `fields`", and until this loop
-                // existed `_source: false` + `fields: ["body"]` + `rerank: {}`
-                // followed that advice into a second 400 ("nothing to judge").
-                // A name `_source` already returned at the top level is
-                // skipped, so a value present in both is sent once. `fields`
-                // is a `HashMap`; the names are sorted so the same response
-                // always sends the same text (the cut at `max_doc_chars` would
-                // otherwise fall on a different field from call to call).
-                if let Some(returned) = &hit.fields {
-                    let mut names: Vec<&String> = returned
-                        .keys()
-                        .filter(|k| {
-                            k.as_str() != "title"
-                                && k.as_str() != passage
-                                && !source.is_some_and(|o| o.contains_key(k.as_str()))
-                        })
-                        .collect();
-                    names.sort();
-                    for name in names {
-                        text.push(&returned[name]);
-                    }
-                }
-            }
+        for f in fields.iter().filter(|f| f.as_str() != "title") {
+            Self::field_text(hit, f, &mut text);
         }
         Candidate {
             ordinal,
@@ -842,6 +866,10 @@ pub fn status_for(e: &RerankError) -> u16 {
         // The server is not configured to reach the provider: not the
         // caller's mistake, and not a gateway fault either.
         RerankError::MissingKey(_) => 503,
+        // Originates from the judge stage (a local model that cannot load or
+        // score), never from the hosted provider — same class as MissingKey:
+        // server state, not the caller and not a gateway fault.
+        RerankError::LocalModel(_) => 503,
         RerankError::Transport(_)
         | RerankError::Status { .. }
         | RerankError::Malformed(_)

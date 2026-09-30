@@ -3453,6 +3453,12 @@ pub struct EsSearchBody {
     /// word would return lexical order to a caller who asked for something else.
     #[serde(default)]
     pub rerank: Option<Value>,
+    /// Opt-in local judging of the returned hits — see
+    /// [`crate::judge_stage`] (issue #1060). Declared for the same reason as
+    /// `rerank` one field above: a `judge` block serde dropped without a word
+    /// would hand back unjudged hits under a 200.
+    #[serde(default)]
+    pub judge: Option<Value>,
     /// `post_filter` — accepted-and-ignored for ordinary queries (it never
     /// reaches the engine; implementing it generally is #204), but captured
     /// here because beside a `hybrid` query it must be REJECTED (#943): the
@@ -3497,6 +3503,7 @@ impl Default for EsSearchBody {
             pit: None,
             timeout: None,
             rerank: None,
+            judge: None,
             post_filter: None,
         }
     }
@@ -3555,6 +3562,8 @@ const ES_SEARCH_TOP_LEVEL_KEYS: &[&str] = &[
     // reranking (`crate::rerank_stage`). Listed so the unknown-key gate lets it
     // through to a stage that validates its contents strictly.
     "rerank",
+    // The second (`crate::judge_stage`, issue #1060), same rule.
+    "judge",
 ];
 
 /// A minimal position-tracking JSON scanner used solely to locate the first
@@ -7959,6 +7968,11 @@ fn search_response_hint(index: &str, body: &EsSearchBody, hits: &[EsHit]) -> Opt
     if let Some(rerank) = &body.rerank {
         hint["hints"][0]["try"]["body"]["rerank"] = rerank.clone();
     }
+    // Same rule for the judge block: a suggested request that lost the
+    // caller's `judge` would come back unjudged and unpruned.
+    if let Some(judge) = &body.judge {
+        hint["hints"][0]["try"]["body"]["judge"] = judge.clone();
+    }
     Some(hint)
 }
 
@@ -9444,6 +9458,32 @@ async fn search_impl(
         Ok(plan) => plan,
         Err(reason) => {
             crate::rerank_stage::record_refused(&state.metrics);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "root_cause": [{
+                            "type": "illegal_argument_exception",
+                            "reason": reason,
+                        }],
+                        "type": "illegal_argument_exception",
+                        "reason": reason,
+                    },
+                    "status": 400,
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate the `judge` block under the same discipline, before the search
+    // runs: a request whose judge block is unsatisfiable should not pay for
+    // the search that cannot be judged. Runs AFTER `rerank`'s prepare because
+    // that is the one stage allowed to widen the page; the judge judges the
+    // page as emitted and needs no widening of its own.
+    let judge_plan = match crate::judge_stage::JudgePlan::prepare(&mut body, is_scroll_request) {
+        Ok(plan) => plan,
+        Err(reason) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({
@@ -14249,6 +14289,7 @@ async fn search_impl(
                 ),
                 ignored: ignored_list,
                 ignored_field_values,
+                p_relevant: None,
             }
         })
         .collect();
@@ -14466,6 +14507,53 @@ async fn search_impl(
         }
     };
 
+    // ── judge stage ────────────────────────────────────────────────────────
+    // Opt-in local judging (issue #1060). Runs AFTER the rerank stage, so it
+    // judges the page this response actually emits: the two blocks compose
+    // (the hosted rerank widens and reorders its window, the local judge then
+    // re-judges and prunes the emitted page) and each stands alone. The
+    // engine's — or the hosted provider's — `_score` stays untouched on every
+    // hit; the judge adds `_p_relevant` and may drop hits below `min_p`,
+    // which is why `took` and the `_savings` sum are re-stamped here too.
+    let judged_info = match &judge_plan {
+        None => None,
+        Some(plan) => {
+            let applied = plan.apply(&state.decide, &mut hits, &mut max_score).await;
+            match applied {
+                Ok(info) => {
+                    took_ms = started.elapsed().as_millis() as u64;
+                    // `_savings` is summed over the hits a response emits; a
+                    // `min_p` drop removed some.
+                    if let Some((record, _)) = savings_claim {
+                        let emitted: u64 = hits
+                            .iter()
+                            .filter_map(|h| savings_by_hit.get(&(h.index.clone(), h.id.clone())))
+                            .sum();
+                        savings_claim = Some((record, emitted));
+                    }
+                    Some(info)
+                }
+                Err(e) => {
+                    let status = crate::judge_stage::status_for(&e);
+                    let kind = crate::judge_stage::error_type_for(&e);
+                    let reason = format!("judge failed: {e}");
+                    return (
+                        StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+                        Json(json!({
+                            "error": {
+                                "root_cause": [{ "type": kind, "reason": reason }],
+                                "type": kind,
+                                "reason": reason,
+                            },
+                            "status": status,
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    };
+
     // Computed before `hits` is moved into `response_body` below.
     // Two independent diagnostics, merged into one `hints` array rather than
     // one winning: a query can both name a nonexistent field AND return an
@@ -14625,6 +14713,22 @@ async fn search_impl(
     // engine's own after a degrade. It goes ahead of `hits` for the same reason
     // the hint below does: a reader that truncates long output from the bottom
     // must still see it.
+    // `judged` says the same thing about the local judge's pass — which
+    // scorer judged, what was kept and what was dropped — and goes ahead of
+    // `hits` for the same reader-truncation reason as `_rerank` below. It is
+    // prepended FIRST so that `_rerank`'s own prepend lands it ahead of
+    // `judged`: the wire order is the order the stages ran.
+    if let Some(info) = judged_info {
+        if let Some(obj) = response_body.as_object_mut() {
+            let mut rebuilt = serde_json::Map::with_capacity(obj.len() + 1);
+            rebuilt.insert("judged".to_string(), info);
+            for (k, v) in obj.iter() {
+                rebuilt.insert(k.clone(), v.clone());
+            }
+            *obj = rebuilt;
+        }
+    }
+
     if let Some(info) = rerank_info {
         if let Some(obj) = response_body.as_object_mut() {
             let mut rebuilt = serde_json::Map::with_capacity(obj.len() + 1);
@@ -21184,10 +21288,15 @@ pub async fn search_with_scroll(
 
     // A scroll streams the engine's order; `rerank` cannot apply to it, and
     // this handler used to rebuild the body with `rerank: None` — dropping it.
-    if body.rerank.is_some() {
+    // The `judge` stage reorders too, so the same refusal applies.
+    if body.rerank.is_some() || body.judge.is_some() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(crate::rerank_stage::unsupported_on("_search_scroll")),
+            Json(if body.rerank.is_some() {
+                crate::rerank_stage::unsupported_on("_search_scroll")
+            } else {
+                crate::judge_stage::unsupported_on("_search_scroll")
+            }),
         )
             .into_response();
     }
@@ -21252,6 +21361,7 @@ pub async fn search_with_scroll(
         pit: body.pit.clone(),
         timeout: body.timeout.clone(),
         rerank: None,
+        judge: None,
         // #943: forward so the post_filter-beside-hybrid rejection in
         // `build_search_request` covers scroll requests too.
         post_filter: body.post_filter.clone(),
@@ -21379,6 +21489,7 @@ pub async fn search_with_scroll(
                     },
                     ignored: None,
                     ignored_field_values: None,
+                    p_relevant: None,
                 }
             })
             .collect();
@@ -21522,6 +21633,7 @@ pub async fn search_with_scroll(
             },
             ignored: None,
             ignored_field_values: None,
+            p_relevant: None,
         })
         .collect();
 
@@ -21556,6 +21668,10 @@ pub struct ScrollBody {
     /// class the `?scroll=` path already refuses.
     #[serde(default)]
     pub rerank: Option<Value>,
+    /// Same rule for `judge` (issue #1060): a continuation streams the
+    /// engine's order and cannot re-judge it.
+    #[serde(default)]
+    pub judge: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -21575,10 +21691,14 @@ pub async fn next_scroll(
 ) -> impl IntoResponse {
     // scroll_id may come from body OR query param
     let body = body.into_or_default();
-    if body.rerank.is_some() {
+    if body.rerank.is_some() || body.judge.is_some() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(crate::rerank_stage::unsupported_on("_search/scroll")),
+            Json(if body.rerank.is_some() {
+                crate::rerank_stage::unsupported_on("_search/scroll")
+            } else {
+                crate::judge_stage::unsupported_on("_search/scroll")
+            }),
         )
             .into_response();
     }
@@ -21784,6 +21904,7 @@ async fn scroll_page_response(
                         },
                         ignored: None,
                         ignored_field_values: None,
+                        p_relevant: None,
                     }
                 })
                 .collect();
@@ -24102,9 +24223,13 @@ async fn msearch_impl(
         // `rerank` is a `_search` stage and this path has its own, smaller
         // renderer. `parse_request` ignores keys it does not know, so without
         // this the item came back 200 in the engine's order — refused per item
-        // instead, and the rest of the batch still runs.
-        if crate::rerank_stage::carries_rerank(&search_body_val) {
-            responses.push(crate::rerank_stage::unsupported_on("_msearch"));
+        // instead, and the rest of the batch still runs. The `judge` stage is
+        // refused for the same reason.
+        if crate::judge_stage::carries_second_stage(&search_body_val) {
+            responses.push(crate::judge_stage::unsupported_second_stage_on(
+                "_msearch",
+                &search_body_val,
+            ));
             continue;
         }
 
@@ -32787,11 +32912,15 @@ pub async fn search_template(
     }
 
     // A template that renders a `rerank` block: this minimal path does not run
-    // the stage, and `parse_request` would drop the key without a word.
-    if crate::rerank_stage::carries_rerank(&search_body_val) {
+    // the stage, and `parse_request` would drop the key without a word. Same
+    // for a `judge` block.
+    if crate::judge_stage::carries_second_stage(&search_body_val) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(crate::rerank_stage::unsupported_on("_search/template")),
+            Json(crate::judge_stage::unsupported_second_stage_on(
+                "_search/template",
+                &search_body_val,
+            )),
         )
             .into_response();
     }
@@ -32982,9 +33111,12 @@ async fn msearch_template_impl(
         };
 
         // Same refusal as `_msearch` and `_search/template`: the rendered body
-        // carries a `rerank` block this path would silently drop.
-        if crate::rerank_stage::carries_rerank(&search_body_val) {
-            responses.push(crate::rerank_stage::unsupported_on("_msearch/template"));
+        // carries a `rerank` or `judge` block this path would silently drop.
+        if crate::judge_stage::carries_second_stage(&search_body_val) {
+            responses.push(crate::judge_stage::unsupported_second_stage_on(
+                "_msearch/template",
+                &search_body_val,
+            ));
             continue;
         }
 
@@ -37619,11 +37751,17 @@ pub async fn async_search_submit(
     let mut body = body.into_or_default();
     // An async search stores its response and hands it back later; a stored
     // rerank would also be a stored third-party call nobody is waiting on.
-    // Refused rather than dropped.
-    if body.rerank.is_some() {
+    // Refused rather than dropped — and a stored `judge` pass is refused too:
+    // the caller asked for judged, pruned hits and would get the stored
+    // engine's order instead.
+    if body.rerank.is_some() || body.judge.is_some() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(crate::rerank_stage::unsupported_on("_async_search")),
+            Json(if body.rerank.is_some() {
+                crate::rerank_stage::unsupported_on("_async_search")
+            } else {
+                crate::judge_stage::unsupported_on("_async_search")
+            }),
         )
             .into_response();
     }
@@ -38294,8 +38432,9 @@ pub async fn rank_eval(
         // "reranking changed nothing", under a 200, from the one endpoint whose
         // job is measuring ranking quality. Reported per request in `failures`
         // (the rest of the batch still runs), like every other request this
-        // handler cannot run, and nothing is sent to the provider.
-        if crate::rerank_stage::carries_rerank(&req_spec.request) {
+        // handler cannot run, and nothing is sent to the provider. A `judge`
+        // block would vanish the same way, for the same reason.
+        if crate::judge_stage::carries_second_stage(&req_spec.request) {
             crate::rerank_stage::record_refused(&state.metrics);
             // The same `illegal_argument_exception` body every other surface
             // that does not run the stage answers with, not the
@@ -38303,7 +38442,9 @@ pub async fn rank_eval(
             // request was never run.
             failures.insert(
                 req_spec.id.clone(),
-                crate::rerank_stage::unsupported_on("_rank_eval")["error"].clone(),
+                crate::judge_stage::unsupported_second_stage_on("_rank_eval", &req_spec.request)
+                    ["error"]
+                    .clone(),
             );
             continue;
         }
