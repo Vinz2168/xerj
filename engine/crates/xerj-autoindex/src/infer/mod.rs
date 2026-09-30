@@ -330,6 +330,19 @@ pub struct FieldSpec {
     pub date_max: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub date_evidence: Vec<String>,
+    /// Sampled integer range of a `long` field (#1055). `FieldAcc` has held
+    /// `int_min`/`int_max` since the beginning; the spec never exposed them.
+    /// `#[serde(default)]` because every catalog and state file written before
+    /// this field lacks it, and those must keep deserializing.
+    ///
+    /// Deliberately `None` on `double` fields: the accumulator only tracks the
+    /// i64-parseable subset, so on a fractional column these would be the
+    /// range of the integers *within* it — a wrong range stated as fact. An
+    /// absent range is honest; a partial one is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_min: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_max: Option<i64>,
 }
 
 fn p95(samples: &[u32]) -> u32 {
@@ -450,6 +463,8 @@ pub fn infer_fields_with_policy(
             date_min: acc.date_min.map(|d| dates::to_rfc3339_millis(&d)),
             date_max: acc.date_max.map(|d| dates::to_rfc3339_millis(&d)),
             date_evidence: Vec::new(),
+            num_min: None,
+            num_max: None,
         };
         let n = acc.n;
         let th95 = |x: u64| x * 100 >= n * 95;
@@ -481,6 +496,13 @@ pub fn infer_fields_with_policy(
         // numeric
         if th95(acc.long_ok) && acc.long_ok > 0 {
             spec.es_type = "long".into();
+            // #1055: the sampled integer range rides the spec wherever the
+            // elected type is `long` — including the epoch-candidate that
+            // stays `long` pending corroboration and the one a sibling date
+            // range later flips to `date` (where it lands beside the
+            // RFC3339 `date_min`/`date_max` the flip fills in).
+            spec.num_min = Some(acc.int_min);
+            spec.num_max = Some(acc.int_max);
             // epoch candidate?
             let (lo, hi) = (acc.int_min, acc.int_max);
             let in_ms = lo >= dates::EPOCH_MS_MIN && hi <= dates::EPOCH_MS_MAX;
@@ -1011,5 +1033,102 @@ mod tests {
         let specs = infer_fields(&fields, 20, true);
         assert_eq!(specs[0].es_type, "keyword", "{specs:#?}");
         assert_eq!(elected_default_analyzer(&specs, &fields), None);
+    }
+
+    // ── #1055: the sampled numeric range rides the spec ───────────────────
+
+    fn one_field_spec(acc: FieldAcc, records: u64) -> Vec<FieldSpec> {
+        let mut fields = HashMap::new();
+        fields.insert("f".to_string(), acc);
+        infer_fields(&fields, records, true)
+    }
+
+    /// A `long` field carries the integer range its sample actually showed —
+    /// `FieldAcc::int_min`/`int_max` existed from the start; the spec just
+    /// never exposed them. Negative bounds are part of the pin.
+    #[test]
+    fn a_long_field_carries_its_sampled_integer_range() {
+        let mut acc = FieldAcc::default();
+        for v in [3i64, 17, -2, 9] {
+            acc.add(&Value::Number(v.into()));
+        }
+        let specs = one_field_spec(acc, 4);
+        assert_eq!(specs[0].es_type, "long");
+        assert_eq!(specs[0].num_min, Some(-2));
+        assert_eq!(specs[0].num_max, Some(17));
+    }
+
+    /// The range must survive the catalog round trip: `dataset_doc` stores the
+    /// specs as `fields_json`, and every reader (the CLI map, the MCP tool)
+    /// parses that string back. Serialisation is therefore pinned literally.
+    #[test]
+    fn the_numeric_range_serialises_into_fields_json_and_back() {
+        let mut acc = FieldAcc::default();
+        for v in [3i64, 17, -2] {
+            acc.add(&Value::Number(v.into()));
+        }
+        let specs = one_field_spec(acc, 3);
+        let raw = serde_json::to_string(&specs[0]).unwrap();
+        assert!(raw.contains(r#""num_min":-2"#), "{raw}");
+        assert!(raw.contains(r#""num_max":17"#), "{raw}");
+        let back: FieldSpec = serde_json::from_str(&raw).unwrap();
+        assert_eq!((back.num_min, back.num_max), (Some(-2), Some(17)));
+    }
+
+    /// Every catalog and state file written before #1055 lacks the keys
+    /// entirely; `#[serde(default)]` is what keeps those deserializing, so a
+    /// pre-range `fields_json` must come back as `None` — never as an error
+    /// and never as a fabricated `Some(0)`.
+    #[test]
+    fn a_spec_written_before_numeric_ranges_still_deserialises() {
+        let raw = r#"{"name":"n","es_type":"long","cardinality_est":3,
+            "cardinality_overflow":false,"null_ratio":0.0,"avg_len":0.0,
+            "coverage":1.0,"examples":[]}"#;
+        let spec: FieldSpec = serde_json::from_str(raw).expect("old fields_json parses");
+        assert_eq!(spec.num_min, None);
+        assert_eq!(spec.num_max, None);
+        assert_eq!(spec.es_type, "long");
+    }
+
+    /// A fractional column elects `double`, and the accumulator tracks only
+    /// its i64-parseable subset — so the spec must state NO range there
+    /// rather than the integers' range over a `double` field.
+    #[test]
+    fn a_double_field_states_no_range_rather_than_the_integer_subset() {
+        let mut acc = FieldAcc::default();
+        for v in ["1.5", "2.25", "0.125"] {
+            acc.add(&Value::String(v.into()));
+        }
+        let specs = one_field_spec(acc, 3);
+        assert_eq!(specs[0].es_type, "double");
+        assert_eq!(specs[0].num_min, None, "the int range would be a lie here");
+        assert_eq!(specs[0].num_max, None);
+    }
+
+    /// Non-numeric elects carry no range: the keys are absent from the JSON,
+    /// not null-padded.
+    #[test]
+    fn keyword_and_date_fields_omit_the_numeric_keys_entirely() {
+        let mut acc = FieldAcc::default();
+        for v in ["INFO", "WARN", "ERROR", "INFO"] {
+            acc.add(&Value::String(v.into()));
+        }
+        let specs = one_field_spec(acc, 4);
+        assert_eq!(specs[0].es_type, "keyword");
+        let raw = serde_json::to_string(&specs[0]).unwrap();
+        assert!(!raw.contains("num_min"), "{raw}");
+        assert!(!raw.contains("num_max"), "{raw}");
+
+        // A string-date field: the range it carries is `date_min`/`date_max`
+        // (pre-existing), never the numeric pair.
+        let mut acc = FieldAcc::default();
+        for d in ["2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z"] {
+            acc.add(&Value::String(d.into()));
+        }
+        let specs = one_field_spec(acc, 2);
+        assert_eq!(specs[0].es_type, "date");
+        assert!(specs[0].date_min.is_some());
+        assert!(specs[0].date_max.is_some());
+        assert_eq!((specs[0].num_min, specs[0].num_max), (None, None));
     }
 }

@@ -3089,6 +3089,8 @@ fn pipeline_keyword_spec(name: &str) -> infer::FieldSpec {
         date_min: None,
         date_max: None,
         date_evidence: Vec::new(),
+        num_min: None,
+        num_max: None,
     }
 }
 
@@ -10010,6 +10012,8 @@ mod stem_default_tests {
             date_min: None,
             date_max: None,
             date_evidence: vec![],
+            num_min: None,
+            num_max: None,
         };
         PlanDataset {
             slug: slug.into(),

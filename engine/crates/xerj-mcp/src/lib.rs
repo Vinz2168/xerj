@@ -9,12 +9,12 @@
 //!
 //! It speaks the MCP **stdio transport**: newline-delimited
 //! JSON-RPC 2.0 messages on stdin/stdout. It exposes XERJ to any MCP-capable
-//! agent host (Claude Desktop, IDE agents, custom orchestrators) as twelve
+//! agent host (Claude Desktop, IDE agents, custom orchestrators) as thirteen
 //! tools that map 1:1 onto XERJ's real, verified REST surface. Every tool is
 //! a *thin proxy*: it constructs exactly the request the running engine
 //! already accepts and forwards it to a configurable base URL.
 //!
-//! ## The twelve canonical agent operations
+//! ## The thirteen canonical agent operations
 //!
 //! | MCP tool               | XERJ endpoint                         | Real capability |
 //! |------------------------|---------------------------------------|-----------------|
@@ -29,6 +29,7 @@
 //! | `xerj_brain_unlink`    | `DELETE /_graph/{brain}/link/{id}`    | retire a link (soft-invalidate; never deletes) |
 //! | `xerj_brain_overview`  | `GET /_graph/{brain}/overview`        | whole-brain orientation: counts, hubs, detectors, timeline |
 //! | `xerj_plan`            | `POST /_ask`                          | natural-language prompt in, VALIDATED query DSL out (deterministic planner, not an LLM) |
+//! | `xerj_map`             | `POST /autoindex-catalog/_search`     | per-index field map from the autoindex catalog (#1055) |
 //!
 //! ## Honesty notes (must match the engine, never oversell)
 //!
@@ -86,6 +87,7 @@
 //! words), with overlapping file:line passages deduped before budgeting and
 //! over-budget hits reduced to locators.
 
+mod map;
 mod token_budget;
 
 use std::time::Duration;
@@ -113,10 +115,10 @@ USAGE:
     xerj mcp [OPTIONS]              (or the standalone binary: xerj-mcp [OPTIONS])
 
 Speaks MCP over stdio (newline-delimited JSON-RPC 2.0 on stdin/stdout) and
-proxies twelve tools — xerj_search, xerj_semantic_search, xerj_vector_search,
+proxies thirteen tools — xerj_search, xerj_semantic_search, xerj_vector_search,
 xerj_hybrid_search, xerj_memory_store, xerj_memory_recall, xerj_brain_ego,
 xerj_brain_link, xerj_brain_unlink, xerj_brain_overview, xerj_code_search,
-xerj_plan — to a
+xerj_map, xerj_plan — to a
 XERJ node that
 is ALREADY RUNNING. This command does not start a node; start one first with
 `xerj --data-dir ./data`.
@@ -414,6 +416,9 @@ fn initialize_result(msg: &Value) -> Value {
              kNN over a dense_vector field, xerj_hybrid_search to fuse \
              lexical + vector results (rrf|linear), and xerj_memory_store / \
              xerj_memory_recall for durable agent memory recalled by meaning. \
+             Call xerj_map FIRST on an autoindexed node: it returns each \
+             index's field map (names, types, cardinality, coverage, \
+             examples, date/numeric ranges) so your DSL uses real fields. \
              xerj_search and xerj_hybrid_search take an optional `rerank` \
              argument: a second stage that re-judges the top hits with an \
              external relevance model. It only works if the node's operator \
@@ -552,7 +557,7 @@ fn max_tokens_arg_schema() -> Value {
     })
 }
 
-/// The twelve tool specifications advertised via `tools/list`. Input schemas
+/// The thirteen tool specifications advertised via `tools/list`. Input schemas
 /// are plain JSON Schema; every property maps onto a field the engine accepts.
 ///
 /// Public because this is the single source of truth for the published
@@ -884,6 +889,51 @@ pub fn tool_specs() -> Value {
             }
         },
         {
+            "name": "xerj_map",
+            "description": concat!(
+                "Per-index FIELD MAP from this node's autoindex catalog — call it ",
+                "BEFORE writing query DSL, so you stop guessing field names. For each ",
+                "catalogued index: record count, time field and time range, semantic ",
+                "body field, and every field the profiler inferred — name, es_type ",
+                "(keyword|text|long|double|boolean|date|semantic_text), date encoding, ",
+                "semantic tag, cardinality estimate, coverage, up to 5 examples, and ",
+                "the sampled date AND numeric min-max (numeric ranges appear on `long` ",
+                "fields only; fractional `double` ranges are not tracked). Reads the ",
+                "catalog index `autoindex-catalog` that `xerj autoindex <folder>` ",
+                "writes; never-autoindexed indexes are not listed. Honesty: every fact ",
+                "is inferred from a bounded sample taken at autoindex time — ",
+                "cardinality is an estimate (with `cardinality_overflow:true` it means ",
+                "AT LEAST that many), and min/max/coverage describe the sample, not ",
+                "the whole index. Up to 100 indexes per call (`indexes_omitted` ",
+                "reports more)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index": {
+                        "type": "string",
+                        "description": "Index name or `*`-glob (e.g. `ax-logs`, `ax-*`). Default: every \
+                         catalogued index. An exact name filters engine-side; a glob filters \
+                         client-side over the catalog's index names."
+                    },
+                    "max_bytes": {
+                        "type": "integer",
+                        "minimum": map::MIN_MAX_BYTES,
+                        "description": format!(
+                            "Per-index byte budget for one rendered index entry (default {}). \
+                             An entry NEVER exceeds it: the trim ladder first cuts per-field \
+                             examples to one, then drops examples, then per-field notes, then \
+                             the lowest-coverage fields — and the entry's `trimmed` and \
+                             `fields_omitted` say exactly what went. The budget is per index; \
+                             a multi-index response carries one such entry per index. Minimum {}.",
+                            map::DEFAULT_MAX_BYTES,
+                            map::MIN_MAX_BYTES,
+                        )
+                    }
+                }
+            }
+        },
+        {
             "name": "xerj_code_search",
             "description": concat!(
                 "Reference-coding retrieval over a corpus of peer projects: how did ",
@@ -1001,6 +1051,10 @@ async fn call_tool(ctx: &Ctx, msg: &Value) -> Value {
         "xerj_brain_overview" => build_brain_overview(&args),
         // #1056: prompt in, validated DSL out — a plain engine proxy.
         "xerj_plan" => build_plan(&args),
+        // #1055: the catalog read is a proxy-with-post-processing, like
+        // code_search — it renders the per-index field map itself, so it
+        // returns a tool result directly instead of a BuiltRequest.
+        "xerj_map" => return map::run(ctx, &args).await,
         "xerj_code_search" => return run_code_search(ctx, &args).await,
         other => return tool_text(format!("unknown tool: {other}"), true),
     };
@@ -2404,7 +2458,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_has_all_twelve() {
+    fn tools_list_has_all_thirteen() {
         let specs = tool_specs();
         let names: Vec<&str> = specs
             .as_array()
@@ -2412,7 +2466,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 12);
+        assert_eq!(names.len(), 13);
         for n in [
             "xerj_search",
             "xerj_semantic_search",
@@ -2424,6 +2478,8 @@ mod tests {
             "xerj_brain_link",
             "xerj_brain_unlink",
             "xerj_brain_overview",
+            // #1055: the per-index field map from the autoindex catalog.
+            "xerj_map",
             // #977: reference-coding retrieval, served by the same pipeline
             // as `xerj code`.
             "xerj_code_search",
@@ -2439,6 +2495,43 @@ mod tests {
                 "must not expose {forbidden}"
             );
         }
+    }
+
+    /// #1055: the field map is an orientation tool an agent calls before it
+    /// writes DSL — its description must say what to reach for, what the
+    /// facts ARE (sampled, not exhaustive), and how the byte cap trims.
+    #[test]
+    fn the_map_tool_description_carries_its_honesty_strings() {
+        let specs = tool_specs();
+        let tool = specs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "xerj_map")
+            .expect("xerj_map is served");
+        let d = tool["description"].as_str().expect("described");
+        for needle in [
+            "BEFORE writing query DSL",
+            "bounded sample",
+            "not tracked",
+            "indexes_omitted",
+            "at autoindex time",
+        ] {
+            assert!(d.contains(needle), "description lacks `{needle}`: {d}");
+        }
+        let mb = &tool["inputSchema"]["properties"]["max_bytes"];
+        assert_eq!(mb["minimum"], map::MIN_MAX_BYTES);
+        assert!(
+            mb["description"]
+                .as_str()
+                .unwrap()
+                .contains("NEVER exceeds"),
+            "the cap must be stated as never-exceeded: {mb}"
+        );
+        assert!(
+            tool["inputSchema"]["required"].is_null(),
+            "every xerj_map argument is optional"
+        );
     }
 
     #[test]

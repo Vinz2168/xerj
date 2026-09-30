@@ -491,6 +491,24 @@
       }
     },
     {
+      "name": "xerj_map",
+      "description": "Per-index FIELD MAP from this node's autoindex catalog — call it BEFORE writing query DSL, so you stop guessing field names. For each catalogued index: record count, time field and time range, semantic body field, and every field the profiler inferred — name, es_type (keyword|text|long|double|boolean|date|semantic_text), date encoding, semantic tag, cardinality estimate, coverage, up to 5 examples, and the sampled date AND numeric min-max (numeric ranges appear on `long` fields only; fractional `double` ranges are not tracked). Reads the catalog index `autoindex-catalog` that `xerj autoindex <folder>` writes; never-autoindexed indexes are not listed. Honesty: every fact is inferred from a bounded sample taken at autoindex time — cardinality is an estimate (with `cardinality_overflow:true` it means AT LEAST that many), and min/max/coverage describe the sample, not the whole index. Up to 100 indexes per call (`indexes_omitted` reports more).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "string",
+            "description": "Index name or `*`-glob (e.g. `ax-logs`, `ax-*`). Default: every catalogued index. An exact name filters engine-side; a glob filters client-side over the catalog's index names."
+          },
+          "max_bytes": {
+            "type": "integer",
+            "minimum": 1024,
+            "description": "Per-index byte budget for one rendered index entry (default 4096). An entry NEVER exceeds it: the trim ladder first cuts per-field examples to one, then drops examples, then per-field notes, then the lowest-coverage fields — and the entry's `trimmed` and `fields_omitted` say exactly what went. The budget is per index; a multi-index response carries one such entry per index. Minimum 1024."
+          }
+        }
+      }
+    },
+    {
       "name": "xerj_code_search",
       "description": "Reference-coding retrieval over a corpus of peer projects: how did real codebases solve this problem? Returns the matching definition (not a byte window), the file:line to cite, and per-hit licence warnings — AGPL/SSPL/Elastic/BUSL/GPL/LGPL/MPL sources are approach-only. Refuses indices older than 30 days (override with stale_ok). A no-match is NOT an error: it says the corpus is wrong for the task. Pass `max_tokens` to cap the response at a token budget (never exceeded; see that argument for the tokenizer and the locator-only rule). Corpora: `xerj corpus list`.",
       "inputSchema": {

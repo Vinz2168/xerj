@@ -132,6 +132,10 @@ const KNOWN: &[(&str, Role)] = &[
         Role::TestOnly,
     ),
     ("xerj-autoindex/src/detect/e2e.rs", Role::TestOnly),
+    // #1055's xerj_map module: the tool itself reuses the proxy's shared
+    // client (xerj-mcp/src/lib.rs, already classified); only its unit tests
+    // construct one, to point at an unroutable address.
+    ("xerj-mcp/src/map.rs", Role::TestOnly),
 ];
 
 /// Phrasings that were false and must not come back on a published surface.
