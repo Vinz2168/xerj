@@ -101,6 +101,11 @@ pub struct IndexCfg {
     /// Progress cadence. `None` means "the surface's default" — 1 s on a
     /// terminal, 5 s for a pipe.
     pub progress_interval: Option<Duration>,
+    /// `--label <question-set.json>`: run every extracted record's payload
+    /// through the node's `POST /_decide` at ingest and stamp `label` /
+    /// `label_p` (plus per-question `label_<id>` / `label_<id>_p`) onto the
+    /// document (#1062). `None` — the default — never constructs a Labeler.
+    pub label: Option<PathBuf>,
     /// `--watch`: after the first pass, stay resident and reindex what changes.
     pub watch: bool,
     /// `--watch`'s quiet period. One editor save is several filesystem events,
@@ -311,6 +316,13 @@ pub fn help_text_with(feedback: bool) -> String {
                                   subdirectory, which this flag cannot do.\n\
              --yes, -y            alias for --approve proceed\n\
              --dry-run            walk+sniff+infer, print the plan, index nothing\n\
+             --label <FILE>       label each document at ingest through POST /_decide\n\
+                                  (#1062): the question-set file's noul/choice questions\n\
+                                  are rendered against each record's fields and the vote\n\
+                                  stamped on as label + label_p (and label_<id> +\n\
+                                  label_<id>_p per question). p is the RAW decide\n\
+                                  confidence - calibration is #1063. One /_decide call\n\
+                                  per noul (per option, for a choice) per document.\n\
              --json               machine-readable RESULT on stdout (map: raw catalog docs).\n\
                                   Orthogonal to --progress, which owns stderr.\n\
              --progress <MODE>    liveness on stderr: auto|plain|json|none (default auto).\n\
@@ -688,6 +700,9 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
     let mut events_out: Option<PathBuf> = None;
     let mut status_file: Option<PathBuf> = None;
     let mut watch_flags_used: Vec<&'static str> = Vec::new();
+    // `--label` (#1062): ingest-time decide labelling. Kept in its own
+    // variable so the routes that do not label can refuse it by name.
+    let mut label: Option<PathBuf> = None;
 
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -785,6 +800,11 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
                 endpoint_url = Some(value);
             }
             "--fresh" => fresh = true,
+            "--label" => {
+                label = Some(PathBuf::from(
+                    it.next().ok_or("--label needs a question-set file path")?,
+                ))
+            }
             "--follow-symlinks" => follow_symlinks = true,
             "--follow-symlinks-outside-root" => follow_symlinks_outside_root = true,
             "--stub" => stub_globs.push(it.next().ok_or("--stub needs a glob pattern")?),
@@ -1095,6 +1115,14 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
                     .into(),
             );
         }
+        if label.is_some() {
+            return Err(
+                "--watch and --label are not combined today: a watcher would have to re-run the \
+                 decide votes of every changed record on every pass, and that pass has not been \
+                 built. Index once with --label, then start the watcher without it"
+                    .into(),
+            );
+        }
         if fresh {
             return Err(
                 "--watch and --fresh contradict each other: --fresh discards the resume journal \
@@ -1272,6 +1300,13 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
                     .into(),
             );
         }
+        if label.is_some() {
+            return Err(
+                "--label labels documents at ingest time; an object-storage watch indexes nothing \
+                 and never reads document bytes. Drop --label"
+                    .into(),
+            );
+        }
         if !ignore_flags_used.is_empty() {
             return Err(format!(
                 "{} apply to a folder walk, not to an object-storage watch",
@@ -1355,6 +1390,11 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
         (Some("map"), _) if bulk_timeout_explicit => {
             Err("--bulk-timeout-secs applies only to indexing, not `autoindex map`".into())
         }
+        (Some("map"), _) | (Some("status"), _) if label.is_some() => Err(format!(
+            "--label labels indexed documents through /_decide; `autoindex {}` reads the node \
+             and never indexes anything. Drop --label",
+            sub.as_deref().unwrap_or_default()
+        )),
         (Some("map"), _) => Ok(Cmd::Map(MapCfg {
             url,
             api_key,
@@ -1381,6 +1421,13 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
                 return Err(
                     "--follow-symlinks-outside-root has no effect without --follow-symlinks: \
                      links are not followed at all unless that flag is given"
+                        .into(),
+                );
+            }
+            if dry_run && label.is_some() {
+                return Err(
+                    "--dry-run and --label contradict each other: a dry run indexes nothing, so \
+                     there is nowhere for the decide labels to go. Drop one of the two"
                         .into(),
                 );
             }
@@ -1429,6 +1476,7 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
                 quiet,
                 progress,
                 progress_interval,
+                label,
                 watch,
                 debounce: Duration::from_millis(
                     debounce_ms.unwrap_or(crate::watch::DEFAULT_DEBOUNCE_MS),
@@ -1566,6 +1614,63 @@ mod tests {
             text.contains("--append-only") && text.contains("--no-fetch"),
             "{text}"
         );
+    }
+
+    /// `--label` reaches the folder route as a path (#1062) — the flag an
+    /// operator passes must be the flag the indexer reads.
+    #[test]
+    fn label_parses_on_the_index_route() {
+        let cfg = index(&["data", "--label", "questions.json"]);
+        assert_eq!(cfg.label, Some(std::path::PathBuf::from("questions.json")));
+        assert!(index(&["data"]).label.is_none(), "absent by default");
+    }
+
+    /// Every route that cannot label refuses the flag BY NAME rather than
+    /// accepting and ignoring it — the #204 shape. `--watch` (both kinds)
+    /// never runs the decide votes a watcher would need; `map`/`status` never
+    /// index; `--dry-run` indexes nothing, so there is nowhere for the labels
+    /// to go. And the flag without a path is a parse error, not a silently
+    /// ignored label.
+    #[test]
+    fn label_is_refused_on_every_route_that_cannot_apply_it() {
+        let cases = [
+            (
+                vec!["data", "--watch", "--no-graph", "--label", "q.json"],
+                "--watch and --label",
+            ),
+            (
+                vec!["s3://b/", "--watch", "--label", "q.json"],
+                "an object-storage watch indexes nothing",
+            ),
+            (vec!["map", "--label", "q.json"], "never indexes anything"),
+            (
+                vec!["status", "--label", "q.json"],
+                "never indexes anything",
+            ),
+            (vec!["data", "--label", "q.json", "--dry-run"], "contradict"),
+            (vec!["data", "--label"], "needs a question-set file path"),
+        ];
+        for (args, needle) in cases {
+            let text = err(&args);
+            assert!(
+                text.contains(needle),
+                "refusing {args:?} must say why ({needle}): {text}"
+            );
+            assert!(
+                text.contains("--label"),
+                "refusing {args:?} must name the flag: {text}"
+            );
+        }
+    }
+
+    /// The help names the flag and the honesty rule that travels with it: raw,
+    /// uncalibrated p (#1063).
+    #[test]
+    fn help_advertises_the_label_flag_and_its_raw_p() {
+        let help = super::help_text();
+        assert!(help.contains("--label <FILE>"), "{help}");
+        assert!(help.contains("/_decide"), "{help}");
+        assert!(help.contains("calibration is #1063"), "{help}");
     }
 
     /// **The merge guard.** Four routes share one positional argument, and each

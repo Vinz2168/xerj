@@ -853,6 +853,7 @@ fn cfg(root: &Path, state_dir: &Path, url: &str, semantic: bool) -> IndexCfg {
         progress: crate::progress::ProgressMode::None,
         progress_interval: None,
         watch: false,
+        label: None,
         debounce: std::time::Duration::from_millis(0),
     }
 }

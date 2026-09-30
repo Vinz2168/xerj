@@ -27,6 +27,8 @@ pub mod ids;
 pub mod ignore_rules;
 pub mod infer;
 pub mod init;
+/// `--label`: ingest-time labelling through the node's `/_decide` (#1062).
+pub mod label;
 pub mod objsource;
 #[cfg(test)]
 mod objsource_minio_tests;
@@ -132,6 +134,14 @@ fn prepared_records_identity(cfg: &IndexCfg) -> Result<String> {
         // Worker counts are operational only. The timeout can change whether
         // a PDF yields records, so it is part of the semantic contract.
         "pdf_timeout_secs": cfg.pdf_timeout_secs,
+        // The question set decides the label fields stamped on every record
+        // (#1062): two runs against the same folder with different question
+        // sets produce different documents and must not share a prepared
+        // corpus. Digest the file bytes — the set's own identity IS the bytes.
+        "label": cfg.label.as_ref().map(|p| {
+            std::fs::read(p).map(|bytes| format!("{:032x}", xxhash_rust::xxh3::xxh3_128(&bytes)))
+                .unwrap_or_else(|_| "unreadable".to_string())
+        }),
     });
     Ok(format!(
         "{}-{:032x}",
@@ -1333,6 +1343,12 @@ fn begin_non_graph_generation(
     inventory: &content::Inventory,
     pr: &Progress,
     plan: Plan,
+    // #1062: the run's `--label` Labeler, already constructed (and its
+    // question set already validated) before the walk began. Sealing is where
+    // the generated route decides records, so this is where the votes happen:
+    // one /_decide round trip per noul (per option, for a choice) per record,
+    // paid at ingest, never at idle.
+    labeler: Option<&label::Labeler>,
 ) -> Result<()> {
     anyhow::ensure!(
         cfg.no_graph,
@@ -1373,7 +1389,17 @@ fn begin_non_graph_generation(
         pr,
         prior_snapshot.as_ref(),
         &chunker_identity,
+        labeler,
     )?;
+    // #1062: every vote the generated route makes happens during sealing, so
+    // the Labeler's counters are final here — the same accounting the legacy
+    // path prints after its walk, stated where this route's cost was paid.
+    if let Some(labeler) = labeler {
+        let (calls, records) = labeler.counters();
+        pr.note(&format!(
+            "autoindex: --label: {calls} /_decide call(s) for {records} labelled record(s)"
+        ));
+    }
     // #381: the per-file record cap dropped a file's tail during preparation.
     // The generated path seals before the graph worker loop runs, so report it
     // here rather than at the shared post-run summary.
@@ -2574,6 +2600,7 @@ mod phase_a_grouping_tests {
             progress: crate::progress::ProgressMode::None,
             progress_interval: None,
             watch: false,
+            label: None,
             debounce: std::time::Duration::from_millis(0),
         }
     }
@@ -5044,6 +5071,31 @@ fn run_index_report_inner(
         .with_bulk_concurrency(cfg.workers, pr.enabled());
     es.ping()?;
 
+    // `--label <question-set>` (#1062): every record's payload goes through
+    // the node's /_decide at ingest and the answers are stamped on as
+    // label/label_p fields. Loaded and validated HERE, before the walk: a
+    // bad question set must abort the run before any document is indexed,
+    // not halfway through it. The Labeler shares the bulk client's base URL
+    // and auth; its calls are separate one-shot requests (decide is not a
+    // bulk API) and are counted for the run report. No idle cost exists by
+    // construction: with the flag absent this is None and no code runs.
+    let labeler =
+        match &cfg.label {
+            Some(path) => {
+                let set = label::QuestionSet::load(path)?;
+                pr.note(&format!(
+                "autoindex: --label: {} question(s) through POST /_decide (index {:?}, k {}) — \
+                 one call per noul, one per option for a choice, per record; p is the raw \
+                 decide confidence, uncalibrated (#1063)",
+                set.questions.len(),
+                set.decide_index,
+                set.k.map(|k| k.to_string()).unwrap_or_else(|| "default".into())
+            ));
+                Some(label::Labeler::new(es.clone(), set))
+            }
+            None => None,
+        };
+
     let stub_matcher = StubMatcher::compile(&cfg.stub_globs)?;
     // An `s3://`/`r2://` positional argument becomes a local mirror directory
     // here, before any state is opened: `cfg.root` is rewritten to that mirror,
@@ -5531,6 +5583,7 @@ fn run_index_report_inner(
             &inventory,
             &pr,
             plan,
+            labeler.as_ref(),
         )?;
         // #933: the durable replay window is the run's --workers, the same
         // number that bounds bulk admission, so overlapped operations share
@@ -6249,6 +6302,7 @@ fn run_index_report_inner(
             &inventory,
             &pr,
             plan,
+            labeler.as_ref(),
         )?;
         // #933: the durable replay window is the run's --workers, the same
         // number that bounds bulk admission, so overlapped operations share
@@ -7025,6 +7079,29 @@ fn run_index_report_inner(
                             fields.insert("ax_dataset".into(), Value::String(slug.clone()));
                             fields.insert("ax_run".into(), Value::String(run_id.clone()));
                             fields.insert("ax_format".into(), Value::String(format_str(Some(&sn))));
+                            // `--label` (#1062): decide the record BEFORE it is
+                            // staged — after coerce, which would drop fields
+                            // the plan does not describe, and before the bulk
+                            // action is built, so what /_decide said is what
+                            // gets indexed. A failed decide fails the run: an
+                            // unlabelled corpus the operator believes is
+                            // labelled is the #204 defect class, not a warning.
+                            if let Some(labeler) = labeler.as_ref() {
+                                match labeler.label_fields(&fields) {
+                                    Ok(pairs) => {
+                                        for (name, value) in pairs {
+                                            fields.insert(name, value);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        send_err = Some(format!(
+                                            "label {} (record {}): {error:#}",
+                                            f.rel, rec.locator
+                                        ));
+                                        return false;
+                                    }
+                                }
+                            }
                             let id = ids::doc_id(slug, key, &rec.locator);
                             let action = json!({"index": {"_index": rt.index, "_id": id}});
                             let doc = Value::Object(fields);
@@ -7449,6 +7526,16 @@ fn run_index_report_inner(
             });
         }
     });
+
+    // `--label` run accounting (#1062): the decide call count is the cost the
+    // flag added to this run — stated after the walk, where the operator can
+    // weigh it against the record count.
+    if let Some(labeler) = labeler.as_ref() {
+        let (calls, records) = labeler.counters();
+        pr.note(&format!(
+            "autoindex: --label: {calls} /_decide call(s) for {records} labelled record(s)"
+        ));
+    }
 
     // Corpus-wide edges (§6.6.2, `EdgeDetector::detect_corpus`): the pass for
     // relationships that only exist once EVERY document has been read —
@@ -10286,6 +10373,8 @@ mod code_coverage_tests {
 mod failure_resume_http_tests;
 #[cfg(test)]
 mod incremental_reconcile_http_tests;
+#[cfg(test)]
+mod label_http_tests;
 #[cfg(test)]
 mod refused_dataset_tests;
 
