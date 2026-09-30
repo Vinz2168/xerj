@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--decide-mode` / `--decide-model-dir`: the tier-2 decide head is armable
+  from the command line (PR
+  [#1073](https://github.com/xerj-org/xerj/pull/1073)).** The local decide
+  head landed with PR #1072 env-only (`XERJ_DECIDE_MODE` /
+  `XERJ_DECIDE_MODEL_DIR`); the server CLI now parses
+  `--decide-mode history|local` (default `history`) and
+  `--decide-model-dir <path>` with the same flag-wins-over-env shape as
+  `--embed-mode`, resolving through the same `DecideSettings::resolve` into
+  the `state.decide` seam (xerj-api unchanged). Also adds the `decide-local`
+  cargo feature to xerj-server (off by default, matching xerj-api's gating) —
+  the rebuild `resolve`'s own warning text had been naming all along. A
+  default build asked for `--decide-mode local` boots on the history vote and
+  says exactly which rebuild arms the tier; verified by booting both builds
+  (armed/off/missing-dir/mixed flag+env).
+
 
 - **Local zero-shot decision head — tier 2 of the System One decide ladder
   ([#1057](https://github.com/xerj-org/xerj/issues/1057), PR

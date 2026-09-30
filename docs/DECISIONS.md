@@ -42,7 +42,8 @@ Both surfaces answer through one ordered ladder, per question (#1057):
 1. **History vote** — where `[decisions] index` returns labelled support, the
    vote wins. It is the measured tier and it shows its evidence.
 2. **Local zero-shot head** (off by default; feature `decide-local` +
-   `XERJ_DECIDE_MODE=local` + `XERJ_DECIDE_MODEL_DIR`) — a ModernBERT-class
+   `--decide-mode local --decide-model-dir <path>`, or the
+   `XERJ_DECIDE_MODE=local` + `XERJ_DECIDE_MODEL_DIR` env pair) — a ModernBERT-class
    candle classifier loaded from a local model directory holding
    `config.json`, `tokenizer.json` and `model.safetensors`. It answers every
    no-support outcome: no `[decisions] index` at all, a configured index that
