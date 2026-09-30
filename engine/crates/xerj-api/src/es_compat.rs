@@ -32703,7 +32703,10 @@ struct DetectionWatch {
     /// The label that means "detected".
     positive_label: String,
     /// Fire threshold on the RAW `/_decide` confidence (which already
-    /// abstains below `decisions.min_confidence`). Uncalibrated — #1063.
+    /// abstains below `decisions.min_confidence`). The threshold is on the
+    /// raw value, never the calibrated one — a node with a fitted
+    /// calibration (#1063, PR #1080) still fires on the same evidence; the
+    /// fire record carries `p_cal` beside `p` for the reader.
     p_min: f64,
     /// Judgement-history index for `/_decide`; empty means the local tier.
     decide_index: String,
@@ -33117,9 +33120,10 @@ pub async fn put_watch(
                 "index": watch.index,
                 "reads_rules_from": WATCHER_RULES_INDEX,
                 "fires_into": WATCHER_FIRES_INDEX,
-                // The fire record's `p` is the raw /_decide confidence.
-                // Calibration is #1063 and NOT done here.
-                "p": "raw /_decide confidence (uncalibrated; calibration is #1063)",
+                // The fire record's `p` is ALWAYS the raw /_decide
+                // confidence; `p_cal` rides beside it when the node has a
+                // fitted calibration (#1063, PR #1080).
+                "p": "raw /_decide confidence; p_cal carried when the node calibrates (#1063)",
             }
         })),
     )
@@ -33528,14 +33532,20 @@ async fn write_fire(
     decide_resp: &Value,
 ) -> Result<(), xerj_common::XerjError> {
     let fires = state.engine.get_or_create_index(WATCHER_FIRES_INDEX)?;
+    // `p` is always the RAW decide confidence. #1063's calibration landed on
+    // main mid-flight (PR #1080): when the node has a fitted calibration the
+    // decide answer carries `p_cal` beside the raw one, and the fire record
+    // carries it too with `calibrated: true` — never silently substituting
+    // the calibrated value for `p`.
+    let p_cal = decide_resp.get("p_cal").cloned().unwrap_or(Value::Null);
+    let calibrated = p_cal.as_f64().is_some();
     let fire = json!({
         "rule_id": id,
         "level": watch.level,
         "fired_at": chrono::Utc::now().to_rfc3339(),
-        // RAW /_decide confidence. Calibration is #1063 and is explicitly
-        // NOT claimed here — `calibrated` stays false until that lands.
         "p": (p * 1e6).round() / 1e6,
-        "calibrated": false,
+        "p_cal": p_cal,
+        "calibrated": calibrated,
         "label": label,
         "doc_id": doc_id,
         "index": watch.index,
@@ -33751,8 +33761,9 @@ mod watcher_tests {
 
     /// End to end: percolate prefilter → /_decide → fire. A document whose
     /// text the history votes `phishing` fires into `.xerj_alert_fires` with
-    /// the RAW p and `calibrated: false`; a prefilter-passing document the
-    /// history votes `benign` does not.
+    /// the RAW p and `calibrated: false` (this test node has no fitted
+    /// calibration — `p_cal` rides along as null, never invented); a
+    /// prefilter-passing document the history votes `benign` does not.
     #[tokio::test]
     async fn detection_watch_fires_on_a_decided_document() {
         let state = test_state();
@@ -33790,7 +33801,11 @@ mod watcher_tests {
                 assert_eq!(fire["label"], "phishing");
                 assert_eq!(fire["level"], "critical");
                 assert_eq!(fire["tier"], "history");
-                assert_eq!(fire["calibrated"], false, "calibration is #1063");
+                assert_eq!(
+                    fire["calibrated"], false,
+                    "no fitted calibration in this test node: p stays raw"
+                );
+                assert!(fire["p_cal"].is_null(), "p_cal absent, not invented");
                 let p = fire["p"].as_f64().expect("raw p on the fire record");
                 assert!(p >= 0.5, "vote confidence {p} must clear p_min");
                 break;

@@ -558,12 +558,11 @@ mod tests {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let (label, p, abstain) = answers
-            .lock()
-            .unwrap()
-            .get(&positive)
-            .cloned()
-            .unwrap_or(("unknown".into(), 0.0, true));
+        let (label, p, abstain) = answers.lock().unwrap().get(&positive).cloned().unwrap_or((
+            "unknown".into(),
+            0.0,
+            true,
+        ));
         let resp = json!({
             "label": if abstain { Value::Null } else { Value::String(label) },
             "confidence": p,
