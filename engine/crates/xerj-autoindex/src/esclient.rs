@@ -1995,6 +1995,43 @@ mod tests {
         stream.write_all(body).unwrap();
     }
 
+    /// #1059: the wire body of a dataset-index CREATE carries the stemming
+    /// analyzer declaration next to the single-WAL-shard setting — the two
+    /// create-only settings compose under one `settings` object, and the
+    /// analyzer is not dropped or mangled on the way out. Observed on the
+    /// socket, not on the builder, so the transport layer cannot lose it.
+    #[test]
+    fn ensure_index_puts_the_declared_analyzer_beside_the_wal_shard_setting() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            let text = String::from_utf8_lossy(&request);
+            assert!(text.starts_with("PUT /ax-prose HTTP/1.1"), "{text}");
+            let body = text.split("\r\n\r\n").nth(1).unwrap_or_default();
+            let sent: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+            assert_eq!(
+                sent.pointer("/settings/analysis/analyzer/default/type"),
+                Some(&serde_json::json!("stemmer")),
+                "{sent}"
+            );
+            assert_eq!(
+                sent.pointer("/settings/index/xerj_ingest_shards"),
+                Some(&serde_json::json!(1)),
+                "the WAL-shard setting must land beside the analyzer, not replace it: {sent}"
+            );
+            respond_json(&mut stream, br#"{"acknowledged":true}"#);
+        });
+        let es = Es::new(&format!("http://{address}"), None).unwrap();
+        let body = serde_json::json!({
+            "mappings": {"properties": {"body": {"type": "semantic_text"}}},
+            "settings": {"analysis": {"analyzer": {"default": {"type": "stemmer"}}}}
+        });
+        es.ensure_index("ax-prose", &body).unwrap();
+        server.join().unwrap();
+    }
+
     /// A deleted index is an answer for the probes that ask whether the server
     /// still holds what a journal claims it holds — `search` propagating that
     /// 404 replaces `xerj brain`'s recovery text with a raw HTTP error. Every

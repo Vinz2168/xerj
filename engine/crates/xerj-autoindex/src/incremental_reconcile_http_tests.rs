@@ -2932,6 +2932,7 @@ fn sweep_excluded_groups_deletes_only_the_excluded_files_documents() {
         specs: Vec::new(),
         time_field: None,
         semantic_field: None,
+        text_analyzer: None,
         sampled_records: 1,
         file_count: 1,
     });
@@ -3015,6 +3016,7 @@ fn sweep_excluded_groups_invalidates_the_excluded_files_edges() {
         specs: Vec::new(),
         time_field: None,
         semantic_field: None,
+        text_analyzer: None,
         sampled_records: 1,
         file_count: 1,
     });
@@ -3089,6 +3091,7 @@ fn sweep_excluded_groups_purges_the_excluded_files_alias_catalog_docs() {
         specs: Vec::new(),
         time_field: None,
         semantic_field: None,
+        text_analyzer: None,
         sampled_records: 1,
         file_count: 1,
     });
@@ -3163,6 +3166,7 @@ fn sweep_excluded_groups_does_not_delete_a_sibling_corpus_catalog_doc() {
         specs: Vec::new(),
         time_field: None,
         semantic_field: None,
+        text_analyzer: None,
         sampled_records: 1,
         file_count: 1,
     });
@@ -3251,6 +3255,7 @@ fn sweep_excluded_groups_scopes_on_the_keyword_corpus_scope_field() {
         specs: Vec::new(),
         time_field: None,
         semantic_field: None,
+        text_analyzer: None,
         sampled_records: 1,
         file_count: 1,
     });
@@ -3360,6 +3365,7 @@ fn sweep_excluded_groups_cannot_reach_a_sibling_corpus_on_a_text_mapped_prefix()
         specs: Vec::new(),
         time_field: None,
         semantic_field: None,
+        text_analyzer: None,
         sampled_records: 1,
         file_count: 1,
     });
@@ -3850,6 +3856,7 @@ fn sweep_excluded_groups_deletes_a_legacy_main_doc_by_id() {
         specs: Vec::new(),
         time_field: None,
         semantic_field: None,
+        text_analyzer: None,
         sampled_records: 1,
         file_count: 1,
     });
@@ -3916,6 +3923,7 @@ fn sweep_excluded_groups_deletes_a_legacy_alias_doc_by_id() {
         specs: Vec::new(),
         time_field: None,
         semantic_field: None,
+        text_analyzer: None,
         sampled_records: 1,
         file_count: 1,
     });
@@ -3988,6 +3996,7 @@ fn sweep_excluded_groups_invalidates_inbound_edges() {
         specs: Vec::new(),
         time_field: None,
         semantic_field: None,
+        text_analyzer: None,
         sampled_records: 1,
         file_count: 1,
     });

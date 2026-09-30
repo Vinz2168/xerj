@@ -280,7 +280,11 @@ The descriptions below are the defects as found and measured.
   is accepted. At the time, this is why stemming could not be turned on. Fixed
   by PR [#991](https://github.com/xerj-org/xerj/pull/991): the declared
   default analyzer is honoured at flush, at segment query and at merge, and
-  stemming can be turned on.
+  stemming can be turned on. As of #1059 `xerj autoindex` turns it on by
+  default: every dataset index it CREATES for profiler-marked semantic prose
+  (the measured `word_ratio`/`mean_tokens` election) declares the built-in
+  Snowball `stemmer` analyzer as `analysis.analyzer.default`; indexes created
+  by earlier builds are untouched.
 - **Neural ingest leaves the machine idle**
   ([#938](https://github.com/xerj-org/xerj/issues/938)). One `_bulk` stream into a
   `semantic_text` field runs at 6.1 documents per second on ~1,470-character

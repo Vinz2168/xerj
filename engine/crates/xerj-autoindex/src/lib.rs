@@ -311,8 +311,7 @@ fn install_dataset_mappings(
 ) -> Result<Vec<MappingRefusal>> {
     let mut refused = Vec::new();
     for dataset in &plan.datasets {
-        let mut create_body = build_mapping(&dataset.specs);
-        create_body["mappings"]["properties"]["ax_paths"] = json!({"type": "keyword"});
+        let create_body = dataset_create_body(dataset);
         let update_body = json!({
             "properties": create_body["mappings"]["properties"].clone()
         });
@@ -333,6 +332,46 @@ fn install_dataset_mappings(
         installed_one();
     }
     Ok(refused)
+}
+
+/// The index-create body for one dataset: the frozen mapping
+/// ([`build_mapping`]) plus, when the profiler marked the dataset's prose
+/// semantic, the #1059 stemming analyzer declaration.
+///
+/// The analyzer goes into `settings.analysis.analyzer.default` — the surface
+/// #937 (fixed by #991) made real: a declared default analyzer is honoured at
+/// flush, at segment query and at merge, and the memtable has always resolved
+/// it, so a whole index analyses one way for its whole life. A per-field
+/// `analyzer` in the mapping is NOT used: that is the accepted-and-ignored
+/// surface the #937 audit left open (`docs/ZERO_TOKEN_DIRECTION.md`).
+///
+/// Two properties this placement is load-bearing for:
+///
+/// - **The frozen identities.** `build_mapping`'s value is hashed into every
+///   committed generation's `index_identity` (`generation_contract_identities`),
+///   so the analyzer must NOT be declared inside it — here, in the create
+///   body only, the digests are byte-identical to an older build's for the
+///   same specs and no existing state dir aborts on upgrade. The transport
+///   layer then adds `settings.index.xerj_ingest_shards` beside it
+///   (`with_single_wal_shard`), the established precedent for a create-only
+///   setting that lives outside the frozen contract.
+/// - **New indexes only.** Analysis settings are immutable server-side after
+///   creation (a settings PUT naming `analysis` is refused), and
+///   [`Es::ensure_index`] tolerates `resource_already_exists` without
+///   re-sending the body — so an index an earlier run or an older build
+///   created is untouched, keeping its `standard` term space and its
+///   postings, and only an index THIS run creates gets the stemmer. The
+///   marker therefore rides the plan frozen in the journal: a pending
+///   generation replayed after a restart still declares the analyzer.
+fn dataset_create_body(dataset: &PlanDataset) -> Value {
+    let mut create_body = build_mapping(&dataset.specs);
+    create_body["mappings"]["properties"]["ax_paths"] = json!({"type": "keyword"});
+    if let Some(analyzer) = &dataset.text_analyzer {
+        create_body["settings"] = json!({"analysis": {"analyzer": {
+            "default": {"type": analyzer}
+        }}});
+    }
+    create_body
 }
 
 fn ensure_generation_catalog_mapping(es: &Es, pr: &Progress) -> Result<()> {
@@ -2972,6 +3011,10 @@ fn build_phase_a(
             .iter()
             .find(|s| s.es_type == "semantic_text")
             .map(|s| s.name.clone());
+        // #1059: the dataset's text-analyzer election, from the same sampled
+        // accumulators that elected the semantic body above. Deterministic in
+        // the sample, so the same bytes elect the same analyzer on every run.
+        let text_analyzer = infer::elected_default_analyzer(&specs, &c.fields).map(str::to_string);
         datasets.push(PlanDataset {
             slug: c.slug.clone(),
             index: format!("{}-{}", cfg.prefix, c.slug),
@@ -2984,6 +3027,7 @@ fn build_phase_a(
             specs,
             time_field,
             semantic_field,
+            text_analyzer,
             sampled_records: c.records,
             file_count: c.members.len(),
         });
@@ -6249,8 +6293,12 @@ fn run_index_report_inner(
     // stays fatal, exactly as before.
     let mut refused: Vec<MappingRefusal> = Vec::new();
     for d in &plan.datasets {
+        // The same create body the generated route installs
+        // (`dataset_create_body`): frozen mapping, `ax_paths`, and — when the
+        // profiler marked this dataset's prose semantic — the #1059 stemming
+        // analyzer declaration in `settings.analysis.analyzer.default`.
         let installed = es
-            .ensure_index(&d.index, &build_mapping(&d.specs))
+            .ensure_index(&d.index, &dataset_create_body(d))
             .with_context(|| format!("create index {}", d.index))
             .and_then(|()| {
                 es.update_mapping(
@@ -9728,6 +9776,7 @@ mod generation_contract_identity_tests {
             specs: Vec::new(),
             time_field: None,
             semantic_field: None,
+            text_analyzer: None,
             sampled_records: 0,
             file_count: 0,
         }
@@ -9810,6 +9859,27 @@ mod generation_contract_identity_tests {
         assert_eq!(
             generation_contract_identities(&many).unwrap().1,
             frozen_contract::index_identity(&many)
+        );
+    }
+
+    /// #1059: the stemming-analyzer election rides the plan but NOT the frozen
+    /// identities. If this ever breaks — the analyzer declared inside
+    /// `build_mapping`, or a serialized spec field carrying it — the next run
+    /// of every existing state dir aborts on the no-change arm with "autoindex
+    /// execution configuration changed since the committed generation", which
+    /// is exactly the upgrade-abort class the frozen-contract work removed.
+    #[test]
+    fn electing_the_stemming_analyzer_does_not_move_the_frozen_identities() {
+        let mut plan = Plan {
+            datasets: vec![dataset("a", "ax-a", "json")],
+            ..Plan::default()
+        };
+        let before = generation_contract_identities(&plan).unwrap();
+        plan.datasets[0].text_analyzer = Some(infer::STEMMING_TEXT_ANALYZER.to_string());
+        let after = generation_contract_identities(&plan).unwrap();
+        assert_eq!(
+            before, after,
+            "the analyzer declaration must stay outside the hashed contract"
         );
     }
 
@@ -9912,6 +9982,119 @@ mod generation_contract_identity_tests {
         assert_eq!(PREPARED_RECORDS_IDENTITY, "prepared-records-v1");
         assert_eq!(DOCUMENT_IDS_IDENTITY, "document-ids-v1");
         assert_eq!(DETECTOR_DISABLED_IDENTITY, "disabled");
+    }
+}
+
+/// #1059 — the stemming-analyzer declaration on the dataset index-create
+/// body: what it carries, what it must never touch, and what an index that
+/// already exists does with it (nothing).
+#[cfg(test)]
+mod stem_default_tests {
+    use super::*;
+    use crate::infer::FieldSpec;
+    use serde_json::json;
+
+    fn dataset(slug: &str, text_analyzer: Option<&str>) -> PlanDataset {
+        let spec = FieldSpec {
+            name: "body".into(),
+            es_type: "semantic_text".into(),
+            date_enc: None,
+            semantic: None,
+            cardinality_est: 0,
+            cardinality_overflow: false,
+            null_ratio: 0.0,
+            avg_len: 240.0,
+            coverage: 1.0,
+            examples: vec![],
+            notes: vec![],
+            date_min: None,
+            date_max: None,
+            date_evidence: vec![],
+        };
+        PlanDataset {
+            slug: slug.into(),
+            index: format!("ax-{slug}"),
+            family: "text".into(),
+            group: None,
+            specs: vec![spec],
+            time_field: None,
+            semantic_field: Some("body".into()),
+            text_analyzer: text_analyzer.map(str::to_string),
+            sampled_records: 1,
+            file_count: 1,
+        }
+    }
+
+    /// A dataset the profiler marked semantic declares the stemming analyzer
+    /// as `settings.analysis.analyzer.default` on the CREATE body — the
+    /// surface #937/#991 made honoured at flush, segment query and merge —
+    /// while the mapping itself is byte-identical to a dataset that declares
+    /// nothing (the mapping is the frozen on-disk contract; the analyzer must
+    /// stay outside it).
+    #[test]
+    fn a_semantic_dataset_declares_the_stemming_analyzer_on_the_create_body() {
+        let body = dataset_create_body(&dataset("prose", Some(infer::STEMMING_TEXT_ANALYZER)));
+        assert_eq!(
+            body.pointer("/settings/analysis/analyzer/default/type"),
+            Some(&json!("stemmer")),
+            "{body}"
+        );
+        // The mapping side is untouched: same properties as an undeclaring
+        // dataset, no per-field `analyzer` keys (the accepted-and-ignored
+        // surface), and `ax_paths` still present.
+        let undeclaring = dataset_create_body(&dataset("prose", None));
+        assert_eq!(
+            body["mappings"], undeclaring["mappings"],
+            "the analyzer declaration must not touch the mapping"
+        );
+        assert_eq!(
+            body.pointer("/mappings/properties/body"),
+            Some(&json!({"type": "semantic_text"}))
+        );
+        assert_eq!(
+            body.pointer("/mappings/properties/ax_paths"),
+            Some(&json!({"type": "keyword"}))
+        );
+        assert!(body.pointer("/mappings/properties/body/analyzer").is_none());
+    }
+
+    /// A dataset with no profiler-marked prose sends NO settings at all — the
+    /// create body is exactly the frozen mapping plus `ax_paths`, so the
+    /// server keeps `standard`'s exact term space for identifier/enum data.
+    #[test]
+    fn a_non_semantic_dataset_sends_no_analyzer_settings() {
+        let body = dataset_create_body(&dataset("events", None));
+        assert!(body.get("settings").is_none(), "{body}");
+        assert_eq!(
+            body.pointer("/mappings/properties/ax_paths"),
+            Some(&json!({"type": "keyword"}))
+        );
+    }
+
+    /// The declaration survives the journal round-trip, because a pending
+    /// generation replayed after a restart provisions its indexes from the
+    /// DESERIALIZED plan: an analyzer marker lost to serialization would
+    /// create that index unstemmed.
+    #[test]
+    fn the_analyzer_election_survives_the_journal_round_trip() {
+        let plan = Plan {
+            datasets: vec![dataset("prose", Some(infer::STEMMING_TEXT_ANALYZER))],
+            ..Plan::default()
+        };
+        let round: Plan = serde_json::from_value(serde_json::to_value(&plan).unwrap()).unwrap();
+        assert_eq!(
+            round.datasets[0].text_analyzer.as_deref(),
+            Some(infer::STEMMING_TEXT_ANALYZER)
+        );
+        // A plan frozen by an older build deserializes with no election —
+        // the honest value for an index that already exists unstemmed.
+        let legacy = serde_json::json!({
+            "slug": "events", "index": "ax-events", "family": "json",
+            "specs": [], "sampled_records": 0, "file_count": 0
+        });
+        let legacy: PlanDataset = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.text_analyzer, None);
+        assert!(dataset_create_body(&legacy).get("settings").is_none());
     }
 }
 

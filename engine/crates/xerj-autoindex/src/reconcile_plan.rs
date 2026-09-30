@@ -683,6 +683,7 @@ mod tests {
             specs,
             time_field: None,
             semantic_field: None,
+            text_analyzer: None,
             sampled_records: 1,
             file_count: 1,
         }
