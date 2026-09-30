@@ -58,7 +58,7 @@ CONTENTS — search for a section number (e.g. "3.4", "10.") to jump
        2.i  performance is supporting evidence, not the headline
        2.j  `rerank` is the only search-time feature that sends document text off
             the node, and it needs an operator-configured provider
-  3. THE SEVEN CANONICAL AGENT OPERATIONS — full contract for each
+  3. THE CORE AGENT OPERATIONS — full contract for each
        3.0  xerj_autoindex ....... make a folder searchable (CLI-only, zero config)
        3.1  xerj_search .......... lexical / structured search, and the code-document
                                    field contract (`title`, `language`, `defs`,
@@ -67,7 +67,7 @@ CONTENTS — search for a section number (e.g. "3.4", "10.") to jump
        3.3  xerj_vector_search ... kNN over `dense_vector`
        3.4  xerj_hybrid_search ... fuse lexical + vector/semantic
        3.4b `rerank` ............. optional second stage on 3.1 / 3.4 (an argument,
-                                   NOT an eighth operation)
+                                   NOT a separate operation)
        3.5  xerj_memory_store .... write a namespaced memory
        3.6  xerj_memory_recall ... recall by meaning
   4. USE CASES & RECIPES ...... reference coding · zero-config folder indexing ·
@@ -363,7 +363,7 @@ For a complete disconnected deployment procedure, including current GitHub relea
   0.3312 NFCorpus / 0.3638 FiQA nDCG@10 over 1,271 judged queries. See §3.4b.
 
 =====================================================================
-3. THE SEVEN CANONICAL AGENT OPERATIONS
+3. THE CORE AGENT OPERATIONS
 =====================================================================
 
 --- 3.0 xerj_autoindex — make a folder searchable (CLI, zero config) --
@@ -648,7 +648,7 @@ POST /{index}/_search
   - `fusion`: "rrf" (default, k=60) or "linear". Object form: {"type":"rrf","k":60}.
   - `fusion:"learned"` ERRORS (see §2). `queries` must be non-empty; per-query `weight` defaults 1.0.
 
---- 3.4b `rerank` — optional second stage (NOT an eighth operation) ---
+--- 3.4b `rerank` — optional second stage (NOT a separate operation) ---
 An argument on xerj_search (3.1) and xerj_hybrid_search (3.4). READ §2.j FIRST: it
 sends document text to a third party and needs an operator-configured provider key.
 POST /{index}/_search
@@ -1280,10 +1280,11 @@ autoindex, which is CLI-only):
   OpenAI .................. https://xerj.org/docs/agents/schemas/openai-tools.json
   Anthropic ............... https://xerj.org/docs/agents/schemas/anthropic-tools.json
 The OpenAI and Anthropic files carry the six HTTP operations above; the MCP file
-carries ten (those six plus xerj_brain_ego / _link / _unlink / _overview) and is
-generated from a real tools/list of the server that serves them. The three are
+carries thirteen (those six plus xerj_brain_ego / _link / _unlink / _overview,
+xerj_map, xerj_code_search and xerj_plan) and is generated from a real
+tools/list of the server that serves them. The three are
 therefore NOT interchangeable, and they are not even the same shape: the MCP file
-is an object, so count `.tools` in it (`jq '.tools | length'` → 10) and the bare
+is an object, so count `.tools` in it (`jq '.tools | length'` → 13) and the bare
 array in the other two (`jq 'length'` → 6). `jq 'length'` on the MCP file returns
 1, the object's key count — not a tool count.
 If you can run a process, `xerj mcp` is that stdio server, inside the same binary
