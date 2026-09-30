@@ -89,7 +89,15 @@ pass() { printf 'ok    %s\n' "$1"; }
 # error, rate limit, nonexistent issue) prints "error" - callers must fail on
 # it, not skip it.
 issue_state() {
-  gh api "repos/$REPO/issues/$1" --jq .state 2>/dev/null || printf 'error'
+  # Retry with backoff: five back-to-back unauthenticated-rate-class calls
+  # can trip GitHub's secondary limit even with quota remaining, and a
+  # throttled fetch must not read as an unverified issue.
+  local try state
+  for try in 1 2 3; do
+    state="$(gh api "repos/$REPO/issues/$1" --jq .state 2>/dev/null)" && [ -n "$state" ] && { printf '%s' "$state"; return; }
+    sleep $((try * 3))
+  done
+  printf 'error'
 }
 
 # ── Check 3 first (cheapest): freshness ──────────────────────────────────────
@@ -131,8 +139,12 @@ SHORTLIST="$(awk '
   on { print }
 ' ROADMAP.md)"
 roadmap_issues="$(printf '%s\n' "$SHORTLIST" | grep -oE 'issues/[0-9]+' | cut -d/ -f2 | sort -un)"
-if [ -z "$roadmap_issues" ]; then
-  fail "found no linked issues in ROADMAP.md's \"**Open defects\" shortlist - the section moved or the parse broke; fix the gate, do not merge around it"
+if [ -z "$SHORTLIST" ]; then
+  fail "found no \"**Open defects\" section in ROADMAP.md - the section moved or the parse broke; fix the gate, do not merge around it"
+elif [ -z "$roadmap_issues" ]; then
+  # An empty shortlist is a real state: the tracker was emptied after rc.78
+  # (#1038 et al., 2026-09-29) and ROADMAP says "None". Nothing to verify.
+  pass "shortlist lists no open defects (ROADMAP: \"None\") - nothing to verify"
 else
   for n in $roadmap_issues; do
     state="$(issue_state "$n")"
