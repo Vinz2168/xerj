@@ -43,6 +43,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ground, as it should. Wide-choice ranking and calibration at this size are
   named as unsolved in the card, not buried. Reference-coding corpora are
   absent in this sandbox and were not consulted.
+- **benchmarks: `xerj_map` unknown-field-400 gate measured — 20/30 → 0/30
+  (PASS) ([#1055](https://github.com/xerj-org/xerj/issues/1055), PR
+  [#1086](https://github.com/xerj-org/xerj/pull/1086)).** The rc.79 gate for
+  `xerj_map` ("unknown-field 400s from MCP-issued DSL down ≥ 80 % on the
+  reference-coding harness") is now a measured number with raw results
+  (`benchmarks/map-gate/`), per the plan's packaging rule. On the release
+  binary against a reference-coding corpus (the three small pinned
+  `xerj-vector` repos, 9 datasets, 3472 records), 30 MCP-shaped query intents
+  issued twice — once with field names guessed the way an ES-fluent agent
+  writes them first, once with field choices derived mechanically from the
+  real `xerj mcp` → `xerj_map` stdio response: **20 of 30 guessed-DSL
+  requests failed with an unknown-field HTTP 400 (9 sort, 5 semantic,
+  6 knn/hybrid-leg), 0 of 30 map-informed requests did — a 100 % reduction
+  against the ≥ 80 % threshold.** Discovery recorded beside it: on this
+  engine a wrong field in `term`/`match`/`range`/`exists` is a *silent*
+  0-hit 200, not a 400; the 400 class is exactly `sort` without
+  `unmapped_type`, `knn` on a non-vector field, and `semantic` on a
+  non-`semantic_text` field. The silent-miss class is reported separately
+  (5 vs 1), not folded into the gate number. The live model-driven agent
+  loop (whether an agent consults the map unprompted) is designed but not
+  run — live-model cost not approved for this wave; design and ~$120
+  estimate in the benchmark README.
 - **systemone: calibration layer — `p_cal` beside every `p_raw`, published
   reliability curve ([#1063](https://github.com/xerj-org/xerj/issues/1063), PR
   [#1080](https://github.com/xerj-org/xerj/pull/1080)).** A ladder
