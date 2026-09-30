@@ -28,8 +28,8 @@ use uuid::Uuid;
 use xerj_common::config::CorsConfig;
 
 use crate::{
-    audit_mw, auth::auth_middleware, authz, es_compat, graph_api, ism_api, memory_api, native,
-    share, state::AppState, systemone_api, wal_tap_api,
+    ask_api, audit_mw, auth::auth_middleware, authz, es_compat, graph_api, ism_api, memory_api,
+    native, share, state::AppState, systemone_api, wal_tap_api,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -129,6 +129,10 @@ pub fn build_native_router(state: AppState) -> Router {
         // set — and then nothing leaves the node to answer it.
         .route("/v1/systemone", post(systemone_api::systemone))
         .route("/v1/models", get(systemone_api::models))
+        // Prompt in, validated query DSL out (#1056): the endpoint an agent
+        // calls instead of hand-writing ES DSL. Same authz posture as
+        // /_decide (cluster verb, POST, fail-closed for scoped keys).
+        .route("/v1/ask", post(ask_api::ask))
         // Admin: cluster-wide flush + backup (snapshot to disk)
         .route("/v1/admin/flush", post(native::admin_flush))
         .route("/v1/admin/backup", post(native::admin_backup))
@@ -296,6 +300,9 @@ pub fn build_es_compat_router(state: AppState) -> Router {
         // The audit twin of /v1/systemone: same vote, named index, neighbours
         // and abstain instead of a wire-shaped error.
         .route("/_decide", post(systemone_api::decide))
+        // #1056, ES-compat surface: same handler as /v1/ask; the index
+        // rides in the body, exactly like /_decide and /_msearch.
+        .route("/_ask", post(ask_api::ask))
         .route("/_mget", post(es_compat::mget))
         // Index-scoped multi-get — the path index defaults entries that omit `_index`.
         .route(

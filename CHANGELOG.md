@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`POST /_ask` + `xerj_plan` MCP tool: prompt in, validated query DSL out
+  ([#1056](https://github.com/xerj-org/xerj/issues/1056), PR
+  [#1076](https://github.com/xerj-org/xerj/pull/1076)).** `POST /_ask`
+  (ES-compat) and `POST /v1/ask` (native) take `{index or pattern, prompt}`
+  and return `{query, plan, confidence, indices}` where `query` is an ES
+  query clause that has ALREADY passed this node's own
+  `xerj_query::parse_request` — zero invalid DSL can leave the node, and a
+  phrase the index cannot ground is a 422 naming it, never a silent guess.
+  The planner is deterministic and rule-based (not an LLM): date literals
+  and year phrases, comparator vocabulary, units, scale words and a concept
+  lexicon resolve field phrases against the index's real schema; equality
+  values resolve against ONE batched `terms` agg (≤1,000 buckets/field,
+  ≤24 fields), with a BM25 `match` probe for fields whose values overflow
+  the agg. Numeric and date bounds are only ever the prompt's own literals.
+  Responses are byte-identical across repeats; `ax-*` patterns route by the
+  `autoindex-catalog` dataset description read through the engine's own
+  index APIs (no xerj-autoindex dependency in xerj-api). `xerj_plan`, the
+  12th MCP tool, proxies it (`index` defaults to `ax-*` like `xerj_search`);
+  the published `mcp-tools.json` schema is regenerated. Measured by the
+  `benchmarks/ask-plan` harness (PR #1071, unmodified): 230 pairs × 3 runs,
+  macro result-set F1 **0.9975** (round 1: 0.9309), `invalid_dsl_out` 0,
+  `non_deterministic` 0 — gate ≥ 0.9 over ≥ 200 pairs passed; the three
+  sub-1.0 pairs are the "from A through B" date pairs, where this PR reads
+  "through" as inclusive by design. ES-YAML on this tree: 1380/0/3. The
+  p50 ≤ 300 ms CPU budget is a release-time gate and is not claimed here.
 - **`--decide-mode` / `--decide-model-dir`: the tier-2 decide head is armable
   from the command line (PR
   [#1073](https://github.com/xerj-org/xerj/pull/1073)).** The local decide
