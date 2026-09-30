@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`xerj-decide-v1`: the open tier-2 decide model — training/export harness,
   measured eval card, upload-ready bundle
-  ([#1064](https://github.com/xerj-org/xerj/issues/1064)).** The decide
+  ([#1064](https://github.com/xerj-org/xerj/issues/1064), PR
+  [#1084](https://github.com/xerj-org/xerj/pull/1084)).** The decide
   ladder's tier 2 (`--decide-mode local --decide-model-dir <dir>`) until now
   had a loader and no artifact to load. `benchmarks/decide-model/` is the
   deterministic harness that trains one: stdlib-plus-candle (CPU only), the
