@@ -1,0 +1,48 @@
+{
+  "issue": 1063,
+  "gate": "Jev FiQA rerank ECE 0.3109 -> <= 0.10 on held-out",
+  "gate_threshold": 0.1,
+  "baseline_run": "/workspace/.claude/worktrees/wf_6ba42604-1b6-1/benchmarks/beir-hybrid/results/2026-09-20-rerank-full-fiqa/fiqa-full-run.json",
+  "method_note": "The baseline retained 10 binned aggregates (n_pairs=19440), not the raw pairs; pairs are reconstructed per bin at mean_conf with positives = round(acc*n), and the held-out split is at BIN granularity: fit on even bins, evaluate on odd bins (whole probability regions the fit never saw). The pair-level held-out re-run needs the model's raw scores and is the rc.80 final form.",
+  "pairs": {
+    "total": 19440,
+    "fitted_on": 11446,
+    "held_out": 7994
+  },
+  "raw_ece": {
+    "all_bins": 0.3109,
+    "published": 0.3109,
+    "held_out_bins": 0.3831
+  },
+  "isotonic": {
+    "held_out_ece": 0.033,
+    "meets_gate": true,
+    "knots": [
+      [
+        0.0455,
+        0.0002
+      ],
+      [
+        0.2434,
+        0.0034
+      ],
+      [
+        0.4445,
+        0.0077
+      ],
+      [
+        0.6451,
+        0.0224
+      ],
+      [
+        0.8452,
+        0.1242
+      ]
+    ]
+  },
+  "temperature": {
+    "held_out_ece": 0.3903,
+    "meets_gate": false,
+    "t": 1.1517
+  }
+}

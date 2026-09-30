@@ -59,6 +59,24 @@
 //! in the vote — see [`neighbour_weight`]. The weight is read in the vote
 //! aggregation, so a correction outranks the cached answers it corrects.
 //!
+//! # Calibration: `p_cal` beside every `p_raw` (#1063)
+//!
+//! A ladder probability ranks before it odds: on the FiQA rerank baseline a
+//! hosted noul of 0.93 meant relevance 34 % of the time (ECE 0.3109). With
+//! `[decisions] calibration = isotonic | temperature`, the node fits a
+//! correction on a held-out fifth of its recorded outcomes ([`xerj_common::
+//! calibration`]) and answers carry the calibrated probability BESIDE the raw
+//! one — `p_raw` never replaced, `p_cal` absent when no calibration is
+//! configured and `null` (with a published reason) when configured but
+//! unfitted, never a copy of `p_raw` pretending to be calibrated. The fit
+//! applies to every tier's probability through one seam, so the hosted tier,
+//! when it is built, calibrates its passthrough score the same way. The
+//! calibrated quantity is the positive label's probability (a noul, `/_decide`'s
+//! `p_raw`); per-option `choice` shares are a different quantity and are not
+//! calibrated by this fit — every response that ships a probability carries
+//! the fit's ECE beside it, and `GET /_decide/_calibration` publishes the
+//! whole reliability curve.
+//!
 //! # The wire contract, and where we deliberately break it
 //!
 //! Request: `{ state, model, questions: { id: { type, instructions, criteria } } }`.
@@ -104,10 +122,13 @@
 //! vote analogue and no benchmark: 422, in the docs.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 #[cfg(feature = "decide-local")]
 use std::path::Path;
 #[cfg(feature = "decide-local")]
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
 use axum::extract::State;
@@ -115,6 +136,10 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Value};
+use xerj_common::calibration::CalibrationMethod;
+use xerj_common::calibration::CalibrationPair;
+use xerj_common::calibration::CalibrationReport;
+use xerj_common::calibration::FittedCalibration;
 use xerj_common::config::DecisionsConfig;
 use xerj_query::parse_request;
 
@@ -302,6 +327,291 @@ fn neighbour_weight(rank: usize, human: bool, human_weight: f64) -> f64 {
 /// "true"/1/yes must not silently earn it.
 fn is_human_correction(source: &Value) -> bool {
     source.get("human") == Some(&Value::Bool(true))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Calibration — p_cal beside every p_raw (#1063)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// How many history documents one fit reads, at most: the search page cap
+/// (`index.max_result_window`, 10,000 by default). A history with more
+/// labelled outcomes than this fits on the first page in engine order,
+/// canonically re-sorted before the split — the histories this feature is
+/// for (thousands of cached answers, hundreds of recorded outcomes) sit far
+/// under it.
+const MAX_FIT_DOCS: usize = 10_000;
+
+/// Fewer labelled pairs than this and there is no fit to publish: the
+/// response says so rather than extrapolate a curve from a handful of points.
+/// Ten is the smallest set whose held-out fifth still evaluates.
+const MIN_FIT_PAIRS: usize = 10;
+
+/// A cached fit refreshes at most this often on demand, so a decide request
+/// never pays a full index scan per call and an operator who indexes more
+/// outcome documents sees the fit move within a minute without a restart.
+/// `GET /_decide/_calibration` always refits, whatever this says.
+const FIT_REFRESH: Duration = Duration::from_secs(60);
+
+/// One per-index cache entry: the report (or the reason there is none) and
+/// when it was computed. The clock stamps the CACHE, never the fit — the fit
+/// is a pure function of the pair multiset, the #940 rule.
+struct CachedFit {
+    report: Result<Arc<CalibrationReport>, String>,
+    fitted_at: Instant,
+}
+
+/// The node's calibration state: one cached fit per decisions index, held in
+/// [`AppState::decide_calibration`] so every probability-shipping path reads
+/// the same fit. Fitted lazily on first use, refreshed at most once a minute,
+/// force-refreshed by [`decide_calibration`] (the publication endpoint).
+#[derive(Default)]
+pub struct CalibrationCache {
+    entries: tokio::sync::Mutex<HashMap<String, CachedFit>>,
+}
+
+impl CalibrationCache {
+    /// Publish a fit the caller already computed (the `_calibration`
+    /// endpoint's own scan) as the index's cached fit.
+    async fn refresh_from(&self, index: &str, report: Arc<CalibrationReport>) {
+        self.entries.lock().await.insert(
+            index.to_string(),
+            CachedFit {
+                report: Ok(report),
+                fitted_at: Instant::now(),
+            },
+        );
+    }
+}
+
+/// What calibration a request has available — the one lookup every
+/// probability-emitting path on this surface shares.
+enum CalibrationState {
+    /// `[decisions] calibration` is `none`: `p_raw` ships alone and no
+    /// `p_cal` exists at all.
+    Off,
+    /// Configured and fitted: the report every `p_cal` and ECE comes from.
+    Fitted(Arc<CalibrationReport>),
+    /// Configured but no usable fit — the string is why, published beside the
+    /// `p_cal: null` it explains.
+    Unfit(String),
+}
+
+/// Resolve the request's calibration state — at most one scan of the
+/// decisions index, cached per `cfg.index`. `force` is the operator's
+/// explicit refit. The scan and the fit are deterministic, so two requests
+/// between refreshes serve bit-identical `p_cal`.
+async fn calibration_state(
+    state: &AppState,
+    cfg: &DecisionsConfig,
+    force: bool,
+) -> CalibrationState {
+    if cfg.calibration == CalibrationMethod::None {
+        return CalibrationState::Off;
+    }
+    if cfg.index.is_empty() {
+        return CalibrationState::Unfit(
+            "no decisions index: calibration is fitted on labelled history — set [decisions] \
+             index, or name one per request on /_decide"
+                .to_string(),
+        );
+    }
+    let mut entries = state.decide_calibration.entries.lock().await;
+    let fresh = match entries.get(&cfg.index) {
+        Some(cached) => !force && cached.fitted_at.elapsed() <= FIT_REFRESH,
+        None => false,
+    };
+    if fresh {
+        let cached = entries.get(&cfg.index).expect("checked above");
+        return match &cached.report {
+            Ok(report) => CalibrationState::Fitted(report.clone()),
+            Err(reason) => CalibrationState::Unfit(reason.clone()),
+        };
+    }
+    let (pairs, ts_range) = match scan_calibration_pairs(state, cfg).await {
+        Ok(found) => found,
+        Err(reason) => {
+            entries.insert(
+                cfg.index.clone(),
+                CachedFit {
+                    report: Err(reason.clone()),
+                    fitted_at: Instant::now(),
+                },
+            );
+            return CalibrationState::Unfit(reason);
+        }
+    };
+    let outcome = fit_pairs(cfg, &pairs, ts_range);
+    let state_out = match &outcome {
+        Ok(report) => CalibrationState::Fitted(report.clone()),
+        Err(reason) => CalibrationState::Unfit(reason.clone()),
+    };
+    entries.insert(
+        cfg.index.clone(),
+        CachedFit {
+            report: outcome,
+            fitted_at: Instant::now(),
+        },
+    );
+    state_out
+}
+
+/// Fit the configured method on scanned pairs, or say why there is no fit to
+/// ship. Pure plumbing over [`xerj_common::calibration::fit_calibration`].
+fn fit_pairs(
+    cfg: &DecisionsConfig,
+    pairs: &[CalibrationPair],
+    ts_range: Option<(String, String)>,
+) -> Result<Arc<CalibrationReport>, String> {
+    if pairs.len() < MIN_FIT_PAIRS {
+        return Err(unfit_reason(cfg, pairs.len()));
+    }
+    let mut report = xerj_common::calibration::fit_calibration(cfg.calibration, pairs)
+        .ok_or_else(|| "[decisions] calibration is none; nothing to fit".to_string())?;
+    report.ts_range = ts_range;
+    Ok(Arc::new(report))
+}
+
+/// The published reason a configured calibration has no fit — names what a
+/// fit needs and how to record it.
+fn unfit_reason(cfg: &DecisionsConfig, pairs: usize) -> String {
+    format!(
+        "only {pairs} labelled calibration pair{} in `{}` — a fit needs at least {MIN_FIT_PAIRS} \
+         (#1063): record outcomes by indexing documents carrying the truth label, the p that \
+         was served, and no `source` field (a `source` marks a cached answer, whose label is \
+         the model's own prediction, and a fit on predictions would learn the model is right \
+         by construction)",
+        if pairs == 1 { "" } else { "s" },
+        cfg.index
+    )
+}
+
+/// One history document's calibration pair, or `None` when the document is
+/// not a labelled outcome. Pure, and unit-tested: this function IS the
+/// data contract of the fit.
+///
+/// A document is an OUTCOME — not a prediction — when it names a truth label
+/// in the configured `label_field`, carries the probability that was served
+/// in `p`, and has NO `source` field: `source` marks a flywheel answer
+/// (#1061), whose label is the model's own guess, and calibrating on guesses
+/// would teach the layer the model is right by construction. Record an
+/// outcome with the ordinary indexing path:
+/// `{"text": …, "label": <the truth>, "p": <what was served>}` — `human:
+/// true` optional, the vote already weights it. The pair is the positive
+/// label's probability — `p` when the label is the positive one, `1 − p`
+/// when it is not — against the outcome `label == positive_label`.
+fn pair_from_doc(source: &Value, cfg: &DecisionsConfig) -> Option<CalibrationPair> {
+    if source.get("source").is_some() {
+        return None; // a cached answer: a prediction, not an outcome
+    }
+    let label = source.get(&cfg.label_field).and_then(Value::as_str)?;
+    let p = source.get("p").and_then(Value::as_f64)?;
+    if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+        return None; // a p that is not a probability is not calibration data
+    }
+    let positive = label == cfg.positive_label;
+    Some(CalibrationPair {
+        p: if positive { p } else { 1.0 - p },
+        y: positive as u8 as f64,
+    })
+}
+
+/// Scan the decisions index for labelled outcome documents and return them
+/// as calibration pairs, with the RFC 3339 range of their `ts` fields.
+async fn scan_calibration_pairs(
+    state: &AppState,
+    cfg: &DecisionsConfig,
+) -> Result<(Vec<CalibrationPair>, Option<(String, String)>), String> {
+    let idx = state.engine.get_index(&cfg.index).map_err(|e| {
+        format!(
+            "decisions index `{}` could not be searched for calibration pairs: {e}",
+            cfg.index
+        )
+    })?;
+    let query_body = json!({
+        "query": { "match_all": {} },
+        "size": MAX_FIT_DOCS,
+        "_source": true,
+    });
+    let search_req =
+        parse_request(&query_body).map_err(|e| format!("internal query would not parse: {e}"))?;
+    let result = idx
+        .search(&search_req)
+        .await
+        .map_err(|e| format!("decisions index `{}` could not be searched: {e}", cfg.index))?;
+    let mut pairs = Vec::with_capacity(result.hits.len());
+    let mut oldest: Option<String> = None;
+    let mut newest: Option<String> = None;
+    for hit in &result.hits {
+        if let Some(pair) = pair_from_doc(&hit.source, cfg) {
+            pairs.push(pair);
+            // The published range spans the FITTED documents — the ones that
+            // became pairs — not every cached answer in the index.
+            if let Some(ts) = hit.source.get("ts").and_then(Value::as_str) {
+                // RFC 3339 sorts lexicographically, so min/max by string is
+                // the range.
+                oldest = Some(match oldest {
+                    Some(o) if o.as_str() <= ts => o,
+                    _ => ts.to_string(),
+                });
+                newest = Some(match newest {
+                    Some(n) if n.as_str() >= ts => n,
+                    _ => ts.to_string(),
+                });
+            }
+        }
+    }
+    Ok((pairs, oldest.zip(newest)))
+}
+
+/// `p_cal` for one `p_raw` under the request's calibration state: absent
+/// when calibration is off, `null` when configured but unfit (the reason
+/// rides in the calibration block), and the fit's value otherwise — never a
+/// copy of `p_raw` pretending to be calibrated.
+fn p_cal_value(state: &CalibrationState, p_raw: f64) -> Option<Value> {
+    match state {
+        CalibrationState::Off => None,
+        CalibrationState::Unfit(_) => Some(Value::Null),
+        CalibrationState::Fitted(report) => Some(json!(round6(report.fit.apply(p_raw)))),
+    }
+}
+
+/// The calibration block a response carries whenever calibration is
+/// configured: the method, its scope, the fit's held-out ECE raw and
+/// calibrated, and what it was fitted on. This block is the "ECE beside
+/// every probability" — the surface's honesty contract (#1063).
+fn calibration_block(state: &CalibrationState) -> Option<Value> {
+    match state {
+        CalibrationState::Off => None,
+        CalibrationState::Fitted(report) => Some(json!({
+            "method": report.method.as_str(),
+            "scope": "noul",
+            "ece": {
+                "raw": round6(report.ece_raw),
+                "calibrated": round6(report.ece_calibrated),
+            },
+            "fitted_on": report.fitted_on,
+            "held_out": report.held_out,
+            "labelled_pairs": report.labelled_pairs,
+        })),
+        CalibrationState::Unfit(reason) => Some(json!({
+            "reason": reason,
+        })),
+    }
+}
+
+/// The fit's parameters, published by `/_decide/_calibration`: an isotonic
+/// fit's knots, or the temperature.
+fn fit_params_json(fit: &FittedCalibration) -> Value {
+    match fit {
+        FittedCalibration::Isotonic(iso) => json!({
+            "knots": iso
+                .knots()
+                .iter()
+                .map(|(x, y)| json!([round6(*x), round6(*y)]))
+                .collect::<Vec<_>>(),
+        }),
+        FittedCalibration::Temperature(t) => json!({ "temperature": round6(t.t) }),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -518,6 +828,11 @@ pub async fn systemone(
     if cfg.index.is_empty() && !local_enabled {
         return not_configured();
     }
+    // One calibration lookup per request (#1063): every tier's noul
+    // probability below reads the same fit, and the answers' strictly-parsed
+    // wire objects stay untouched — p_raw/p_cal ride in `decisions.evidence`,
+    // the extras channel established clients ignore.
+    let calibration = calibration_state(&state, &cfg, false).await;
 
     let questions = match body.get("questions") {
         Some(Value::Object(q)) if !q.is_empty() => q,
@@ -632,17 +947,26 @@ pub async fn systemone(
                     .iter()
                     .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
                     .expect("non-empty");
-                evidence.insert(
-                    id.clone(),
-                    json!({
-                        "tier": DecideTier::History.as_str(),
-                        "source": DecideTier::History.as_str(),
-                        "label": best_label,
-                        "support": round6(best_weight / total),
-                        "neighbours": labelled.len(),
-                        "found": neighbours.len(),
-                    }),
-                );
+                let mut evidence_value = json!({
+                    "tier": DecideTier::History.as_str(),
+                    "source": DecideTier::History.as_str(),
+                    "label": best_label,
+                    "support": round6(best_weight / total),
+                    "neighbours": labelled.len(),
+                    "found": neighbours.len(),
+                });
+                // The calibrated quantity is the noul's — the positive
+                // label's share — so only a noul question carries p_raw/p_cal
+                // here. A choice's per-option shares are a different
+                // quantity; the decisions.calibration block names the scope.
+                if matches!(question.kind, Kind::Noul) {
+                    let p_raw = share(&cfg.positive_label);
+                    evidence_value["p_raw"] = json!(round6(p_raw));
+                    if let Some(p_cal) = p_cal_value(&calibration, p_raw) {
+                        evidence_value["p_cal"] = p_cal;
+                    }
+                }
+                evidence.insert(id.clone(), evidence_value);
             }
             Err(failure) => {
                 match resolve_tier(&failure, local_enabled) {
@@ -753,17 +1077,25 @@ pub async fn systemone(
                 .zip(&scores)
                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
                 .expect("labels are non-empty");
-            evidence.insert(
-                id.clone(),
-                json!({
-                    "tier": DecideTier::Local.as_str(),
-                    "source": DecideTier::Local.as_str(),
-                    "model": LOCAL_MODEL_ID,
-                    "label": best_label,
-                    "support": round6(*best_score as f64),
-                    "hypotheses": Value::Object(by_label),
-                }),
-            );
+            let mut evidence_value = json!({
+                "tier": DecideTier::Local.as_str(),
+                "source": DecideTier::Local.as_str(),
+                "model": LOCAL_MODEL_ID,
+                "label": best_label,
+                "support": round6(*best_score as f64),
+                "hypotheses": Value::Object(by_label),
+            });
+            // The head's noul is `scores[0]` — the positive hypothesis's
+            // probability — so it calibrates through the same seam as the
+            // vote's (and, when that tier exists, a hosted score's).
+            if matches!(question.kind, Kind::Noul) {
+                let p_raw = scores[0] as f64;
+                evidence_value["p_raw"] = json!(round6(p_raw));
+                if let Some(p_cal) = p_cal_value(&calibration, p_raw) {
+                    evidence_value["p_cal"] = p_cal;
+                }
+            }
+            evidence.insert(id.clone(), evidence_value);
             cached.push(CachedAnswer {
                 text: question.vote_text.clone(),
                 label: best_label.clone(),
@@ -806,6 +1138,12 @@ pub async fn systemone(
         "took_ms".into(),
         json!(started.elapsed().as_millis() as u64),
     );
+    // The ECE beside every probability (#1063): present whenever calibration
+    // is configured — fitted (method, ECE, fitted-on) or unfit (reason) —
+    // and absent when the node never promised a p_cal.
+    if let Some(block) = calibration_block(&calibration) {
+        decisions.insert("calibration".into(), block);
+    }
     if local_answered > 0 {
         decisions.insert("local_model".into(), json!(LOCAL_MODEL_ID));
         decisions.insert("local_answered".into(), json!(local_answered));
@@ -898,6 +1236,11 @@ pub async fn decide(
     cfg.label_field = defaults.label_field.clone();
     cfg.text_field = defaults.text_field.clone();
 
+    // One calibration lookup per request (#1063), against the index THIS
+    // request named — the fit is cached per index, so the audit surface and
+    // the wire surface read the same fit for the same history.
+    let calibration = calibration_state(&state, &cfg, false).await;
+
     let neighbours = if cfg.index.is_empty() {
         Err(HistorySupport::NotConfigured)
     } else {
@@ -935,6 +1278,16 @@ pub async fn decide(
     for (w, label, _) in &neighbours {
         *weight_by_label.entry(label.to_string()).or_insert(0.0) += *w;
     }
+    // The calibrated quantity (#1063): the positive label's share — the same
+    // quantity a noul answers on the wire — NOT the winner's share that
+    // `confidence` reports. `confidence` keeps its raw meaning and the
+    // abstain gate keeps applying to it: calibration changes what the number
+    // means, not the verdict.
+    let p_raw = if total > 0.0 {
+        weight_by_label.get(&positive).copied().unwrap_or(0.0) / total
+    } else {
+        0.0
+    };
     let (label, confidence, abstain, reason) = match weight_by_label
         .iter()
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
@@ -988,6 +1341,16 @@ pub async fn decide(
         "source": DecideTier::History.as_str(),
         "took_ms": started.elapsed().as_millis() as u64,
     });
+    // p_cal beside p_raw, never replacing it (#1063): p_raw is always the
+    // honest raw share, p_cal exists only when calibration is configured
+    // (null, with the reason in the block, when configured but unfitted),
+    // and the calibration block is the ECE that rides beside both.
+    resp["p_raw"] = json!(round6(p_raw));
+    if let Some(p_cal) = p_cal_value(&calibration, p_raw) {
+        resp["p_cal"] = p_cal;
+    }
+    resp["calibration"] =
+        calibration_block(&calibration).unwrap_or(json!({ "configured": "none" }));
     if let Some(r) = reason {
         resp["reason"] = json!(r);
     }
@@ -1026,6 +1389,11 @@ async fn decide_local(
         Err(e) => return local_unavailable(&e, local.model_dir()),
     };
     let scores = &scores[0];
+    // The head's positive-label probability is `scores[0]` — the same
+    // quantity a noul answers, through the same calibration seam as every
+    // other tier's (#1063).
+    let p_raw = scores[0] as f64;
+    let calibration = calibration_state(state, cfg, false).await;
     let (label, confidence) = if scores[0] >= scores[1] {
         (labels[0].clone(), scores[0] as f64)
     } else {
@@ -1062,6 +1430,14 @@ async fn decide_local(
         "model": LOCAL_MODEL_ID,
         "took_ms": started.elapsed().as_millis() as u64,
     });
+    // The audit surface always names its calibration state, and p_cal rides
+    // beside p_raw exactly as on the history tier (#1063).
+    resp["p_raw"] = json!(round6(p_raw));
+    if let Some(p_cal) = p_cal_value(&calibration, p_raw) {
+        resp["p_cal"] = p_cal;
+    }
+    resp["calibration"] =
+        calibration_block(&calibration).unwrap_or(json!({ "configured": "none" }));
     if abstain {
         resp["reason"] = json!(format!(
             "confidence {:.3} below decisions.min_confidence {:.3}",
@@ -1069,6 +1445,104 @@ async fn decide_local(
         ));
     }
     Json(resp).into_response()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /_decide/_calibration
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Publish the calibration (#1063): the reliability curve of the labelled
+/// history — binned `p_raw` against empirical frequency, with bin counts —
+/// the ECE raw and calibrated, the fit's parameters, what it was fitted on,
+/// and the date range of the fitted documents. Always refits, so this is the
+/// operator's refresh as well as the publication; the fit it produces becomes
+/// the cached fit every decide request reads.
+///
+/// `?index=` names the history (default: the configured `[decisions] index`).
+/// The curve and raw ECE publish even when calibration is not configured —
+/// the reliability of the raw probabilities is audit information in its own
+/// right — with a `reason` naming the setting that would fit them.
+pub async fn decide_calibration(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> axum::response::Response {
+    let defaults = &state.config.decisions;
+    let index = params
+        .get("index")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(defaults.index.as_str())
+        .to_string();
+    if index.is_empty() {
+        return unprocessable(
+            "name an index with ?index=… or set [decisions] index — calibration is fitted \
+             on a labelled history",
+        );
+    }
+    let cfg = DecisionsConfig {
+        index: index.clone(),
+        ..defaults.clone()
+    };
+    let (pairs, ts_range) = match scan_calibration_pairs(&state, &cfg).await {
+        Ok(found) => found,
+        Err(reason) => return index_error(&index, &reason),
+    };
+    let curve_raw = xerj_common::calibration::reliability_curve(
+        &pairs,
+        xerj_common::calibration::CALIBRATION_BINS,
+    );
+    let ece_raw = xerj_common::calibration::ece_from_curve(&curve_raw);
+
+    let mut resp = serde_json::Map::new();
+    resp.insert("index".into(), json!(index));
+    resp.insert("configured".into(), json!(cfg.calibration.as_str()));
+    resp.insert("labelled_pairs".into(), json!(pairs.len()));
+    resp.insert(
+        "bins".into(),
+        json!(xerj_common::calibration::CALIBRATION_BINS),
+    );
+    resp.insert(
+        "curve".into(),
+        json!({ "raw": curve_raw, "calibrated": Value::Null }),
+    );
+    resp.insert(
+        "ece".into(),
+        json!({ "raw": round6(ece_raw), "calibrated": Value::Null }),
+    );
+    if let Some((lo, hi)) = &ts_range {
+        resp.insert("ts_range".into(), json!([lo, hi]));
+    }
+    match fit_pairs(&cfg, &pairs, ts_range) {
+        Ok(report) => {
+            resp.insert("method".into(), json!(report.method.as_str()));
+            resp.insert("scope".into(), json!("noul"));
+            resp.insert("fitted_on".into(), json!(report.fitted_on));
+            resp.insert("held_out".into(), json!(report.held_out));
+            resp.insert("params".into(), fit_params_json(&report.fit));
+            resp.insert(
+                "ece".into(),
+                json!({
+                    "raw": round6(report.ece_raw),
+                    "calibrated": round6(report.ece_calibrated),
+                }),
+            );
+            resp.insert(
+                "curve".into(),
+                json!({
+                    "raw": report.curve_raw,
+                    "calibrated": report.curve_calibrated,
+                }),
+            );
+            // The publication is the refresh: every decide request after
+            // this reads the fit just published.
+            state.decide_calibration.refresh_from(&index, report).await;
+        }
+        Err(reason) => {
+            resp.insert("reason".into(), json!(reason));
+        }
+    }
+    Json(Value::Object(resp)).into_response()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1656,5 +2130,125 @@ mod tests {
         assert_eq!(DecideTier::History.as_str(), "history");
         assert_eq!(DecideTier::Local.as_str(), "local");
         assert_eq!(DecideTier::Hosted.as_str(), "hosted");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Calibration (#1063)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// The fit's data contract: a labelled outcome document is a pair, the
+    /// positive label's probability against the outcome; a flywheel answer
+    /// (`source`) is NOT, because its label is the model's own prediction —
+    /// calibrating on predictions would learn the model is right by
+    /// construction.
+    #[test]
+    fn calibration_pairs_come_from_outcomes_not_predictions() {
+        let cfg = DecisionsConfig::default(); // label_field "label", positive "true"
+                                              // An outcome the system got wrong: it said 0.9, the truth is "false".
+                                              // The positive-label probability is 1 − 0.9, the outcome 0.
+        let doc = json!({"text": "…", "label": "false", "p": 0.9});
+        let pair = pair_from_doc(&doc, &cfg).expect("outcome pair");
+        assert!(
+            (pair.p - 0.1).abs() < 1e-12,
+            "p_pos = 1 − p when label ≠ positive"
+        );
+        assert_eq!(pair.y, 0.0);
+        // An outcome it got right: p of the positive label, outcome 1.
+        let doc = json!({"text": "…", "label": "true", "p": 0.8});
+        let pair = pair_from_doc(&doc, &cfg).expect("outcome pair");
+        assert!((pair.p - 0.8).abs() < 1e-12);
+        assert_eq!(pair.y, 1.0);
+        // A human correction carrying the p it corrects: still an outcome,
+        // and the best kind — truth plus the number that was wrong.
+        let doc = json!({"text": "…", "label": "true", "p": 0.3, "human": true});
+        assert!(pair_from_doc(&doc, &cfg).is_some());
+        // A flywheel answer: a prediction, never a pair.
+        let doc = json!({"text": "…", "label": "true", "p": 0.8, "source": "local", "ts": "…"});
+        assert!(
+            pair_from_doc(&doc, &cfg).is_none(),
+            "a `source` document is the model's own answer"
+        );
+        // No p, no pair — a seeded example has a truth but no raw
+        // probability to calibrate.
+        assert!(pair_from_doc(&json!({"text": "…", "label": "true"}), &cfg).is_none());
+        // No label, no pair.
+        assert!(pair_from_doc(&json!({"text": "…", "p": 0.8}), &cfg).is_none());
+        // A p that is not a probability is not calibration data.
+        assert!(pair_from_doc(&json!({"label": "true", "p": 1.4}), &cfg).is_none());
+        assert!(pair_from_doc(&json!({"label": "true", "p": -0.1}), &cfg).is_none());
+        assert!(pair_from_doc(&json!({"label": "true"}), &cfg).is_none());
+    }
+
+    /// The three states on the wire: off ships no p_cal at all, unfit ships
+    /// null with the reason published in the block, fitted ships the fit's
+    /// value — and never a copy of p_raw pretending to be calibrated.
+    #[test]
+    fn p_cal_is_absent_null_or_calibrated_never_a_copy() {
+        // Off: nothing.
+        assert!(p_cal_value(&CalibrationState::Off, 0.7).is_none());
+        assert!(calibration_block(&CalibrationState::Off).is_none());
+        // Unfit: null, with the reason riding in the block.
+        let unfit = CalibrationState::Unfit("only 3 labelled pairs".into());
+        assert_eq!(p_cal_value(&unfit, 0.7), Some(Value::Null));
+        let block = calibration_block(&unfit).expect("block");
+        assert_eq!(block["reason"], "only 3 labelled pairs");
+        // Fitted: the fit's value and its ECE, not p_raw echoed back. The
+        // identity fit (one knot per distinct p, already monotone) would echo
+        // — so use a fit that learned the opposite of the raw number.
+        let report = Arc::new(
+            xerj_common::calibration::fit_calibration(
+                xerj_common::calibration::CalibrationMethod::Isotonic,
+                &[
+                    CalibrationPair { p: 0.9, y: 0.0 },
+                    CalibrationPair { p: 0.9, y: 0.0 },
+                    CalibrationPair { p: 0.9, y: 0.0 },
+                    CalibrationPair { p: 0.9, y: 0.0 },
+                    CalibrationPair { p: 0.9, y: 0.0 },
+                    CalibrationPair { p: 0.2, y: 0.0 },
+                    CalibrationPair { p: 0.2, y: 0.0 },
+                    CalibrationPair { p: 0.2, y: 0.0 },
+                    CalibrationPair { p: 0.2, y: 0.0 },
+                    CalibrationPair { p: 0.2, y: 0.0 },
+                ],
+            )
+            .expect("fit"),
+        );
+        let fitted = CalibrationState::Fitted(report);
+        let p_cal = p_cal_value(&fitted, 0.9).expect("a value");
+        let p_cal = p_cal.as_f64().expect("a number");
+        assert!(
+            (p_cal - 0.9).abs() > 1e-9,
+            "a fit that learned 0.9 means 0 must not echo 0.9 back (got {p_cal})"
+        );
+        assert!(
+            (p_cal - 0.0).abs() < 1e-9,
+            "five negatives at 0.9 → p_cal 0"
+        );
+        let block = calibration_block(&fitted).expect("block");
+        assert_eq!(block["method"], "isotonic");
+        assert_eq!(block["scope"], "noul");
+        assert!(
+            block["ece"]["calibrated"].is_number(),
+            "the ECE rides beside: {block}"
+        );
+        assert!(block["ece"]["raw"].is_number());
+        assert_eq!(block["fitted_on"], 8);
+        assert_eq!(block["held_out"], 2);
+    }
+
+    /// The unfit reason names what a fit needs and how to record it — an
+    /// operator who sees `p_cal: null` can act on the string beside it.
+    #[test]
+    fn the_unfit_reason_names_the_recording_path() {
+        let reason = unfit_reason(&DecisionsConfig::default(), 3);
+        assert!(reason.contains("3 labelled calibration pairs"), "{reason}");
+        assert!(
+            reason.contains("10"),
+            "the minimum is in the message: {reason}"
+        );
+        assert!(
+            reason.contains("source"),
+            "the flywheel exclusion is explained: {reason}"
+        );
     }
 }

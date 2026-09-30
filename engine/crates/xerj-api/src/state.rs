@@ -553,6 +553,12 @@ pub struct AppState {
     /// from the environment again. A test arms a node by replacing this
     /// field, so parallel tests never race on process-wide env state.
     pub decide: Arc<crate::systemone_api::DecideSettings>,
+    /// The decide surface's calibration fits (#1063): one cached fit per
+    /// decisions index, lazily computed by [`crate::systemone_api`] and
+    /// refreshed by `GET /_decide/_calibration`. Held here, not in the
+    /// handler, so every request path that ships a probability reads the same
+    /// fit.
+    pub decide_calibration: Arc<crate::systemone_api::CalibrationCache>,
 }
 
 impl AppState {
@@ -592,9 +598,11 @@ impl AppState {
             &config.rerank.endpoint,
         ));
         let decide = Arc::new(crate::systemone_api::DecideSettings::from_env());
+        let decide_calibration = Arc::new(crate::systemone_api::CalibrationCache::default());
         Self {
             rerank,
             decide,
+            decide_calibration,
             config: Arc::new(config),
             engine: Arc::new(engine),
             metrics: Arc::new(metrics),

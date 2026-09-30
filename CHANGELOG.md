@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **systemone: calibration layer — `p_cal` beside every `p_raw`, published
+  reliability curve ([#1063](https://github.com/xerj-org/xerj/issues/1063), PR
+  [#1080](https://github.com/xerj-org/xerj/pull/1080)).** A ladder
+  probability ranks before it odds — on the FiQA rerank baseline a hosted
+  noul of 0.93 meant relevance 34% of the time (ECE 0.3109). The new
+  `[decisions] calibration = isotonic | temperature` setting (default `none`,
+  the section's 8th setting) fits a correction on a deterministic held-out
+  fifth of the node's recorded outcomes — outcome documents carry the truth
+  label, the `p` that was served for that label, and NO `source` field
+  (flywheel answers are predictions; a fit on predictions would learn the
+  model is right by construction), 10 labelled pairs minimum — and every
+  probability-shipping path on the decide surface carries the calibrated
+  probability BESIDE the raw one: `/_decide` answers `p_raw` (the positive
+  label's share, the quantity a noul answers) plus `p_cal`;
+  `/v1/systemone` carries both in `decisions.evidence` per noul question
+  with the strictly-parsed answer objects untouched; choice per-option
+  shares are a different quantity and are not calibrated (the block says
+  `"scope": "noul"`). No calibration configured → no `p_cal` field at all;
+  configured but unfitted → `p_cal: null` with a published, actionable
+  reason; fitted → the fit's value, never a copy of `p_raw` pretending to
+  be calibrated — and whenever a `p_cal` exists, a `calibration` block rides
+  beside it with the method, the fit's ECE raw and calibrated, and the
+  fitted-on/held-out counts, so no probability ships without an ECE beside
+  it. `GET /_decide/_calibration` publishes the whole reliability curve
+  (binned `p_raw` vs empirical frequency with bin counts, raw and
+  calibrated), both ECEs, the fit's parameters (isotonic knots or the
+  temperature), the pair counts, and the fitted documents' date range; it
+  always refits, so it doubles as the operator's refresh (decide requests
+  read a per-index cache refreshed at most once a minute). Isotonic is PAVA
+  with linear interpolation and end-clamping; temperature is one scalar on
+  the log-odds fitted by golden-section NLL search; both are implemented
+  from first principles in `xerj_common::calibration` with method citations
+  (retrieval skipped: the reference corpora are not present in this
+  sandbox). Measured against the FiQA baseline's own retained curve
+  (`benchmarks/decisions-calibration`, stdlib Python mirroring the Rust
+  exactly — both reproduce the published raw 0.3109 and agree to the fourth
+  decimal): raw held-out ECE 0.3831 → isotonic 0.0330 (gate ≤ 0.10 MET);
+  temperature 0.3903, honestly failing — one scalar cannot map 0.93 → 0.34
+  while keeping 0.05 → 0.0002. Scope of that measurement: bin-level
+  held-out (the run retained 10 binned aggregates, not the 19,440 raw
+  pairs); the pair-level re-run needs the model's raw scores and is queued
+  as the rc.80 final form. `confidence` keeps its raw meaning and the
+  abstain gate keeps applying to it.
+
 - **`POST /_ask` + `xerj_plan` MCP tool: prompt in, validated query DSL out
   ([#1056](https://github.com/xerj-org/xerj/issues/1056), PR
   [#1076](https://github.com/xerj-org/xerj/pull/1076)).** `POST /_ask`

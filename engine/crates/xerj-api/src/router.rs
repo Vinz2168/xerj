@@ -300,6 +300,13 @@ pub fn build_es_compat_router(state: AppState) -> Router {
         // The audit twin of /v1/systemone: same vote, named index, neighbours
         // and abstain instead of a wire-shaped error.
         .route("/_decide", post(systemone_api::decide))
+        // The decide surface's published reliability (#1063): the binned
+        // curve, the ECE raw and calibrated, the fit params. GET, read-only,
+        // same posture as the surface it publishes.
+        .route(
+            "/_decide/_calibration",
+            get(systemone_api::decide_calibration),
+        )
         // #1056, ES-compat surface: same handler as /v1/ask; the index
         // rides in the body, exactly like /_decide and /_msearch.
         .route("/_ask", post(ask_api::ask))
