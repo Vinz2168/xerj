@@ -132,6 +132,13 @@ const KNOWN: &[(&str, Role)] = &[
         Role::TestOnly,
     ),
     ("xerj-autoindex/src/detect/e2e.rs", Role::TestOnly),
+    // #1062's `--label`: the Labeler decides through the shared Es client
+    // (esclient.rs, already classified as `xerj autoindex`) — no new egress
+    // path, so neither the published list nor DATA_EGRESS changes. Both files
+    // fire markers only in test code: label.rs's DecideStub wakes its own
+    // accept loop on drop, label_http_tests.rs is a #[cfg(test)] module.
+    ("xerj-autoindex/src/label.rs", Role::TestOnly),
+    ("xerj-autoindex/src/label_http_tests.rs", Role::TestOnly),
     // #1055's xerj_map module: the tool itself reuses the proxy's shared
     // client (xerj-mcp/src/lib.rs, already classified); only its unit tests
     // construct one, to point at an unroutable address.
