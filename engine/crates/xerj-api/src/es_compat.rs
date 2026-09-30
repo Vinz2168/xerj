@@ -32636,15 +32636,469 @@ pub async fn execute_enrich_policy(
 // DELETE /_watcher/watch/{id}
 // POST   /_watcher/_start
 // POST   /_watcher/_stop
+//
+// #1062: this surface used to be accepted-and-ignored — `put_watch` stored
+// the body in an in-memory map and answered 201 with a fabricated
+// `"condition": {"met": true, "type": "always"}`, and nothing ever evaluated
+// anything. The contract now is *evaluate or refuse*: exactly one watch
+// type, the XERJ detection watch (percolate prefilter → `/_decide` → fire
+// into `.xerj_alert_fires`), is accepted and evaluated on schedule; every
+// other ES watch shape answers **501** naming what this node does not run.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// System index holding persisted watches. The NAME is owned by
+/// `xerj-console-api` (`engine/crates/xerj-console-api/src/indices.rs`,
+/// `ALERT_RULES`, created at bootstrap with owner/name/enabled/etag/
+/// updated_at typed). xerj-api deliberately does not depend on that crate
+/// (see the note in its Cargo.toml — Console is a peer product mounted at
+/// the server level), so the literal is repeated here beside its owner.
+/// Both crates write/read the same index through the shared `Engine`.
+const WATCHER_RULES_INDEX: &str = ".xerj_alert_rules";
+/// System index every fire is written to. Owned by `xerj-console-api`
+/// (`ALERT_FIRES`; `rule_id`/`level`/`doc_id`/`p`/`tier`/`fired_at` typed).
+const WATCHER_FIRES_INDEX: &str = ".xerj_alert_fires";
+
+/// How many candidate documents one evaluator pass may decide. Bounded so a
+/// single tick over a burst-ingested index costs at most this many `/_decide`
+/// calls; anything older is caught up on later ticks — never dropped (the
+/// cursor only advances over documents the pass actually decided).
+const WATCHER_BATCH: usize = 100;
+
+/// `/_decide` calls one evaluation pass may spend (pages of
+/// [`WATCHER_BATCH`]). The per-tick cost ceiling of a watch.
+const WATCHER_PASS_DECIDES: usize = 1_000;
+
+/// Smallest accepted `trigger.schedule.interval`. ES Watcher floors watch
+/// schedules at 1s; the floor also bounds the evaluator's cost per watch.
+const WATCHER_MIN_INTERVAL_MS: u64 = 1_000;
+
+/// Characters of the decided document's text carried on the fire record —
+/// enough to recognise the document, never a second copy of its body.
+const WATCHER_FIRE_TEXT_CHARS: usize = 512;
+
+/// A refusal from `put_watch`: an HTTP status plus the reason. Status is 400
+/// for a malformed detection watch (the caller misused the supported type)
+/// and **501** for a watch shape this node does not evaluate — the honest
+/// refusal that replaces the old accepted-and-ignored 201.
+#[derive(Debug)]
+struct WatchRefusal {
+    status: StatusCode,
+    reason: String,
+}
+
+/// One accepted detection watch, fully resolved from its ES-shaped body.
+struct DetectionWatch {
+    interval_ms: u64,
+    /// The single index new documents are prefetched from.
+    index: String,
+    /// The percolate prefilter: a query evaluated over documents newly added
+    /// to `index`. `match_all` (the default when `input.search.body` omits a
+    /// query) makes every new document a candidate — a pure decide watch.
+    query: Value,
+    /// `/_decide` question template; `{{field}}` placeholders resolve to the
+    /// candidate document's own fields at evaluation time.
+    question: String,
+    /// Document field the candidate's text is read from for `{{text}}`.
+    text_field: String,
+    /// The label that means "detected".
+    positive_label: String,
+    /// Fire threshold on the RAW `/_decide` confidence (which already
+    /// abstains below `decisions.min_confidence`). Uncalibrated — #1063.
+    p_min: f64,
+    /// Judgement-history index for `/_decide`; empty means the local tier.
+    decide_index: String,
+    /// Neighbours that vote, when the watch names a `k`.
+    k: Option<u64>,
+    /// Severity stamped on each fire record.
+    level: String,
+}
+
+/// Parse and validate a watch body as the ONE type this node evaluates.
+///
+/// The detection watch keeps the ES watch skeleton — `trigger`, `input`,
+/// `condition`, `actions` — and fills it as follows (everything else 501s):
+///
+/// ```json
+/// {
+///   "trigger": { "schedule": { "interval": "5s" } },
+///   "input": { "search": {
+///       "request": { "indices": ["mail"] },
+///       "body": { "query": { "match": { "body": "wire transfer" } } } } },
+///   "condition": { "xerj_decide": {
+///       "question": "Is this email phishing? {{text}}",
+///       "positive_label": "phishing",
+///       "text_field": "body",
+///       "p_min": 0.5,
+///       "index": "mail-history" } },
+///   "actions": { "index_alert": { "level": "critical" } }
+/// }
+/// ```
+///
+/// `actions` is optional and, when present, must be exactly `index_alert`
+/// (optionally naming a `level`): the fire record in `.xerj_alert_fires` IS
+/// the action. Email/webhook/ES-index actions do not execute here, so
+/// accepting a watch that asked for one would be the accepted-and-ignored
+/// defect this handler exists to remove.
+fn parse_detection_watch(
+    body: &Value,
+    local_tier_armed: bool,
+) -> Result<DetectionWatch, WatchRefusal> {
+    let unimplemented = |what: &str, supported: &str| WatchRefusal {
+        status: StatusCode::NOT_IMPLEMENTED,
+        reason: format!(
+            "this node evaluates only the xerj detection watch (percolate prefilter → \
+             /_decide → fire into {WATCHER_FIRES_INDEX}); {what} is not evaluated — no watch is \
+             stored. {supported}"
+        ),
+    };
+    let bad = |reason: String| WatchRefusal {
+        status: StatusCode::BAD_REQUEST,
+        reason,
+    };
+
+    // ── trigger: one shape only, a fixed interval. ────────────────────────
+    let schedule = body
+        .pointer("/trigger/schedule")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            unimplemented(
+                "a watch with no `trigger.schedule.interval`",
+                "Supported: trigger.schedule.interval as a fixed interval (e.g. \"5s\", \"1m\").",
+            )
+        })?;
+    let unsupported_schedule: Vec<&str> = [
+        "cron",
+        "daily",
+        "hourly",
+        "weekly",
+        "monthly",
+        "yearly",
+        "cron_expression",
+    ]
+    .iter()
+    .copied()
+    .filter(|k| schedule.contains_key(*k))
+    .collect();
+    if !unsupported_schedule.is_empty() {
+        return Err(unimplemented(
+            &format!("schedule type(s) {unsupported_schedule:?}"),
+            "Supported: trigger.schedule.interval as a fixed interval (e.g. \"5s\", \"1m\").",
+        ));
+    }
+    let interval_str = schedule
+        .get("interval")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            unimplemented(
+                "a schedule without a fixed `interval`",
+                "Supported: trigger.schedule.interval as a fixed interval (e.g. \"5s\", \"1m\").",
+            )
+        })?;
+    let interval_ms = parse_time_to_millis(interval_str).ok_or_else(|| {
+        bad(format!(
+            "trigger.schedule.interval {interval_str:?} is not a time value"
+        ))
+    })?;
+    if interval_ms < WATCHER_MIN_INTERVAL_MS {
+        return Err(bad(format!(
+            "trigger.schedule.interval {interval_str:?} is below the {WATCHER_MIN_INTERVAL_MS}ms \
+             floor this node evaluates at"
+        )));
+    }
+
+    // ── input: search over exactly one index. ─────────────────────────────
+    let known_inputs = ["http", "simple"];
+    for kind in known_inputs {
+        if body
+            .pointer("/input")
+            .and_then(Value::as_object)
+            .is_some_and(|i| i.contains_key(kind))
+        {
+            return Err(unimplemented(
+                &format!("input type `{kind}`"),
+                "Supported: input.search over exactly one index.",
+            ));
+        }
+    }
+    let indices = body
+        .pointer("/input/search/request/indices")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            unimplemented(
+                "a watch with no `input.search`",
+                "Supported: input.search over exactly one index.",
+            )
+        })?;
+    if indices.len() != 1 {
+        return Err(unimplemented(
+            &format!("a watch over {} indices", indices.len()),
+            "Supported: input.search over exactly one index.",
+        ));
+    }
+    let index = indices[0]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| bad("input.search.request.indices[0] must be a non-empty string".into()))?
+        .to_string();
+    let query = body
+        .pointer("/input/search/body/query")
+        .cloned()
+        .unwrap_or(json!({ "match_all": {} }));
+    // The prefilter must parse as a query the engine can run — a watch whose
+    // query never parses would tick forever deciding nothing, which is the
+    // accepted-and-ignored defect wearing a scheduler's clothes.
+    if let Err(e) = xerj_query::parse_query(&query) {
+        return Err(bad(format!(
+            "input.search.body.query does not parse as a query: {e}"
+        )));
+    }
+
+    // ── condition: exactly xerj_decide. ───────────────────────────────────
+    let condition = body
+        .get("condition")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            unimplemented(
+                "a watch with no condition",
+                "Supported: condition.xerj_decide {question, positive_label}.",
+            )
+        })?;
+    let known_conditions = ["always", "compare", "script", "array"];
+    let unsupported: Vec<&str> = known_conditions
+        .iter()
+        .copied()
+        .filter(|k| condition.contains_key(*k))
+        .collect();
+    if condition
+        .keys()
+        .any(|k| k != "xerj_decide" && !unsupported.contains(&k.as_str()))
+    {
+        return Err(unimplemented(
+            "an unrecognised condition type",
+            "Supported: condition.xerj_decide {question, positive_label}.",
+        ));
+    }
+    if !unsupported.is_empty() {
+        return Err(unimplemented(
+            &format!("condition type(s) {unsupported:?}"),
+            "Supported: condition.xerj_decide {question, positive_label}.",
+        ));
+    }
+    let decide = condition
+        .get("xerj_decide")
+        .and_then(Value::as_object)
+        .ok_or_else(|| bad("condition.xerj_decide must be an object".into()))?;
+    let question = decide
+        .get("question")
+        .and_then(Value::as_str)
+        .filter(|q| !q.trim().is_empty())
+        .ok_or_else(|| bad("condition.xerj_decide.question must be a non-empty string".into()))?
+        .to_string();
+    let positive_label = decide
+        .get("positive_label")
+        .and_then(Value::as_str)
+        .filter(|l| !l.trim().is_empty())
+        .ok_or_else(|| {
+            bad("condition.xerj_decide.positive_label must be a non-empty string".into())
+        })?
+        .to_string();
+    let text_field = decide
+        .get("text_field")
+        .and_then(Value::as_str)
+        .unwrap_or("text")
+        .to_string();
+    let p_min = match decide.get("p_min") {
+        None => 0.0,
+        Some(v) => v
+            .as_f64()
+            .filter(|p| (0.0..=1.0).contains(p))
+            .ok_or_else(|| bad("condition.xerj_decide.p_min must be a number in [0, 1]".into()))?,
+    };
+    let k = match decide.get("k") {
+        None => None,
+        Some(v) => Some(
+            v.as_u64()
+                .filter(|k| (1..=100).contains(k))
+                .ok_or_else(|| {
+                    bad("condition.xerj_decide.k must be an integer in 1..=100".into())
+                })?,
+        ),
+    };
+    let decide_index = decide
+        .get("index")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if decide_index.is_empty() && !local_tier_armed {
+        return Err(bad(
+            "condition.xerj_decide.index names the judgement-history index and is required \
+             unless this node runs the local decide tier (XERJ_DECIDE_MODE=local)"
+                .into(),
+        ));
+    }
+
+    // ── transform: not implemented, refuse rather than ignore. ────────────
+    if body.get("transform").is_some() {
+        return Err(unimplemented(
+            "a `transform` stage",
+            "The fire record is written from the decided document directly.",
+        ));
+    }
+
+    // ── actions: the fire record is the action. ───────────────────────────
+    let level = match body.get("actions") {
+        None => "warning".to_string(),
+        Some(Value::Object(actions)) if actions.is_empty() => "warning".to_string(),
+        Some(Value::Object(actions)) => {
+            if actions.len() != 1 || !actions.contains_key("index_alert") {
+                let names: Vec<&str> = actions.keys().map(String::as_str).collect();
+                return Err(unimplemented(
+                    &format!("action(s) {names:?}"),
+                    "Supported: actions.index_alert {\"level\": \"…\"} — the fire record in \
+                     .xerj_alert_fires is the action.",
+                ));
+            }
+            actions
+                .get("index_alert")
+                .and_then(Value::as_object)
+                .and_then(|a| a.get("level"))
+                .and_then(Value::as_str)
+                .unwrap_or("warning")
+                .to_string()
+        }
+        Some(_) => {
+            return Err(bad("actions must be an object".into()));
+        }
+    };
+
+    Ok(DetectionWatch {
+        interval_ms,
+        index,
+        query,
+        question,
+        text_field,
+        positive_label,
+        p_min,
+        decide_index,
+        k,
+        level,
+    })
+}
+
+/// Clip a string to at most `max_chars` characters (not bytes — the bound is
+/// on what one candidate document can push into a question or a fire
+/// record, and a byte split would cut a char in half).
+fn clip_watch_text(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    s.chars().take(max_chars).collect()
+}
+
+/// Render the watch's question against a candidate document. `{{field}}`
+/// placeholders are replaced with the document's OWN field values (raw
+/// string substitution — this is prose for a judge, not JSON being spliced,
+/// so there is nothing to escape against). `{{text}}` resolves to the
+/// configured `text_field`. Unknown placeholders render empty; the clip
+/// bound matches `/_decide`'s vote-text ceiling philosophy.
+fn render_watch_question(template: &str, doc: &Value, text_field: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find("}}") {
+            Some(end) => {
+                let name = &after[..end];
+                let value = if name == "text" {
+                    doc.get(text_field)
+                } else {
+                    doc.get(name)
+                };
+                if let Some(s) = value.and_then(Value::as_str) {
+                    out.push_str(&clip_watch_text(s, WATCHER_FIRE_TEXT_CHARS));
+                } else if let Some(n) = value.and_then(Value::as_f64) {
+                    out.push_str(&n.to_string());
+                }
+                rest = &after[end + 2..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `PUT /_watcher/watch/{id}` — store a detection watch and START EVALUATING
+/// IT, or refuse with 501. The watch is persisted as a rule document in
+/// `.xerj_alert_rules` (`_id` = watch id) so the console's alert surface and
+/// the evaluator read the same thing, and a per-watch evaluator task is
+/// spawned (the `spawn_datafeed_task` shape: detached, self-terminating when
+/// the rule is deleted, disabled, or replaced by a newer PUT — the rule's
+/// `etag` is the takeover signal, so a replaced watch is never evaluated
+/// twice).
+///
+/// Restarts do NOT resume schedules: like ML datafeed tasks, the evaluator
+/// lives in the process, and a node that restarts needs the watch PUT again
+/// (the rule document survives; the schedule does not). Documented, not
+/// silent — boot-time spawning is follow-up work.
 pub async fn put_watch(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let created = !state.engine.watches.contains_key(&id);
-    state.engine.watches.insert(id.clone(), body);
+    let watch = match parse_detection_watch(&body, state.decide.local_tier().is_some()) {
+        Ok(w) => w,
+        Err(r) => return watcher_error(r.status, "not_implemented_watch", &r.reason),
+    };
+    let rules = match state.engine.get_or_create_index(WATCHER_RULES_INDEX) {
+        Ok(i) => i,
+        Err(e) => {
+            return watcher_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "state_exception",
+                &format!("could not open {WATCHER_RULES_INDEX}: {e}"),
+            )
+        }
+    };
+    let existing = rules.get_document(&id).await;
+    let created = matches!(existing, Ok(None));
+    // Etag = takeover signal for a previously-spawned evaluator of the same
+    // id: the old task sees a different etag on its next tick and exits.
+    let etag = Uuid::new_v4().to_string();
+    let rule = json!({
+        "name": id,
+        "enabled": true,
+        "etag": etag,
+        "updated_at": chrono::Utc::now().to_rfc3339(),
+        "type": "xerj_decide",
+        "watch": body,
+    });
+    if let Err(e) = rules.index_document(Some(id.clone()), rule).await {
+        return watcher_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "state_exception",
+            &format!("could not store watch [{id}]: {e}"),
+        );
+    }
+    // The baseline is captured HERE, awaited before the 201/200 leaves the
+    // handler: "documents that arrive after the watch" must mean documents
+    // indexed after this response, so the cursor has to be settled before the
+    // evaluator task — and the caller — race on. Inside the task it would
+    // absorb a document the caller indexed between the response and the
+    // task's first poll, silently never judging it.
+    let baseline = max_seq_no(&state, &watch.index).await;
+    spawn_watch_evaluator(
+        state.clone(),
+        id.clone(),
+        etag,
+        watch.clone_spawn_data(),
+        baseline,
+    );
     let status = if created {
         StatusCode::CREATED
     } else {
@@ -32655,23 +33109,41 @@ pub async fn put_watch(
         Json(json!({
             "_id": id,
             "created": created,
-            "_version": 1,
-            "result": { "condition": { "met": true, "type": "always" } }
+            "_version": if created { 1 } else { 2 },
+            "watcher": {
+                "type": "xerj_decide",
+                "evaluation": "scheduled",
+                "interval_ms": watch.interval_ms,
+                "index": watch.index,
+                "reads_rules_from": WATCHER_RULES_INDEX,
+                "fires_into": WATCHER_FIRES_INDEX,
+                // The fire record's `p` is the raw /_decide confidence.
+                // Calibration is #1063 and NOT done here.
+                "p": "raw /_decide confidence (uncalibrated; calibration is #1063)",
+            }
         })),
     )
         .into_response()
 }
 
+/// Why `get_watch` reads `.xerj_alert_rules` and not `Engine::watches`: the
+/// rules index is the one source of truth. The in-memory map predates the
+/// evaluator and is no longer written by this handler.
 pub async fn get_watch(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
-    match state.engine.watches.get(&id) {
-        Some(watch) => Json(json!({
+    let found = async {
+        let rules = state.engine.get_index(WATCHER_RULES_INDEX).ok()?;
+        rules.get_document(&id).await.ok().flatten()
+    }
+    .await;
+    match found {
+        Some(rule) => Json(json!({
             "_id": id,
             "found": true,
             "_version": 1,
             "_seq_no": 0,
             "_primary_term": 1,
-            "status": { "state": { "active": true } },
-            "watch": watch.clone(),
+            "status": { "state": { "active": rule.get("enabled").and_then(Value::as_bool).unwrap_or(true) } },
+            "watch": rule.get("watch").cloned().unwrap_or(Value::Null),
         }))
         .into_response(),
         None => {
@@ -32685,7 +33157,14 @@ pub async fn delete_watch(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if state.engine.watches.remove(&id).is_some() {
+    let removed = async {
+        let rules = state.engine.get_index(WATCHER_RULES_INDEX).ok()?;
+        rules.delete_document(&id).await.ok().filter(|d| *d)
+    }
+    .await;
+    if removed.is_some() {
+        // The evaluator task notices the missing rule on its next tick and
+        // exits; nothing else needs coordinating.
         Json(json!({
             "_id": id,
             "found": true,
@@ -32710,6 +33189,767 @@ pub async fn stop_watcher(State(state): State<AppState>) -> impl IntoResponse {
         .watcher_active
         .store(false, std::sync::atomic::Ordering::Relaxed);
     Json(json!({ "acknowledged": true })).into_response()
+}
+
+fn watcher_error(status: StatusCode, err_type: &str, reason: &str) -> axum::response::Response {
+    (
+        status,
+        Json(json!({
+            "error": {
+                "root_cause": [{ "type": err_type, "reason": reason }],
+                "type": err_type,
+                "reason": reason,
+            },
+            "status": status.as_u16(),
+        })),
+    )
+        .into_response()
+}
+
+/// The data a spawned evaluator needs. This is `DetectionWatch` minus the
+/// pieces only the PUT path uses (`level` etc. stay); kept explicit so the
+/// spawn boundary — what crosses the `tokio::spawn` — is a named thing.
+#[derive(Clone)]
+struct WatchSchedule {
+    interval_ms: u64,
+    index: String,
+    query: Value,
+    question: String,
+    text_field: String,
+    positive_label: String,
+    p_min: f64,
+    decide_index: String,
+    k: Option<u64>,
+    level: String,
+}
+
+impl DetectionWatch {
+    fn clone_spawn_data(&self) -> WatchSchedule {
+        WatchSchedule {
+            interval_ms: self.interval_ms,
+            index: self.index.clone(),
+            query: self.query.clone(),
+            question: self.question.clone(),
+            text_field: self.text_field.clone(),
+            positive_label: self.positive_label.clone(),
+            p_min: self.p_min,
+            decide_index: self.decide_index.clone(),
+            k: self.k,
+            level: self.level.clone(),
+        }
+    }
+}
+
+/// Spawn the per-watch evaluator. Ticks every `interval`; each tick runs one
+/// bounded pass of the pipeline **percolate prefilter → `/_decide` → fire**:
+///
+/// 1. re-read the rule from `.xerj_alert_rules` — exit if it is gone,
+///    disabled, or carries a different etag (a newer PUT spawned its own
+///    evaluator; only one may run per watch id);
+/// 2. prefilter: one search over the watched index, the watch's query,
+///    newest `_seq_no` first, at most [`WATCHER_BATCH`] candidates;
+/// 3. decide: each candidate NEWER than the pass's cursor is rendered into
+///    the watch's question and voted on through the same `/_decide` handler
+///    the audit surface exposes (history tier, or the local tier when armed);
+/// 4. fire: label == positive && !abstain && confidence >= p_min writes a
+///    record to `.xerj_alert_fires`.
+///
+/// The cursor starts at the watched index's max `_seq_no` AT PUT TIME
+/// (captured in `put_watch` before the evaluator is spawned, `-1` when the
+/// index is empty because ES `_seq_no` is 0-based), so a watch evaluates
+/// documents that arrive AFTER it — a fresh watch never re-judges history (a
+/// burst watch over a large existing index would fire on all of it). It
+/// advances only over documents actually decided, oldest-first, so a burst
+/// larger than one batch is caught up on later ticks, never dropped, and a
+/// `/_decide` failure holds the cursor for a retry.
+///
+/// Cost at idle (the `benchmarks/idle-budget` gate): a watch whose index has
+/// no new documents costs one rule read + one empty query per tick —
+/// measured sub-millisecond in the watcher tests; RSS is the task's
+/// `WatchSchedule` + one u64 cursor. Zero accepted watches = zero tasks.
+///
+/// `_watcher/_stop` pauses evaluation (the flag is checked every tick);
+/// `_start` resumes it.
+fn spawn_watch_evaluator(
+    state: AppState,
+    id: String,
+    etag: String,
+    watch: WatchSchedule,
+    baseline: i64,
+) {
+    // The per-index boundary (#79) does not survive `tokio::spawn` on its
+    // own — same rule, same fix as `spawn_datafeed_task`: capture the
+    // starter's visibility HERE and reinstall it in the task, so the
+    // evaluator sees exactly the indices its creator could see.
+    let visibility = xerj_engine::index_guard::current();
+    tokio::spawn(xerj_engine::index_guard::scoped_opt(
+        visibility,
+        async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
+                watch.interval_ms.max(WATCHER_MIN_INTERVAL_MS),
+            ));
+            // The baseline cursor was captured in `put_watch` BEFORE this
+            // task was spawned, so "documents that arrive after the watch"
+            // means what the 201 already told the caller: anything indexed
+            // after the response is strictly newer than the baseline. Taking
+            // it here instead would race the caller's next index — the
+            // document the PUT returned before could be absorbed into the
+            // baseline and never judged.
+            let mut cursor = baseline;
+            ticker.tick().await; // consume the immediate first tick
+            loop {
+                ticker.tick().await;
+                if !state
+                    .watcher_active
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    continue;
+                }
+                // 1. The rule must still exist, be enabled, and be OURS.
+                let rule = read_rule(&state, &id).await;
+                let alive = rule.as_ref().is_some_and(|r| {
+                    r.get("enabled").and_then(Value::as_bool).unwrap_or(true)
+                        && r.get("etag").and_then(Value::as_str) == Some(etag.as_str())
+                });
+                if !alive {
+                    break;
+                }
+                cursor = evaluate_watch_pass(&state, &id, &watch, cursor).await;
+            }
+        },
+    ));
+}
+
+/// The rule document for `id`, or `None` when the index/doc is absent.
+async fn read_rule(state: &AppState, id: &str) -> Option<Value> {
+    let rules = state.engine.get_index(WATCHER_RULES_INDEX).ok()?;
+    rules.get_document(id).await.ok().flatten()
+}
+
+/// The cursor a freshly-accepted watch starts from: the index's newest
+/// `_seq_no`, so the watch evaluates documents that arrive AFTER it rather
+/// than re-judging history. `-1` for an absent or empty index — ES `_seq_no`
+/// is 0-based (`lookup_seq_no` subtracts 1 from the engine's 1-based
+/// counter), so a baseline of `0` for "nothing indexed yet" would silently
+/// strand the first document: `search_after: [0]` skips `_seq_no` 0, the
+/// very first document ever indexed. `-1` is strictly below every real
+/// `_seq_no`.
+async fn max_seq_no(state: &AppState, index: &str) -> i64 {
+    let Ok(idx) = state.engine.get_index(index) else {
+        return -1;
+    };
+    let req = match xerj_query::parse_request(&json!({
+        "query": { "match_all": {} },
+        "size": 1,
+        "sort": [{ "_seq_no": "desc" }],
+    })) {
+        Ok(r) => r,
+        Err(_) => return -1,
+    };
+    match idx.search(&req).await {
+        Ok(result) => result
+            .hits
+            .first()
+            .and_then(|h| h.seq_no)
+            .map(|s| s as i64)
+            .unwrap_or(-1),
+        Err(_) => -1,
+    }
+}
+
+/// One bounded evaluation pass: ascending `_seq_no`-keyset pages of the
+/// watch's query starting strictly past the cursor (reindex's loop shape,
+/// #1022 — the enrich precedent), deciding every candidate oldest-first.
+/// Returns the pass's new cursor.
+///
+/// Paging is what keeps the no-drop and no-re-evaluate properties together:
+/// a newest-first single page would either strand older documents behind the
+/// cursor (a silent drop) or leave them ahead of it (an endless re-decide).
+/// Ascending keyset paging walks the whole backlog at [`WATCHER_BATCH`] per
+/// request, and the cursor only ever crosses documents this evaluator
+/// actually decided — a `/_decide` failure or a failed fire write returns
+/// with the cursor held just below the failed document, so it is retried on
+/// the next tick, never skipped.
+///
+/// Per-pass decide budget: [`WATCHER_PASS_DECIDES`]. A sustained burst
+/// larger than that is worked off oldest-first across successive ticks; the
+/// backlog is never dropped, and the cost of any single tick is bounded.
+async fn evaluate_watch_pass(
+    state: &AppState,
+    id: &str,
+    watch: &WatchSchedule,
+    mut cursor: i64,
+) -> i64 {
+    let started = Instant::now();
+    let Ok(idx) = state.engine.get_index(&watch.index) else {
+        // Watched index deleted or not yet created: nothing to do this tick.
+        return cursor;
+    };
+    let mut search_after = Some(vec![json!(cursor)]);
+    let mut budget: usize = WATCHER_PASS_DECIDES;
+    while budget > 0 {
+        let mut search_body = json!({
+            "query": watch.query,
+            "size": WATCHER_BATCH,
+            "sort": [{ "_seq_no": "asc" }],
+            "_source": true,
+        });
+        if let Some(sa) = &search_after {
+            search_body["search_after"] = Value::Array(sa.clone());
+        }
+        let req = match xerj_query::parse_request(&search_body) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(watch = id, error = %e, "watcher prefilter query no longer parses");
+                return cursor;
+            }
+        };
+        let page_len;
+        let last_seq;
+        let result = match idx.search(&req).await {
+            Ok(r) => {
+                page_len = r.hits.len();
+                last_seq = r.hits.last().and_then(|h| h.seq_no);
+                r
+            }
+            Err(e) => {
+                tracing::warn!(watch = id, error = %e, "watcher prefilter search failed");
+                return cursor;
+            }
+        };
+        if page_len == 0 {
+            break;
+        }
+        for hit in result.hits {
+            let Some(seq) = hit.seq_no else { continue };
+            let seq = seq as i64;
+            if budget == 0 {
+                break;
+            }
+            let question = render_watch_question(&watch.question, &hit.source, &watch.text_field);
+            match decide_for_watch(state, watch, &question).await {
+                Ok(resp) => {
+                    let label = resp.get("label").and_then(Value::as_str);
+                    let p = resp
+                        .get("confidence")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0);
+                    let abstain = resp.get("abstain").and_then(Value::as_bool).unwrap_or(true);
+                    if label == Some(watch.positive_label.as_str()) && !abstain && p >= watch.p_min
+                    {
+                        let fired = write_fire(
+                            state,
+                            id,
+                            watch,
+                            &hit.id,
+                            label.unwrap_or(""),
+                            p,
+                            &question,
+                            &resp,
+                        )
+                        .await;
+                        if let Err(e) = fired {
+                            tracing::warn!(watch = id, error = %e, "watcher fire write failed");
+                            // The fire is the product: hold the cursor below
+                            // this document and retry it next tick.
+                            return cursor;
+                        }
+                    }
+                }
+                Err(cause) => {
+                    tracing::warn!(watch = id, cause = %cause, "/_decide failed for a candidate");
+                    return cursor;
+                }
+            }
+            budget -= 1;
+            cursor = cursor.max(seq);
+        }
+        match last_seq {
+            Some(s) if page_len == WATCHER_BATCH => search_after = Some(vec![json!(s)]),
+            // Short page: the backlog past the cursor is exhausted.
+            _ => break,
+        }
+    }
+    state
+        .metrics
+        .record_query(&watch.index, "watcher", started.elapsed().as_secs_f64());
+    cursor
+}
+
+/// Call the `/_decide` handler directly — the same ladder the HTTP surface
+/// runs (history vote → local tier), not a reimplementation. Returns the
+/// response JSON on 200; the cause string otherwise.
+async fn decide_for_watch(
+    state: &AppState,
+    watch: &WatchSchedule,
+    question: &str,
+) -> Result<Value, String> {
+    let mut body = json!({
+        "question": question,
+        "positive_label": watch.positive_label,
+    });
+    if !watch.decide_index.is_empty() {
+        body["index"] = json!(watch.decide_index);
+    }
+    if let Some(k) = watch.k {
+        body["k"] = json!(k);
+    }
+    let resp = crate::systemone_api::decide(State(state.clone()), Json(body)).await;
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .map_err(|e| format!("reading /_decide response body: {e}"))?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("parsing /_decide response body: {e}"))?;
+    if status != StatusCode::OK {
+        let reason = value
+            .pointer("/error/reason")
+            .and_then(Value::as_str)
+            .unwrap_or("unavailable");
+        return Err(format!("/_decide answered {status}: {reason}"));
+    }
+    Ok(value)
+}
+
+/// Write one fire record to `.xerj_alert_fires`.
+// One arg per field of the fire record that the caller alone knows: the
+// watch's identity/level/target, the document that matched, and the four
+// things the decide answer contributed. Bundling them into a struct would
+// just move the same eight values one call frame up.
+#[allow(clippy::too_many_arguments)]
+async fn write_fire(
+    state: &AppState,
+    id: &str,
+    watch: &WatchSchedule,
+    doc_id: &str,
+    label: &str,
+    p: f64,
+    rendered_question: &str,
+    decide_resp: &Value,
+) -> Result<(), xerj_common::XerjError> {
+    let fires = state.engine.get_or_create_index(WATCHER_FIRES_INDEX)?;
+    let fire = json!({
+        "rule_id": id,
+        "level": watch.level,
+        "fired_at": chrono::Utc::now().to_rfc3339(),
+        // RAW /_decide confidence. Calibration is #1063 and is explicitly
+        // NOT claimed here — `calibrated` stays false until that lands.
+        "p": (p * 1e6).round() / 1e6,
+        "calibrated": false,
+        "label": label,
+        "doc_id": doc_id,
+        "index": watch.index,
+        "tier": decide_resp.get("tier").cloned().unwrap_or(Value::Null),
+        "text": clip_watch_text(rendered_question, WATCHER_FIRE_TEXT_CHARS),
+    });
+    fires
+        .index_document(None, fire)
+        .await
+        .map_err(xerj_common::XerjError::from)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod watcher_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+    use xerj_common::{
+        config::{Config, WalSync},
+        metrics::Metrics,
+    };
+    use xerj_engine::Engine;
+
+    fn test_state() -> AppState {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let mut config = Config::default();
+        config.server.data_dir = dir.to_string_lossy().into_owned();
+        config.storage.wal_sync = WalSync::Async;
+        let metrics = Metrics::new().expect("metrics");
+        let engine = Engine::new(config.clone()).expect("engine");
+        AppState::new(config, engine, metrics)
+    }
+
+    /// A history index whose vote separates the two sides by text, so the
+    /// decide step of the pipeline has something real to decide with.
+    async fn history_index(state: &AppState) {
+        let hist = state.engine.get_or_create_index("watcher-history").unwrap();
+        for (id, text, label) in [
+            (
+                "h1",
+                "urgent wire transfer from an unknown prince",
+                "phishing",
+            ),
+            ("h2", "confirm your account wire transfer now", "phishing"),
+            ("h3", "quarterly wire fee schedule for vendors", "benign"),
+            ("h4", "wire reimbursement policy update", "benign"),
+        ] {
+            hist.index_document(Some(id.into()), json!({ "text": text, "label": label }))
+                .await
+                .unwrap();
+        }
+    }
+
+    fn detection_watch_body() -> Value {
+        json!({
+            "trigger": { "schedule": { "interval": "1s" } },
+            "input": { "search": {
+                "request": { "indices": ["watcher-mail"] },
+                "body": { "query": { "match": { "body": "wire" } } }
+            }},
+            "condition": { "xerj_decide": {
+                "question": "Is this email phishing? {{text}}",
+                "positive_label": "phishing",
+                "text_field": "body",
+                "p_min": 0.5,
+                "index": "watcher-history"
+            }},
+            "actions": { "index_alert": { "level": "critical" } }
+        })
+    }
+
+    async fn put(router: &axum::Router, id: &str, body: Value) -> (StatusCode, Value) {
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::put(format!("/_watcher/watch/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).expect("json body"))
+    }
+
+    /// Every fire in `.xerj_alert_fires` for `rule` (empty when the index
+    /// does not exist yet — the common case while polling).
+    async fn fires(state: &AppState, rule: &str) -> Vec<Value> {
+        let Ok(idx) = state.engine.get_index(WATCHER_FIRES_INDEX) else {
+            return Vec::new();
+        };
+        let req = parse_request(&json!({
+            "query": { "term": { "rule_id": rule } },
+            "size": 100,
+            "sort": [{ "_seq_no": "asc" }],
+        }))
+        .unwrap();
+        idx.search(&req)
+            .await
+            .unwrap()
+            .hits
+            .into_iter()
+            .map(|h| h.source)
+            .collect()
+    }
+
+    /// THE CONTRACT (#1062): the one watch type this node evaluates is
+    /// accepted and scheduled; every other ES watch shape is REFUSED with
+    /// 501 naming the supported shape, and nothing is stored for it.
+    #[tokio::test]
+    async fn put_watch_evaluates_or_refuses_with_501() {
+        let state = test_state();
+        let router = crate::router::build_es_compat_router(state.clone());
+
+        // The accepted detection watch.
+        let (status, body) = put(&router, "phish", detection_watch_body()).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["watcher"]["evaluation"], "scheduled");
+        assert_eq!(body["watcher"]["fires_into"], WATCHER_FIRES_INDEX);
+        assert_eq!(body["watcher"]["interval_ms"], 1_000);
+
+        // Replacing it is a 200, not a second 201.
+        let (status, body) = put(&router, "phish", detection_watch_body()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["created"], false);
+
+        // Each unimplemented watch shape: 501, a reason naming the detection
+        // watch, and NO rule left behind.
+        let mut cases: Vec<(&str, Value)> = Vec::new();
+        let mut cron = detection_watch_body();
+        cron["trigger"]["schedule"] = json!({ "cron": "0 0 * * * ?" });
+        cases.push(("cron schedule", cron));
+        let mut http_input = detection_watch_body();
+        http_input["input"] = json!({ "http": { "url": "http://example.invalid" } });
+        cases.push(("http input", http_input));
+        let mut compare = detection_watch_body();
+        compare["condition"] = json!({ "compare": { "ctx.payload.hits.total": { "gte": 1 } } });
+        cases.push(("compare condition", compare));
+        let mut script = detection_watch_body();
+        script["condition"] = json!({ "script": "return true" });
+        cases.push(("script condition", script));
+        let mut email_action = detection_watch_body();
+        email_action["actions"] = json!({ "email_admin": { "to": "root", "subject": "x" } });
+        cases.push(("email action", email_action));
+        let mut transform = detection_watch_body();
+        transform["transform"] = json!({ "script": "return ctx" });
+        cases.push(("transform", transform));
+        let mut no_input = detection_watch_body();
+        no_input["input"].as_object_mut().unwrap().remove("search");
+        cases.push(("no input", no_input));
+
+        for (what, body) in cases {
+            let (status, err) = put(&router, "refused", body).await;
+            assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{what}: {err}");
+            let reason = err["error"]["reason"].as_str().expect("reason");
+            assert!(
+                reason.contains("detection watch") && reason.contains("not evaluated"),
+                "{what}: reason must name the refusal: {reason}"
+            );
+        }
+        let rules = state.engine.get_index(WATCHER_RULES_INDEX).unwrap();
+        assert!(
+            rules.get_document("refused").await.unwrap().is_none(),
+            "a refused watch must not be stored"
+        );
+        // Only the accepted watch is.
+        assert!(rules.get_document("phish").await.unwrap().is_some());
+    }
+
+    /// Malformed uses of the SUPPORTED type are 400s, not 501s — the caller
+    /// misused the type that does evaluate here.
+    #[tokio::test]
+    async fn put_watch_rejects_malformed_detection_watches_with_400() {
+        let state = test_state();
+        let router = crate::router::build_es_compat_router(state.clone());
+        let mut cases: Vec<(&str, Value)> = Vec::new();
+        let mut sub_second = detection_watch_body();
+        sub_second["trigger"]["schedule"]["interval"] = json!("10ms");
+        cases.push(("sub-second interval", sub_second));
+        let mut p = detection_watch_body();
+        p["condition"]["xerj_decide"]["p_min"] = json!(1.5);
+        cases.push(("p_min out of range", p));
+        let mut q = detection_watch_body();
+        q["condition"]["xerj_decide"]["question"] = json!("  ");
+        cases.push(("blank question", q));
+        let mut no_positive = detection_watch_body();
+        no_positive["condition"]["xerj_decide"]
+            .as_object_mut()
+            .unwrap()
+            .remove("positive_label");
+        cases.push(("no positive_label", no_positive));
+        let mut bad_query = detection_watch_body();
+        bad_query["input"]["search"]["body"]["query"] = json!({ "no_such_clause": {} });
+        cases.push(("unparsable prefilter query", bad_query));
+        let mut no_history = detection_watch_body();
+        no_history["condition"]["xerj_decide"]
+            .as_object_mut()
+            .unwrap()
+            .remove("index");
+        cases.push(("no decide index on a history-only node", no_history));
+
+        for (what, body) in cases {
+            let (status, err) = put(&router, "bad", body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{what}: {err}");
+        }
+    }
+
+    /// End to end: percolate prefilter → /_decide → fire. A document whose
+    /// text the history votes `phishing` fires into `.xerj_alert_fires` with
+    /// the RAW p and `calibrated: false`; a prefilter-passing document the
+    /// history votes `benign` does not.
+    #[tokio::test]
+    async fn detection_watch_fires_on_a_decided_document() {
+        let state = test_state();
+        history_index(&state).await;
+        state.engine.get_or_create_index("watcher-mail").unwrap();
+        let router = crate::router::build_es_compat_router(state.clone());
+        let (status, body) = put(&router, "phish", detection_watch_body()).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+
+        let mail = state.engine.get_index("watcher-mail").unwrap();
+        mail.index_document(
+            Some("phishy".into()),
+            json!({ "body": "urgent wire transfer from an unknown prince, confirm now" }),
+        )
+        .await
+        .unwrap();
+        mail.index_document(
+            Some("boring".into()),
+            json!({ "body": "the quarterly wire fee schedule for vendors" }),
+        )
+        .await
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let got = fires(&state, "phish").await;
+            if !got.is_empty() {
+                assert_eq!(
+                    got.len(),
+                    1,
+                    "one fire expected (phishing only), got {got:?}"
+                );
+                let fire = &got[0];
+                assert_eq!(fire["doc_id"], "phishy");
+                assert_eq!(fire["label"], "phishing");
+                assert_eq!(fire["level"], "critical");
+                assert_eq!(fire["tier"], "history");
+                assert_eq!(fire["calibrated"], false, "calibration is #1063");
+                let p = fire["p"].as_f64().expect("raw p on the fire record");
+                assert!(p >= 0.5, "vote confidence {p} must clear p_min");
+                break;
+            }
+            assert!(Instant::now() < deadline, "watcher did not fire within 20s");
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        // The benign document passed the SAME percolate prefilter (it says
+        // "wire") and was decided by the same history — and did not fire.
+        // Two extra intervals of slack before asserting.
+        tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+        assert_eq!(
+            fires(&state, "phish").await.len(),
+            1,
+            "a benign-voted document must not fire"
+        );
+    }
+
+    /// The cursor baselines at the watched index's max `_seq_no` at PUT
+    /// time: documents that predate the watch are never re-judged, and a
+    /// document indexed after it still fires.
+    #[tokio::test]
+    async fn watch_baselines_at_max_seq_no_existing_docs_do_not_fire() {
+        let state = test_state();
+        history_index(&state).await;
+        let mail = state.engine.get_or_create_index("watcher-mail").unwrap();
+        // BEFORE the watch exists — phishing-shaped, would fire if judged.
+        mail.index_document(
+            Some("old".into()),
+            json!({ "body": "urgent wire transfer from an unknown prince" }),
+        )
+        .await
+        .unwrap();
+        let router = crate::router::build_es_compat_router(state.clone());
+        let (status, body) = put(&router, "phish", detection_watch_body()).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        // AFTER the watch — must fire.
+        mail.index_document(
+            Some("new".into()),
+            json!({ "body": "urgent wire transfer from an unknown prince, act now" }),
+        )
+        .await
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let got = fires(&state, "phish").await;
+            assert!(
+                got.iter().all(|f| f["doc_id"] != "old"),
+                "a pre-watch document must never fire: {got:?}"
+            );
+            if got.iter().any(|f| f["doc_id"] == "new") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "post-watch document did not fire within 20s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    /// get/delete read the same `.xerj_alert_rules` the evaluator reads —
+    /// one source of truth, and a delete stops evaluation.
+    #[tokio::test]
+    async fn get_and_delete_watch_read_the_rules_index() {
+        let state = test_state();
+        let router = crate::router::build_es_compat_router(state.clone());
+        let (status, _) = put(&router, "phish", detection_watch_body()).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::get("/_watcher/watch/phish")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let got: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(got["found"], true);
+        assert_eq!(got["watch"]["condition"]["xerj_decide"]["p_min"], 0.5);
+
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::delete("/_watcher/watch/phish")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let rules = state.engine.get_index(WATCHER_RULES_INDEX).unwrap();
+        assert!(rules.get_document("phish").await.unwrap().is_none());
+
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::get("/_watcher/watch/phish")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Idle cost of one accepted watch, measured: the rule re-read plus one
+    /// empty prefilter page per tick. Sub-millisecond per tick on an index
+    /// with no new documents — the idle-budget gate's (< 0.5 % core) per
+    /// watch share at a 1s interval.
+    #[tokio::test]
+    async fn idle_watch_tick_is_sub_millisecond() {
+        let state = test_state();
+        history_index(&state).await;
+        state.engine.get_or_create_index("watcher-mail").unwrap();
+        let watch = parse_detection_watch(&detection_watch_body(), false)
+            .expect("parses")
+            .clone_spawn_data();
+        // Baseline over an index that exists but has no new documents.
+        let cursor = max_seq_no(&state, "watcher-mail").await;
+        let started = Instant::now();
+        for _ in 0..10 {
+            let next = evaluate_watch_pass(&state, "idle", &watch, cursor).await;
+            assert_eq!(next, cursor, "idle pass must not move the cursor");
+        }
+        let per_tick = started.elapsed().as_secs_f64() / 10.0;
+        assert!(
+            per_tick < 0.001,
+            "one idle tick cost {per_tick}s; the idle-budget envelope needs < 1ms"
+        );
+    }
+
+    /// Question rendering: `{{text}}` resolves through the watch's
+    /// `text_field`, other placeholders resolve document fields, and unknown
+    /// placeholders render empty.
+    #[test]
+    fn watch_question_renders_document_fields() {
+        let doc = json!({ "body": "wire transfer", "sender": "root", "n": 7 });
+        let q = render_watch_question(
+            "Is this from {{sender}} about {{text}} ({{n}}) ({{missing}})?",
+            &doc,
+            "body",
+        );
+        assert_eq!(q, "Is this from root about wire transfer (7) ()?");
+        let long: String = "x".repeat(WATCHER_FIRE_TEXT_CHARS * 2);
+        let clipped = render_watch_question("{{text}}", &json!({ "body": long }), "body");
+        assert_eq!(
+            clipped.chars().count(),
+            WATCHER_FIRE_TEXT_CHARS,
+            "candidate text is clipped, not carried whole"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -172,6 +172,11 @@ fn schema_for(index: &str) -> Schema {
             add(&mut s, "updated_at", FieldType::Date);
         }
         ALERT_RULES => {
+            // The rule body itself (`watch`, `type`, `etag`) is written by
+            // the engine-side watcher (xerj-api `PUT /_watcher/watch/{id}`,
+            // #1062) — this crate owns the INDEX and its typed filter
+            // fields; xerj-api deliberately does not depend on this crate,
+            // so both sides write/read through the shared Engine.
             add(&mut s, "owner", FieldType::Keyword);
             add(&mut s, "org_id", FieldType::Keyword);
             add(&mut s, "name", FieldType::Keyword);
@@ -180,9 +185,19 @@ fn schema_for(index: &str) -> Schema {
             add(&mut s, "updated_at", FieldType::Date);
         }
         ALERT_FIRES => {
+            // Written by the watcher evaluator (#1062). `p` is the RAW
+            // /_decide confidence (calibration is #1063), typed so the
+            // console can filter/sort by it; `calibrated` lives in `_source`
+            // (constant false today, so filtering on it is pointless).
             add(&mut s, "rule_id", FieldType::Keyword);
             add(&mut s, "level", FieldType::Keyword);
             add(&mut s, "fired_at", FieldType::Date);
+            // The document whose decide vote fired this rule.
+            add(&mut s, "doc_id", FieldType::Keyword);
+            // Raw (uncalibrated, #1063) /_decide confidence of the vote.
+            add(&mut s, "p", FieldType::Double);
+            // Which decide tier answered: "history" | "local".
+            add(&mut s, "tier", FieldType::Keyword);
         }
         AUDIT => {
             add(&mut s, "who", FieldType::Keyword);
@@ -243,5 +258,27 @@ mod tests {
         assert!(!is_system_index("dashboards"));
         assert!(!is_system_index(".kibana"));
         assert!(!is_system_index(".audit"));
+    }
+
+    /// #1062: the alert indices are now READ and WRITTEN — rules by the
+    /// engine-side watcher (`PUT /_watcher/watch/{id}` in xerj-api), fires
+    /// by its evaluator. This pins the typed fields the evaluator writes so
+    /// a schema edit there cannot drift from the writer silently.
+    #[test]
+    fn alert_indices_carry_the_watcher_fields() {
+        let fires = schema_for(ALERT_FIRES);
+        for field in ["rule_id", "level", "fired_at", "doc_id", "p", "tier"] {
+            assert!(
+                fires.fields.iter().any(|f| f.name == field),
+                "{ALERT_FIRES} must type {field} for the watcher evaluator"
+            );
+        }
+        let rules = schema_for(ALERT_RULES);
+        for field in ["name", "enabled", "etag", "updated_at"] {
+            assert!(
+                rules.fields.iter().any(|f| f.name == field),
+                "{ALERT_RULES} must type {field} for the watcher's rule documents"
+            );
+        }
     }
 }
