@@ -1,0 +1,29 @@
+{
+  "architectures": [
+    "ModernBertForSequenceClassification"
+  ],
+  "classifier_pooling": "cls",
+  "global_attn_every_n_layers": 3,
+  "global_rope_theta": 10000.0,
+  "hidden_size": 256,
+  "id2label": {
+    "0": "contradiction",
+    "1": "neutral",
+    "2": "entailment"
+  },
+  "intermediate_size": 768,
+  "label2id": {
+    "contradiction": "0",
+    "entailment": "2",
+    "neutral": "1"
+  },
+  "layer_norm_eps": 1e-12,
+  "local_attention": 128,
+  "local_rope_theta": 10000.0,
+  "max_position_embeddings": 512,
+  "model_type": "modernbert",
+  "num_attention_heads": 4,
+  "num_hidden_layers": 6,
+  "pad_token_id": 0,
+  "vocab_size": 8742
+}

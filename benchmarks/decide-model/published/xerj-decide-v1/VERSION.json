@@ -1,0 +1,7 @@
+{
+  "architecture": "ModernBertForSequenceClassification (candle-transformers 0.9)",
+  "dtype": "F32",
+  "name": "xerj-decide-v1",
+  "parameters": 7419907,
+  "version": "1.0.0"
+}

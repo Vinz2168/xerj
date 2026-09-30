@@ -1,0 +1,42 @@
+# Training + export harness for the open `xerj-decide` head (issue #1064).
+#
+# Deliberately a STANDALONE crate (own `[workspace]`, outside engine/): the
+# engine must not grow training dependencies, and the artifact this produces
+# is loaded by the *existing* loader in engine/crates/xerj-ai/src/decide.rs —
+# same candle versions, so the trainer's forward pass and the server's
+# forward pass are the same code path (candle-transformers
+# ModernBertForSequenceClassification), not two implementations of one
+# design.
+#
+# Determinism (#940's lesson): no clock, no rand crate, no HashMap iteration
+# order in any output path. Every sample comes from a splitmix64 stream
+# seeded from `--seed`, and weight init is written tensor-by-tensor from
+# that same stream (candle's CPU RNG cannot be seeded — Device::set_seed is
+# a bail! on CPU). Re-running with the same inputs, seed, flags and the
+# pinned tokenizer reproduces the artifact bit for bit.
+[package]
+name = "decide-model"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["xerj-org"]
+description = "Train and export the open xerj-decide tier-2 decision head (issue #1064)"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+candle-core = "0.9"
+candle-nn = "0.9"
+candle-transformers = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+# Same version and feature set the engine's decide-local feature uses, so
+# tokenizer.json written here is the file the server reads.
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+
+[profile.release]
+# Thin LTO keeps the matmul hot path fast without a full LTO link cost.
+lto = "thin"
