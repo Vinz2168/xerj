@@ -1,0 +1,47 @@
+# nasa-exoplanets — licence and redistribution status
+
+STATUS: this file documents a licence, not a measurement. Nothing in this
+benchmark has been measured yet (see the top-level README.md).
+
+## Source
+
+NASA Exoplanet Archive, *Planetary Systems Composite Data* table
+(`pscomppars`), queried through the TAP sync service with a pinned query
+(columns and `ORDER BY pl_name ASC` make the snapshot deterministic up to the
+archive's monthly refresh):
+
+> https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query=SELECT%20TOP%203000%20pl_name,hostname,sy_snum,sy_pnum,discoverymethod,disc_year,pl_orbper,pl_rade,pl_bmasse,pl_eqt,st_teff,st_rad,st_mass,ra,dec%20FROM%20pscomppars%20ORDER%20BY%20pl_name%20ASC&format=csv
+
+The committed `nasa-exoplanets.csv` (sha256 in `../PROVENANCE`) is the
+canonical copy the gold-derivation script reads.
+
+## Licence terms we could verify, quoted verbatim
+
+The archive's service pages carry **no explicit open-licence statement**; what
+they do carry is an acknowledgment request. From
+https://exoplanetarchive.ipac.caltech.edu/docs/acknowledge.html, fetched live
+from this sandbox on 2026-09-29 (UTC, sandbox clock):
+
+> "Please include the following standard acknowledgment in any published
+> material that makes use of the NASA Exoplanet Archive's services. This
+> research has made use of the NASA Exoplanet Archive, which is operated by the
+> California Institute of Technology, under contract with the National
+> Aeronautics and Space Administration under the Exoplanet Exploration
+> Program."
+
+Acknowledgment given here in exactly those words.
+
+## Honest assessment
+
+- No redistribution restriction of any kind was found on the archive pages we
+  could reach (acknowledge.html and the service landing pages; fetched
+  2026-09-29, sandbox clock).
+- The archive is NASA-funded and operated by Caltech under NASA contract;
+  works of the U.S. Government are not subject to copyright in the U.S.
+  (17 U.S.C. § 105). We therefore treat this as public-domain-by-statute
+  government data with the requested acknowledgment — and we say plainly that
+  the archive itself does not print the words "public domain" anywhere we
+  could fetch.
+- If a stricter reading is ever wanted, swapping this dataset for a CC-BY- or
+  CC0-marked table is a drop-in change: the derivation script reads columns,
+  not URLs.

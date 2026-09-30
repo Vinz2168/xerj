@@ -1,0 +1,5 @@
+{"id": "neg-001", "dataset": "usgs-earthquakes", "index_hint": "ax-usgs-earthquakes", "prompt": "all quarry blast events", "expect": "422 naming the unresolved phrase 'quarry blast': the pinned M2.5+ window contains zero events of that type"}
+{"id": "neg-002", "dataset": "usgs-earthquakes", "index_hint": "ax-usgs-earthquakes", "prompt": "events with felt report counts", "expect": "422: no field carries felt reports in this index"}
+{"id": "neg-003", "dataset": "nasa-exoplanets", "index_hint": "ax-nasa-exoplanets", "prompt": "planets discovered by gravitational wave disruption", "expect": "422 naming the phrase: not a discovery method in the data"}
+{"id": "neg-004", "dataset": "gapminder", "index_hint": "ax-gapminder", "prompt": "records for cities in Switzerland", "expect": "422: the index is country-level and has no Swiss records (Liechtenstein is absent too)"}
+{"id": "neg-005", "dataset": "gapminder", "index_hint": "ax-gapminder", "prompt": "countries with literacy rate above 90", "expect": "422 naming 'literacy rate': no such field in the index"}

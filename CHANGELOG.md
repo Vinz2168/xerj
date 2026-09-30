@@ -49,6 +49,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit `previous_tag_name`, falling back to auto-generation only when no
   previous v-tag exists (PR
   [#1069](https://github.com/xerj-org/xerj/pull/1069)).
+- **`benchmarks/ask-plan/` — the harness behind issue #1056's gate, shipped
+  before the endpoint so the gate is designed in the open**: 230 (prompt,
+  gold result set) pairs over three committed public tabular snapshots
+  (USGS earthquakes — public domain; NASA Exoplanet Archive `pscomppars` —
+  acknowledgment given, statutory basis stated; Gapminder — CC BY 4.0), with
+  gold derived only by filtering raw rows in Python (never by running an
+  engine), deterministic stdlib-only derivation/verification scripts, a
+  loader + fixture self-check, the `POST /_ask` scoring arm (macro result-set
+  F1, zero-invalid-DSL, 3-pass determinism), and the guarded two-arm
+  `claude -p` comparison the issue specifies. Validated end-to-end against a
+  local rc.78 build: all 230 `query_equivalent`s reproduce their gold sets;
+  with `POST /_ask` absent the harness stops at `measured: false`. The
+  directory contains zero measured numbers by design — every F1/token cell
+  in its README is a gate definition until a real run lands (PR
+  [#1071](https://github.com/xerj-org/xerj/pull/1071)).
 
 ### Documentation
 

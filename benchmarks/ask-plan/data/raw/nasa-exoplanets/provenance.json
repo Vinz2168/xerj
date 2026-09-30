@@ -1,0 +1,9 @@
+{
+ "dataset": "nasa-exoplanets",
+ "url": "https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query=SELECT%20TOP%203000%20pl_name,hostname,sy_snum,sy_pnum,discoverymethod,disc_year,pl_orbper,pl_rade,pl_bmasse,pl_eqt,st_teff,st_rad,st_mass,ra,dec%20FROM%20pscomppars%20ORDER%20BY%20pl_name%20ASC&format=csv",
+ "file": "nasa-exoplanets.csv",
+ "sha256": "2d18679052b6c8768e22f79dbb691dbccccb6f1d851cb613912d743b900a5b1e",
+ "bytes": 419958,
+ "fetched_utc": "2026-09-29T20:13:22+00:00",
+ "licence": "LICENCE (in this directory)"
+}

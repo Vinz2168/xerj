@@ -1,0 +1,39 @@
+# usgs-earthquakes — licence and redistribution status
+
+STATUS: this file documents a licence, not a measurement. Nothing in this
+benchmark has been measured yet (see the top-level README.md).
+
+## Source
+
+U.S. Geological Survey (USGS) Earthquake Catalog (ComCat), served by the FDSN
+`ws-event` CSV service:
+
+> https://earthquake.usgs.gov/fdsnws/event/1/query?format=csv&starttime=2026-09-01&endtime=2026-09-08&minmagnitude=2.5&orderby=time-asc
+
+Pinned to a fixed historical window so the snapshot is reproducible; the
+committed `usgs-earthquakes.csv` (sha256 in `../PROVENANCE`) is the canonical
+copy the gold-derivation script reads.
+
+## Licence — public domain, quoted verbatim
+
+From the USGS "Acknowledging or Crediting USGS" page, fetched live from this
+sandbox on 2026-09-29 (UTC, sandbox clock):
+
+> "Most U.S. Geological Survey (USGS) information resides in the Public Domain
+> and may be used without restriction. When using information from USGS
+> information products, publications, or websites, we ask that proper credit be
+> given."
+
+Page: https://www.usgs.gov/information-policies-and-instructions/acknowledging-or-crediting-usgs
+
+Credit given here as requested: **U.S. Geological Survey**.
+
+## Caveats, stated plainly
+
+- ComCat aggregates events contributed by regional seismic networks (the `net`
+  and `locationSource` columns name them). The USGS statement above covers USGS
+  information as hosted; this snapshot's events are contributed by public
+  networks (`us`, `ak`, `pr`, `tx`, `hv`, `nc`, `ci`, `uu`, ...). No
+  contributor-specific restriction was found on the service pages.
+- 17 U.S.C. § 105 bars copyright for works of the U.S. Government.
+- Redistributed here as a benchmark fixture, unmodified, with credit.

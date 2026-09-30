@@ -1,0 +1,9 @@
+{
+ "dataset": "gapminder",
+ "url": "https://raw.githubusercontent.com/jennybc/gapminder/master/inst/extdata/gapminder.tsv",
+ "file": "gapminder.tsv",
+ "sha256": "f74275b4a2f4a7c8e3a09a752f9d6e43d1759d78d5cbfdebaaa3e1a6efc68f78",
+ "bytes": 81932,
+ "fetched_utc": "2026-09-29T20:13:22+00:00",
+ "licence": "LICENCE (in this directory)"
+}

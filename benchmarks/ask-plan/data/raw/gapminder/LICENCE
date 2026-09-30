@@ -1,0 +1,29 @@
+# gapminder — licence and redistribution status
+
+STATUS: this file documents a licence, not a measurement. Nothing in this
+benchmark has been measured yet (see the top-level README.md).
+
+## Source
+
+The classic Gapminder country-level indicators table (142 countries x 12
+years x 5-year steps: `country`, `continent`, `year`, `lifeExp`, `pop`,
+`gdpPercap`). Fetched from the `jennybc/gapminder` GitHub mirror of
+Gapminder's data (transport only; the content is Gapminder's):
+
+> https://raw.githubusercontent.com/jennybc/gapminder/master/inst/extdata/gapminder.tsv
+
+The committed `gapminder.tsv` (sha256 in `../PROVENANCE`) is the canonical
+copy the gold-derivation script reads.
+
+## Licence — CC BY 4.0, quoted verbatim
+
+From Gapminder's own terms page, fetched live from this sandbox on 2026-09-29 (UTC, sandbox clock):
+
+> "All our content is freely available to use under the Creative Commons
+> Attribution 4.0 International license. All you need to do is credit us in
+> the following way: 'Free material from www.gapminder.org'."
+
+Page: https://www.gapminder.org/about/press-room/for-journalists/
+
+Credit given here exactly as requested: **Free material from
+www.gapminder.org**.
