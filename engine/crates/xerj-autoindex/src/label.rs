@@ -462,12 +462,17 @@ mod tests {
         assert_eq!(q, "Is wire transfer (ticket 3, )");
     }
 
+    /// (label-to-return, p, abstain) — the canned vote for one positive label.
+    type StubAnswer = (String, f64, bool);
+    /// positive label → its canned vote.
+    type StubAnswers = std::collections::HashMap<String, StubAnswer>;
+
     /// A loopback decide endpoint answering canned votes, so the Labeler is
     /// exercised over real HTTP without a node.
     struct DecideStub {
         url: String,
-        /// Answers by positive label: (label-to-return, p, abstain).
-        answers: Arc<Mutex<std::collections::HashMap<String, (String, f64, bool)>>>,
+        /// Answers by positive label.
+        answers: Arc<Mutex<StubAnswers>>,
         stop: Arc<Mutex<bool>>,
         join: Option<std::thread::JoinHandle<()>>,
     }
@@ -524,10 +529,7 @@ mod tests {
         }
     }
 
-    fn serve(
-        mut stream: TcpStream,
-        answers: &Mutex<std::collections::HashMap<String, (String, f64, bool)>>,
-    ) {
+    fn serve(mut stream: TcpStream, answers: &Mutex<StubAnswers>) {
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut request_line = String::new();
         if reader.read_line(&mut request_line).unwrap() == 0 {
