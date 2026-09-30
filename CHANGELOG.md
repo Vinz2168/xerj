@@ -425,6 +425,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **The rc.80 gates post on the blog: "The rc.80 gates: three passed
+  outright, three failed, one split" (PR
+  [#1096](https://github.com/xerj-org/xerj/pull/1096)).** The blog half of
+  the ten-item program's packaging rule (#1055–#1064, discussion #1054):
+  every gate verdict, wins and losses, each figure traced to the gate run
+  that produced it. PASS: `/_ask` macro-F1 0.9975 over 230 pairs, 0 invalid
+  DSL, 3-run determinism, wall-clock p50 1.129 ms against the 300 ms bar
+  (#1076, #1079); `xerj_map` unknown-field 400s 20/30 guessed → 0/30
+  map-informed, 100% against the ≥80% bar (#1074, #1086); calibration FiQA
+  pair-level ECE 0.3109 → 0.0088 held-out against the ≤0.10 bar with the
+  temperature arm's 0.3163 published as the failing comparison (#1080,
+  #1087). FAIL, published as such: the lexical judge loses to its own first
+  stage everywhere measured (0.7045→0.5967, 0.3419→0.2924,
+  0.2382→0.1650 against the 0.30 FiQA bar) and stays opt-in with no quality
+  claim per its own rule (#1077, #1090); the flywheel freezes as shipped
+  (12 of 2,000 cached, #1094) and forces 19.72% coverage at 0.9953 accuracy
+  against the 80%/0.97 bars (#1075, #1088); the tier-2 decide head misses
+  SMS 0.9193/0.287 against 0.95/0.05 and AG News 0.2599 against 0.85, with
+  latency 8.4 ms passing, and ships behind the flag with the numbers
+  published (#1072/#1073, #1088). SPLIT: stemming +0.0160/+0.0179 BM25
+  nDCG@10 passes while zero-hit 25→15 fails the ≤10 bar — the 15 have no
+  stem anywhere in the corpus (#1070, #1085). The post also tells the gate
+  catch that the stock release binary was built without the `decide-local`
+  cargo feature (the flag a no-op, `stock-binary-noop.txt`) with the fix
+  queued ahead of the cut rather than claimed done, and states the honest
+  gaps: the `/_ask` token arm designed not run, the `_watcher` detection
+  gate not yet measured, no Hugging Face URL claimed for `xerj-decide-v1`.
+  Mechanics: hand-written `landing/blog/the-rc80-gates.html`, registered in
+  `scripts/seo/pagedata.py` (published/updated 2026-09-30), card prepended
+  to the blog hub with its `dateModified` bumped, head/footer owned by the
+  seo generators, sitemap regenerated post-commit; all local gates green
+  (build_articles/gen_sitemap/fix_heads/fix_links/mk_og_card `--check`,
+  `seo_lint` 0 violations, `factcheck` 0 errors, constants guard).
 - **Measured the #1059 stemming gate on the release binary — the BM25 half
   passes, the zero-hit half fails at 15 (PR
   [#1085](https://github.com/xerj-org/xerj/pull/1085)).** Paired arms on one
