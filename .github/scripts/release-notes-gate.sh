@@ -179,7 +179,7 @@ else
       case "$state" in
         closed) pass "#$n closed (cited under ### Fixed)" ;;
         open)
-          if printf '%s\n' "$entry" | grep -qiE "$MARKERS"; then
+          if printf '%s\n' "$entry" | grep -iE "$MARKERS" >/dev/null; then
             pass "#$n open, and the entry says what remains open"
           else
             fail "#$n is OPEN but its ### Fixed entry claims it whole (the rc.18 #361 drift) - close the issue, or say in the entry what remains open: ${entry:0:100}..."
@@ -208,11 +208,15 @@ elif [ -n "$SECTION" ]; then
     fail "found no PR-numbered merges in $PREV_TAG..HEAD - wrong window or the parse broke; fix the gate, do not merge around it"
   fi
   for n in $merged_prs; do
-    if printf '%s\n' "$exempt" | grep -qx "$n"; then
+    # grep reads to EOF (no -q): under `set -o pipefail`, a -q that exits on
+    # first match closes the pipe while printf is still writing, and the
+    # EPIPE turns a SUCCESSFUL match into a pipeline failure. CI hit exactly
+    # that on 7 cited PRs before this comment existed.
+    if printf '%s\n' "$exempt" | grep -x "$n" >/dev/null; then
       note "PR #$n on the notes-exempt list"
       continue
     fi
-    if printf '%s\n' "$SECTION" | grep -qE "#$n([^0-9]|\$)|/(pull|issues)/$n([^0-9]|\$)"; then
+    if printf '%s\n' "$SECTION" | grep -E "#$n([^0-9]|\$)|/(pull|issues)/$n([^0-9]|\$)" >/dev/null; then
       pass "PR #$n cited in [$VERSION]"
       continue
     fi
@@ -224,7 +228,7 @@ elif [ -n "$SECTION" ]; then
       --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[].number' 2>/dev/null)" || closing=""
     cited_via=""
     for i in $closing; do
-      if printf '%s\n' "$SECTION" | grep -qE "#$i([^0-9]|\$)|/(pull|issues)/$i([^0-9]|\$)"; then
+      if printf '%s\n' "$SECTION" | grep -E "#$i([^0-9]|\$)|/(pull|issues)/$i([^0-9]|\$)" >/dev/null; then
         cited_via="$i"; break
       fi
     done
