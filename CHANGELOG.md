@@ -34,6 +34,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sub-1.0 pairs are the "from A through B" date pairs, where this PR reads
   "through" as inclusive by design. ES-YAML on this tree: 1380/0/3. The
   p50 ≤ 300 ms CPU budget is a release-time gate and is not claimed here.
+- **Decision cache flywheel: every tier-2+ answer written back, `source` per
+  answer, human corrections weighted ≥ 2x
+  ([#1061](https://github.com/xerj-org/xerj/issues/1061), PR
+  [#1075](https://github.com/xerj-org/xerj/pull/1075)).** `/v1/systemone` and
+  `/_decide` now close the loop PR #1072 opened: every tier-2 (local head)
+  answer — and every tier-3 answer when that tier exists — is cached into the
+  configured `[decisions]` index as an ordinary document carrying the
+  configured text/label fields plus `p`, `source` and `ts`, so the answers a
+  node computes become the labelled history that answers the next request
+  (pinned by test: the same request twice is answered by history from its own
+  cached answer). The write-back is spawned, never awaited by the request,
+  and cannot fail it — an unreachable index is a log line; a
+  configured-but-missing index is created by the write-back itself, which is
+  how a local-tier node bootstraps its history. History-tier answers are
+  never re-written (they are the index already), and `/_decide` abstains are
+  never cached. Every answer now names its tier in a `source` field
+  (`/_decide` top level, `/v1/systemone` per-question in
+  `decisions.evidence.*.source`) with the strictly-parsed answer objects
+  untouched. Human corrections are ordinary history documents carrying
+  `human: true` (the existing write path, no new endpoint) and weigh the new
+  `[decisions] human_weight`× (default 2.0, the issue's ≥ 2x floor; validated
+  positive at config load) their reciprocal rank in the vote — everything
+  else keeps the 1/rank arithmetic the published measurements used. The
+  issue's Banking77 replay gate and the TypeSafe-terms question on retaining
+  provider outputs are release-time gates, deliberately not claimed here.
+
 - **`--decide-mode` / `--decide-model-dir`: the tier-2 decide head is armable
   from the command line (PR
   [#1073](https://github.com/xerj-org/xerj/pull/1073)).** The local decide
