@@ -77,7 +77,19 @@ def ece(pairs, bins=BINS):
 class Isotonic:
     """PAVA (pool-adjacent-violators) with the Rust module's knots:
     linear interpolation between block means, clamped at the ends
-    (Barlow et al. 1972; Zadrozny & Elkan 2002 for calibration use)."""
+    (Barlow et al. 1972; Zadrozny & Elkan 2002 for calibration use).
+
+    Fixed 2026-09-30: the block's first-x was recorded as len(blocks) at
+    append time, which stops equaling the pooled-point index after the first
+    backward pool — every knot created after a violation got an x shifted
+    down, so apply() mapped probabilities through a compressed curve. This
+    never bit on the bin-level gate (the even-bin fit points are strictly
+    increasing, so no pooling occurs — both implementations agree at
+    0.0330 there), but it corrupted any fit on data with local violations,
+    i.e. pair-level data. Now mirrors engine/crates/xerj-common/src/
+    calibration.rs exactly: blocks carry the pooled index i, and every pooled
+    point carries its block's mean (the Rust expand step), so the knots and
+    the interpolation bands are identical to the shipped implementation."""
 
     def __init__(self, pairs):
         pts = sorted(((p, y) for p, y in pairs), key=lambda t: (t[0], t[1]))
@@ -95,19 +107,26 @@ class Isotonic:
             ys.append(y_sum / (j - i))
             ws.append(float(j - i))
             i = j
-        # Stack of blocks: [y_sum, n, first_index].
+        # Stack of blocks: [y_sum, n, first POOLED index] — i, the index of
+        # the pooled point, NOT len(blocks), which diverges after a pool.
         blocks = []
-        for x, y, w in zip(xs, ys, ws):
-            blocks.append([y * w, w, len(blocks)])
+        for i, (x, y, w) in enumerate(zip(xs, ys, ws)):
+            blocks.append([y * w, w, i])
             while len(blocks) >= 2 and (
                 blocks[-2][0] / blocks[-2][1] > blocks[-1][0] / blocks[-1][1]
             ):
-                y2, n2, f2 = blocks.pop()
-                y1, n1, f1 = blocks.pop()
-                blocks.append([y1 + y2, n1 + n2, f1])
-        self.knots = []
-        for y_sum, n, first in blocks:
-            self.knots.append((xs[first], y_sum / n))
+                cur = blocks.pop()
+                blocks[-1][0] += cur[0]
+                blocks[-1][1] += cur[1]
+        # Expand blocks to pooled points (the Rust form): every pooled x is a
+        # knot carrying its block's mean.
+        fitted = [0.0] * len(xs)
+        for bi, (y_sum, n, first) in enumerate(blocks):
+            last = blocks[bi + 1][2] if bi + 1 < len(blocks) else len(xs)
+            mean = y_sum / n
+            for j in range(first, last):
+                fitted[j] = mean
+        self.knots = list(zip(xs, fitted))
 
     def apply(self, p):
         k = self.knots

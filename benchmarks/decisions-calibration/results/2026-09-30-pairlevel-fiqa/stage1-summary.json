@@ -1,0 +1,13 @@
+{
+ "engine_arm": "bm25 top-30 multi_match title+text (deterministic)",
+ "queries": 648,
+ "empty_bm25": 0,
+ "bm25_ndcg10": 0.2382,
+ "paid_calls": 648,
+ "fails": 0,
+ "input_tokens": 5059586,
+ "output_tokens": 346032,
+ "cost_usd_input_only_at_0.042_per_Mtok": 0.2125,
+ "wall_s_p50": 0.38,
+ "total_wall_min": 4.3
+}
