@@ -7783,6 +7783,30 @@ pub struct FieldEncodingInfo {
     pub distinct_values: usize,
 }
 
+/// What the node runs for semantic search over one field — see
+/// [`Index::semantic_field_facts`]. Every value is read from the live schema
+/// and embedder; none is derived, and there is intentionally no vector count.
+#[derive(Debug, Clone, Serialize)]
+pub struct SemanticFieldFacts {
+    /// The concrete field (alias-resolved) carrying the embedding config.
+    pub field: String,
+    /// Companion field the vectors live in (`<field>_vector` by default).
+    pub target_field: String,
+    /// Effective dimensionality — the schema's own, or the engine's built-in
+    /// default when the mapping did not pin one (`dims_from_schema` says which).
+    pub dims: usize,
+    /// `true` when `dims` came from the mapping, `false` when it is the
+    /// engine default the query/ingest paths fall back to.
+    pub dims_from_schema: bool,
+    /// Effective similarity metric (`cosine` unless the mapping overrode it).
+    pub similarity: String,
+    /// The embedder's own honesty label, e.g.
+    /// `"lexical feature-hash (built-in, 384-dim, non-neural)"`.
+    pub embedder: &'static str,
+    /// `false` only for the built-in lexical embedder (non-neural).
+    pub embedder_active: bool,
+}
+
 /// Statistics about an index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexStats {
@@ -24815,6 +24839,57 @@ impl Index {
     /// Get the current schema.
     pub async fn schema(&self) -> Schema {
         self.schema.read().await.schema.clone()
+    }
+
+    /// What this node actually runs for semantic search over `field` — the
+    /// facts behind any "semantic" claim a console or agent surface renders.
+    ///
+    /// Resolved EXACTLY the way the query and ingest paths resolve it (same
+    /// alias handling, same `dimensions.unwrap_or(DEFAULT_DIMS)` fallback,
+    /// the same embedder instance), so a claim built from these facts cannot
+    /// drift from what a query actually does:
+    ///
+    /// - `Some(facts)` — `field` carries an [`crate::FieldConfig::embedding`]
+    ///   config (an ES `semantic_text` field): the companion `target_field`
+    ///   holds one vector per embedded document, `dims`/`similarity` are the
+    ///   effective ones, and `embedder` is the backend's own label (e.g.
+    ///   `"lexical feature-hash (built-in, 384-dim, non-neural)"`).
+    /// - `None` — no embedding config: there is no stored vector to match,
+    ///   and the honest answer is "none on this node", never a count derived
+    ///   from terms or tokens.
+    ///
+    /// The facts deliberately carry NO vector count: the engine exposes no
+    /// per-field vector count on any stats surface, and a number it cannot
+    /// back must not exist (the honest-claims rule binds UIs, not just docs).
+    pub async fn semantic_field_facts(&self, field: &str) -> Option<SemanticFieldFacts> {
+        let guard = self.schema.read().await;
+        let resolved = resolve_field_alias(&guard.schema, field);
+        let fc = guard.schema.field(&resolved)?;
+        let emb = fc.embedding.as_ref()?;
+        let target_field = emb
+            .target_field
+            .clone()
+            .unwrap_or_else(|| format!("{resolved}_vector"));
+        let (dims, dims_from_schema) = match fc.options.dimensions {
+            Some(d) => (d, true),
+            None => (xerj_ai::local::DEFAULT_DIMS, false),
+        };
+        let similarity = fc
+            .options
+            .similarity
+            .clone()
+            .unwrap_or_else(|| "cosine".to_string());
+        drop(guard);
+        let embedder = self.embedder.read().await;
+        Some(SemanticFieldFacts {
+            field: resolved,
+            target_field,
+            dims,
+            dims_from_schema,
+            similarity,
+            embedder: embedder.describe(),
+            embedder_active: embedder.is_active(),
+        })
     }
 
     /// Add a field to the schema.

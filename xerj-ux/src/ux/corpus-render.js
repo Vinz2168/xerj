@@ -17,7 +17,7 @@
 
 import { h } from './safe-dom.js';
 import { readerHref } from './reader-render.js';
-import { topFields, sampleQueryToSearch, fmtBytes, fmtCount, timeSpan } from '../data/catalog.js';
+import { rankedFields, sampleQueryToSearch, fmtBytes, fmtCount, timeSpan } from '../data/catalog.js';
 
 export const EMPTY_COMMAND = 'xerj brain <folder>';
 
@@ -57,17 +57,18 @@ function fieldChip(f) {
 }
 
 /** The fields block: the ranked top fields as chips, then EVERY field in a
- *  disclosure when there are more. A corpus's structure is the one thing a
- *  person came to see — nothing is capped away. */
+ *  disclosure when there are more — in the SAME display order, so the table
+ *  reads as one ranked list, top chips first. A corpus's structure is the
+ *  one thing a person came to see — nothing is capped away. */
 function fieldsBlock(card) {
-  const all = card.fields || [];
-  if (!all.length) return null;
-  const top = topFields(card, 8);
-  const rest = all.filter((f) => !top.includes(f));
+  const ranked = rankedFields(card);
+  if (!ranked.length) return null;
+  const top = ranked.slice(0, 8);
+  const rest = ranked.slice(8);
   return h('div', { class: 'cp-fields' },
     top.map(fieldChip),
     rest.length ? h('details', { class: 'cp-fields__all' },
-      h('summary', null, `ALL ${all.length} FIELDS`),
+      h('summary', null, `ALL ${ranked.length} FIELDS`),
       h('div', { class: 'cp-fields' }, rest.map(fieldChip))) : null);
 }
 

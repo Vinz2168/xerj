@@ -59,7 +59,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reworded into the graph layer of the corpus rather than a notes-flavored
   mode, and `xerj mcp` help now says 13 tools (it said 11). Pinned on
   payloads by `xerj-console-api/tests/knowledge_surface.rs` (5) and
-  `xerj-ux/test/knowledge-surface.test.mjs` (7).
+  `xerj-ux/test/knowledge-surface.test.mjs` (7). Two honest-claims fixes
+  from that PR's screenshot review, riding the same branch (issues
+  [#1098](https://github.com/xerj-org/xerj/issues/1098) and
+  [#1099](https://github.com/xerj-org/xerj/issues/1099)): the CORPUS fields
+  table now leads with the corpus's DOMINANT fields, ranked by the
+  catalog's own coverage × avg_len with autoindex plumbing last (a
+  type-first rank made a 96%-code corpus open with 0.6%-coverage email
+  fields and pushed its `code` field out of the table), unmeasured
+  coverage renders as "—" on both card paths (never a defaulted 100%), and
+  the whole table is one ranked list through the ALL-FIELDS disclosure; and
+  the capability strip gained a server-computed `semantic` entry carrying
+  the node's own facts — field, companion vector field, dims, similarity
+  and the embedder's own label ("lexical feature-hash (built-in, 384-dim,
+  non-neural)" on a default node, with the `--embed-mode neural` pointer)
+  — with NO vector count, because the engine exposes none on any stats
+  surface; an index whose elected semantic field carries no embedding says
+  so in as many words.
 - **`xerj-decide-v1`: the open tier-2 decide model — training/export harness,
   measured eval card, upload-ready bundle
   ([#1064](https://github.com/xerj-org/xerj/issues/1064), PR

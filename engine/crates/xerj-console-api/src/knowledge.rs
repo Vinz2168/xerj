@@ -18,7 +18,12 @@
 //! 3. **What can I do with this now?** — a capability strip computed from
 //!    real facts on the node (catalog present, brains present), each entry
 //!    carrying the real console route, CLI command, or HTTP endpoint it
-//!    names. No capability is listed that this tree does not ship.
+//!    names. No capability is listed that this tree does not ship. The
+//!    `semantic` entry (#1099) is the node's own posture — the elected
+//!    field, its companion vector field, dims, similarity and the
+//!    embedder's own label, read from the live schema — and it NEVER
+//!    carries a vector count: no engine stats surface exposes one, and a
+//!    number the node cannot back must not reach the UI.
 //!
 //! This is the server side of the Console's Corpus home (the landing view).
 //! It exists as ONE endpoint rather than a client-side fan-out because the
@@ -188,6 +193,11 @@ fn parse_fields(fields_json: Option<&Value>) -> Vec<Value> {
             "cardinality_overflow": overflow,
             "null_ratio": get("null_ratio").and_then(Value::as_f64),
             "coverage": get("coverage").and_then(Value::as_f64),
+            // The spec's measured average value length — the corpus's content
+            // lives in its LONG fields, so the SPA ranks the fields a person
+            // reads first by coverage × avg_len (the dominant fields), not by
+            // type. Not rendered as a claim; a ranking input only.
+            "avg_len": get("avg_len").and_then(Value::as_f64).unwrap_or(0.0),
             "examples": examples
                 .iter()
                 .take(MAX_EXAMPLES)
@@ -362,10 +372,67 @@ async fn brains_listing(engine: &Engine, may_read: bool) -> ConsoleResult<Vec<Va
     Ok(out)
 }
 
+/// The corpus's semantic posture, from the live engine — the facts behind
+/// the `semantic` capability entry (#1099). Two honest shapes, nothing else:
+///
+/// - `Semantic` — the catalog elected a semantic field AND the index's live
+///   schema carries its embedding config: dims/similarity/embedder exactly as
+///   the query and ingest paths resolve them (`Index::semantic_field_facts`).
+///   No vector count is included, because no engine surface exposes one — a
+///   number the node cannot back must not reach the UI.
+/// - `ElectedButMissing` — the catalog's last run elected a semantic field,
+///   but this index has no embedding for it (it was rebuilt or mapped another
+///   way): the entry then says plainly that there are no vectors on this node
+///   for that field.
+///
+/// `None` (no catalog, or no dataset elected a semantic field) → no entry.
+enum SemanticCapability {
+    Semantic(xerj_engine::index::SemanticFieldFacts),
+    ElectedButMissing { field: String, index: String },
+}
+
+/// Render the semantic capability's blurb from the facts above. Every phrase
+/// is grounded: dims/similarity/embedder come from the live schema and the
+/// embedder's own label; the lexical case says it is NOT neural and how to
+/// get neural; the missing case says there is nothing to match.
+fn semantic_blurb(sem: &SemanticCapability) -> String {
+    match sem {
+        SemanticCapability::Semantic(f) => {
+            let dims = if f.dims_from_schema {
+                format!("{}-D", f.dims)
+            } else {
+                format!("{}-D (the engine's built-in default)", f.dims)
+            };
+            if f.embedder_active {
+                format!(
+                    "Semantic and hybrid over `{}` → `{}`: {dims} · {} · {} — one vector per \
+                     embedded document, embedded by that same backend at ingest.",
+                    f.field, f.target_field, f.similarity, f.embedder
+                )
+            } else {
+                format!(
+                    "Semantic and hybrid over `{}` → `{}`: {dims} · {} · {} — one vector per \
+                     embedded document. That embedder is NOT neural; start the node with \
+                     `--embed-mode neural` (or `proxy` / `onnx-experimental`) for neural \
+                     semantics.",
+                    f.field, f.target_field, f.similarity, f.embedder
+                )
+            }
+        }
+        SemanticCapability::ElectedButMissing { field, index } => format!(
+            "The catalog's last run elected `{field}` as the semantic field, but index \
+             `{index}` carries no embedding for it on this node — there are no vectors to \
+             match, and semantic/hybrid queries on that field are refused. Re-run \
+             `xerj autoindex` over the source (or start with `--embed-mode neural`) to \
+             give it one.",
+        ),
+    }
+}
+
 /// The capability strip. Every entry names a shipped surface — console route
 /// (`href`), CLI command (`command`), or HTTP endpoint (`endpoint`) — and
 /// availability is computed from facts on the node, not from a feature list.
-fn capabilities(catalog: bool, brains: &[Value]) -> Vec<Value> {
+fn capabilities(catalog: bool, brains: &[Value], semantic: Option<&SemanticCapability>) -> Vec<Value> {
     let mut caps = vec![
         json!({
             "id": "search",
@@ -374,14 +441,26 @@ fn capabilities(catalog: bool, brains: &[Value]) -> Vec<Value> {
             "href": "#/discover",
             "kind": "console",
         }),
-        json!({
-            "id": "read",
-            "title": "Read the documents",
-            "blurb": "Page through records with highlights and the per-record link list.",
-            "href": "#/reader",
-            "kind": "console",
-        }),
     ];
+    // The semantic row is computed from the node's own schema and embedder
+    // (#1099): dims, similarity and the embedder's label come from the engine,
+    // and no vector count is ever claimed — the engine backs none.
+    if let Some(sem) = semantic {
+        caps.push(json!({
+            "id": "semantic",
+            "title": "Search it semantically",
+            "blurb": semantic_blurb(sem),
+            "href": "#/discover",
+            "kind": "console",
+        }));
+    }
+    caps.push(json!({
+        "id": "read",
+        "title": "Read the documents",
+        "blurb": "Page through records with highlights and the per-record link list.",
+        "href": "#/reader",
+        "kind": "console",
+    }));
     if let Some(brain) = brains.first() {
         let name = brain.get("name").and_then(Value::as_str).unwrap_or_default();
         let links = brain.get("links").and_then(Value::as_u64).unwrap_or(0);
@@ -523,9 +602,32 @@ pub async fn knowledge(
         rank(b).cmp(&rank(a))
     });
 
-    // 6. Brains (operator tier) + the capability strip.
+    // 6. The corpus's semantic posture — largest dataset first (the corpus's
+    //    dominant one), from the LIVE index schema, never from a feature list.
+    //    See `SemanticCapability` for the two honest shapes.
+    let mut semantic: Option<SemanticCapability> = None;
+    for d in &datasets {
+        let Some(field) = str_of(d.get("semantic_field")) else {
+            continue;
+        };
+        let index = d["index"].as_str().unwrap_or_default();
+        let facts = match state.engine.get_index(index) {
+            Ok(idx) => idx.semantic_field_facts(&field).await,
+            Err(_) => None,
+        };
+        semantic = Some(match facts {
+            Some(f) => SemanticCapability::Semantic(f),
+            None => SemanticCapability::ElectedButMissing {
+                field,
+                index: index.to_string(),
+            },
+        });
+        break;
+    }
+
+    // 7. Brains (operator tier) + the capability strip.
     let brains = brains_listing(&state.engine, graph::may_read_brains(&sess.user)).await?;
-    let caps = capabilities(catalog, &brains);
+    let caps = capabilities(catalog, &brains, semantic.as_ref());
 
     let mut payload = Map::new();
     payload.insert("catalog".into(), json!(catalog));

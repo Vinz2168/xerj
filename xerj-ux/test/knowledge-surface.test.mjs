@@ -14,7 +14,7 @@ function json(status, body) {
   return { status, ok: status >= 200 && status < 300, json: async () => body, text: async () => JSON.stringify(body) };
 }
 
-const { parseKnowledge } = await import('../src/data/catalog.js');
+const { parseKnowledge, parseCatalogHits, topFields } = await import('../src/data/catalog.js');
 const { renderCorpusCard, renderRelations, renderCapabilities } = await import('../src/ux/corpus-render.js');
 const { corpus } = await import('../src/dashboards/corpus.js');
 const { textOf, findAll } = await import('../src/ux/safe-dom.js');
@@ -171,4 +171,138 @@ test('liveCorpus reads ONE endpoint and keeps the never-mock contract', async ()
   assert.equal(err.data.status, 'error');
   assert.deepEqual(err.data.datasets, []);
   assert.deepEqual(err.data.relations, []);
+});
+
+// ── #1098: the FIELDS table must be the corpus the catalog measured ────
+//
+// The screenshot defect: a 95.8%-code corpus opened with `email_date (date)
+// 100% · email_subject (keyword) 100% · email_from (keyword) 59% · …` —
+// coverage that matches nothing in fields_json — while `code` (0.958) was
+// pushed out of the table entirely. The 100/59/57/43 pattern is coverage
+// within the corpus's mbox-format SUBSET; these tests pin that neither the
+// ranking nor the numbers can present anything but the catalog's own
+// field-for-field, number-for-number facts, whichever path served the card.
+const CODE_CORPUS_FIELDS = [
+  { name: 'code', type: 'text', semantic: false, coverage: 0.958, cardinality: 15436, null_ratio: 0.042, avg_len: 912.0, examples: ['fn short_passage(i: usize) -> String'] },
+  { name: 'title', type: 'keyword', semantic: false, coverage: 1.0, cardinality: 500, null_ratio: 0.0, avg_len: 34.0, examples: ['index.rs'] },
+  { name: 'body', type: 'semantic_text', semantic: true, coverage: 0.039, cardinality: 602, null_ratio: 0.961, avg_len: 412.5, examples: ['term sheet attached'] },
+  { name: 'labels', type: 'keyword', semantic: false, coverage: 1.0, cardinality: 4, null_ratio: 0.0, avg_len: 9.0, examples: ['rust'] },
+  { name: 'defs', type: 'text', semantic: false, coverage: 0.032, cardinality: 208, null_ratio: 0.968, avg_len: 64.0, examples: ['pub fn parse_request'] },
+  { name: 'mtime', type: 'date', semantic: false, coverage: 1.0, cardinality: 491, null_ratio: 0.0, avg_len: 0.0, examples: [] },
+  { name: 'email_date', type: 'date', semantic: false, coverage: 0.0064, cardinality: 99, null_ratio: 0.9936, avg_len: 0.0, examples: [] },
+  { name: 'email_subject', type: 'keyword', semantic: false, coverage: 0.0064, cardinality: 97, null_ratio: 0.9936, avg_len: 31.0, examples: ['Re: contract'] },
+  // the mbox-subset figures from the screenshot — 59/57/43 must never be
+  // able to stand in for the corpus coverage of ANY field
+  { name: 'email_from', type: 'keyword', semantic: false, coverage: 0.0064, cardinality: 61, null_ratio: 0.9936, avg_len: 22.0, examples: ['sam@acme.example'] },
+  { name: 'email_to', type: 'keyword', semantic: false, coverage: 0.0033, cardinality: 55, null_ratio: 0.9967, avg_len: 22.0, examples: ['jo@grid.example'] },
+  { name: 'email_cc', type: 'keyword', semantic: false, coverage: 0.0026, cardinality: 37, null_ratio: 0.9974, avg_len: 20.0, examples: [] },
+  { name: 'ax_path', type: 'keyword', semantic: false, coverage: 1.0, cardinality: 500, null_ratio: 0.0, avg_len: 48.0, examples: [] },
+  { name: 'ax_format', type: 'keyword', semantic: false, coverage: 1.0, cardinality: 6, null_ratio: 0.0, avg_len: 4.0, examples: [] },
+  { name: 'ax_source', type: 'keyword', semantic: false, coverage: 1.0, cardinality: 1, null_ratio: 0.0, avg_len: 5.0, examples: [] },
+  { name: 'ax_kind', type: 'keyword', semantic: false, coverage: 1.0, cardinality: 2, null_ratio: 0.0, avg_len: 4.0, examples: [] },
+  // a field the catalog did not measure — "—", never a fabricated 100%
+  { name: 'unmeasured', type: 'long', semantic: false, coverage: null, cardinality: null, null_ratio: null, avg_len: 0.0, examples: [] },
+];
+
+const chipsOf = (card) => findAll(card, (n) => (n.attrs.class || '').split(' ').includes('cp-field'));
+
+test('#1098 the FIELDS table leads with the corpus\'s dominant fields at the catalog\'s own coverage', () => {
+  const st = parseKnowledge({ data: { ...PAYLOAD().data, datasets: [{ ...PAYLOAD().data.datasets[0], fields: CODE_CORPUS_FIELDS }] } });
+  const card = renderCorpusCard(st.datasets[0], {});
+  const chips = chipsOf(card);
+  // the top chips (before the ALL-FIELDS disclosure) are the first 8
+  assert.equal(chips.length, CODE_CORPUS_FIELDS.length, 'every field renders, in the disclosure when not top');
+  const names = chips.map((c) => textOf(findAll(c, (n) => (n.attrs.class || '').includes('cp-field__name'))[0]));
+  // the corpus IS its content: code first, body and defs ahead of every
+  // email_* field, autoindex plumbing last
+  assert.equal(names[0], 'code', `dominant field first: ${names.join(', ')}`);
+  for (const dominant of ['code', 'body', 'defs']) {
+    for (const email of names.filter((n) => n.startsWith('email_'))) {
+      assert.ok(names.indexOf(dominant) < names.indexOf(email), `${dominant} must outrank ${email}: ${names.join(', ')}`);
+    }
+  }
+  const lastThree = names.slice(-3).sort();
+  assert.deepEqual(lastThree, ['ax_format', 'ax_kind', 'ax_source'], `plumbing last: ${names.join(', ')}`);
+  // number-for-number: each chip shows ITS OWN measured coverage, rounded
+  const byName = new Map(CODE_CORPUS_FIELDS.map((f) => [f.name, f]));
+  const chipText = (name) => textOf(chips[names.indexOf(name)]);
+  for (let i = 0; i < chips.length; i++) {
+    const f = byName.get(names[i]);
+    const expected = f.coverage == null ? '—' : `${Math.round(f.coverage * 100)}%`;
+    assert.ok(textOf(chips[i]).includes(expected), `${names[i]} must show ${expected}: ${textOf(chips[i])}`);
+  }
+  // the screenshot's mbox-subset mirage is dead: no email field reads 100%,
+  // 59/57/43 appear nowhere, and the dominant coverage is on the table
+  const text = textOf(card);
+  assert.ok(!chipText('email_date').includes('100%'), `email_date renders its own coverage: ${chipText('email_date')}`);
+  assert.ok(!chipText('email_subject').includes('100%'), `email_subject renders its own coverage: ${chipText('email_subject')}`);
+  for (const bogus of ['59%', '57%', '43%']) assert.ok(!text.includes(bogus), `${bogus} must not render: no field measures it`);
+  assert.ok(chipText('code').includes('96%'), 'code 0.958 leads at 96%'); // code 0.958
+  // unmeasured coverage renders as "—", never as 100%
+  assert.match(chipText('unmeasured'), /—/);
+  assert.doesNotMatch(chipText('unmeasured'), /100%/);
+});
+
+test('#1098 both card paths agree: the catalog-search fallback ranks and numbers identically', () => {
+  // The legacy path parses fields_json (the autoindex catalog document);
+  // the knowledge path parses the endpoint payload. The screenshot showed a
+  // table that disagreed with BOTH — pin that whichever path serves the
+  // card, the same fields lead with the same numbers.
+  const specs = CODE_CORPUS_FIELDS.map((f) => ({
+    name: f.name, es_type: f.type, semantic: f.semantic === true ? 'lexical-hash-384' : undefined,
+    cardinality_est: f.cardinality, null_ratio: f.null_ratio, coverage: f.coverage,
+    avg_len: f.avg_len, examples: f.examples,
+  }));
+  const hits = [{ _id: 'ds:code', _source: {
+    doc_kind: 'dataset', index_name: 'ax-docs', record_count: 15436, file_count: 500,
+    bytes: 16496072, semantic_field: 'body', fields_json: JSON.stringify(specs),
+  } }];
+  const legacy = parseCatalogHits(hits)[0];
+  const st = parseKnowledge({ data: { ...PAYLOAD().data, datasets: [{ ...PAYLOAD().data.datasets[0], index: 'ax-docs', fields: CODE_CORPUS_FIELDS }] } });
+  const knowledgeCard = st.datasets[0];
+  const rank = (card) => topFields(card, 8).map((f) => f.name);
+  assert.deepEqual(rank(legacy), rank(knowledgeCard), 'both paths lead with the same fields in the same order');
+  assert.equal(rank(legacy)[0], 'code');
+  // an unmeasured field is null on BOTH paths — the legacy default of 1
+  // (which rendered "100%") is gone
+  const legacyUnmeasured = legacy.fields.find((f) => f.name === 'unmeasured');
+  assert.equal(legacyUnmeasured.coverage, null);
+});
+
+// ── #1099: the semantic capability states what the node runs — no invented vectors ──
+
+test('#1099 the semantic row renders the node\'s own facts and never a vector count', () => {
+  const lexical = { data: { ...PAYLOAD().data, capabilities: [
+    ...PAYLOAD().data.capabilities,
+    { id: 'semantic', title: 'Search it semantically',
+      blurb: 'Semantic and hybrid over `body` → `body_vector`: 384-D · cosine · lexical feature-hash (built-in, 384-dim, non-neural) — one vector per embedded document. That embedder is NOT neural; start the node with `--embed-mode neural` (or `proxy` / `onnx-experimental`) for neural semantics.',
+      href: '#/discover', kind: 'console' },
+  ] } };
+  const strip = renderCapabilities(parseKnowledge(lexical));
+  const text = textOf(strip);
+  assert.match(text, /Search it semantically/);
+  assert.match(text, /lexical feature-hash/); // the embedder's own label
+  assert.match(text, /NOT neural/);
+  assert.match(text, /--embed-mode neural/);
+  // the honest-claims line: no count of vectors, no READY claim — the node
+  // backs neither ("6,546,091 BODY VECTORS · 384-D · COSINE — READY" was
+  // computed by nothing the node reports)
+  assert.doesNotMatch(text, /\d[\d,.]*\s+VECTORS?/i);
+  assert.doesNotMatch(text, /VECTOR COUNT/i);
+  assert.doesNotMatch(text, /—\s*READY\b/);
+  // and when the node reports no semantic surface, no semantic row renders
+  const none = renderCapabilities(parseKnowledge(PAYLOAD()));
+  assert.doesNotMatch(textOf(none), /Search it semantically/);
+});
+
+test('#1099 a catalog that elected a semantic field the index does not carry says so plainly', () => {
+  const missing = { data: { ...PAYLOAD().data, capabilities: [
+    ...PAYLOAD().data.capabilities,
+    { id: 'semantic', title: 'Search it semantically',
+      blurb: "The catalog's last run elected `body` as the semantic field, but index `ax-mail` carries no embedding for it on this node — there are no vectors to match, and semantic/hybrid queries on that field are refused.",
+      href: '#/discover', kind: 'console' },
+  ] } };
+  const text = textOf(renderCapabilities(parseKnowledge(missing)));
+  assert.match(text, /no vectors to match/);
+  assert.doesNotMatch(text, /\d[\d,.]*\s+VECTORS?/i);
 });

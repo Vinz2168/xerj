@@ -28,9 +28,14 @@ function parseFields(fieldsJson) {
       name: f.name,
       type: str(f.es_type || f.type || 'object'),
       semantic: !!f.semantic,
-      coverage: Number.isFinite(Number(f.coverage)) ? Number(f.coverage) : 1,
+      // Unmeasured coverage is null → "—", never 1 → "100%": a field the
+      // catalog did not measure must not read as fully covered (#1098).
+      // (`Number(null)` is 0, so null has to be checked before the finite
+      // test — a JSON null means "not measured", not "measured zero".)
+      coverage: f.coverage == null || !Number.isFinite(Number(f.coverage)) ? null : Number(f.coverage),
       cardinality: num(f.cardinality_est),
-      nullRatio: Number.isFinite(Number(f.null_ratio)) ? Number(f.null_ratio) : null,
+      nullRatio: f.null_ratio == null || !Number.isFinite(Number(f.null_ratio)) ? null : Number(f.null_ratio),
+      avgLen: Number.isFinite(Number(f.avg_len)) ? Number(f.avg_len) : 0,
       examples: Array.isArray(f.examples) ? f.examples.slice(0, 3).map(str) : [],
     }));
 }
@@ -84,20 +89,26 @@ export function parseCatalogHits(hits) {
   return cards;
 }
 
-/** The fields worth showing on a card: the semantic field first, then the
- *  best-covered keyword/date/text fields; autoindex plumbing (`ax_*`) last. */
+/** The card's fields in DISPLAY ORDER: the corpus's DOMINANT fields first —
+ *  ranked by the share of the corpus's content they hold (the catalog's own
+ *  coverage × avg_len), tie-broken by coverage — with autoindex plumbing
+ *  (`ax_*`) last. Type must not lead the ranking (#1098): a type-first rank
+ *  put every keyword/date field above the text field that IS the corpus, so
+ *  a 96%-code corpus opened with 0.6%-coverage email fields and its `code`
+ *  field was pushed into the disclosure. The semantic field keeps its accent
+ *  styling but no ranking pin — on a notes corpus it dominates on its own. */
+export function rankedFields(card) {
+  const plumbing = (f) => (f.name.startsWith('ax_') ? 1 : 0);
+  const content = (f) => (f.coverage == null ? 0 : f.coverage) * (f.avgLen || 0);
+  const cov = (f) => (f.coverage == null ? -1 : f.coverage);
+  return [...(card.fields || [])].sort(
+    (a, b) => (plumbing(a) - plumbing(b)) || (content(b) - content(a)) || (cov(b) - cov(a)) || a.name.localeCompare(b.name),
+  );
+}
+
+/** The fields worth showing as a card's top chips. */
 export function topFields(card, n = 8) {
-  const rank = (f) => {
-    if (f.name.startsWith('ax_')) return 9;
-    if (f.semantic || f.name === card.semanticField) return 0;
-    if (f.type === 'date') return 1;
-    if (f.type === 'keyword') return 2;
-    if (f.type === 'text' || f.type === 'semantic_text') return 3;
-    return 5;
-  };
-  return [...(card.fields || [])]
-    .sort((a, b) => (rank(a) - rank(b)) || (b.coverage - a.coverage) || a.name.localeCompare(b.name))
-    .slice(0, n);
+  return rankedFields(card).slice(0, n);
 }
 
 // ── the knowledge surface ───────────────────────────────────────────
@@ -116,9 +127,10 @@ const knowledgeField = (f) => ({
   name: str(f.name),
   type: str(f.type || 'object'),
   semantic: f.semantic === true,
-  coverage: Number.isFinite(Number(f.coverage)) ? Number(f.coverage) : null,
+  coverage: f.coverage == null || !Number.isFinite(Number(f.coverage)) ? null : Number(f.coverage),
   cardinality: Number.isFinite(Number(f.cardinality)) ? Number(f.cardinality) : null,
-  nullRatio: Number.isFinite(Number(f.null_ratio)) ? Number(f.null_ratio) : null,
+  nullRatio: f.null_ratio == null || !Number.isFinite(Number(f.null_ratio)) ? null : Number(f.null_ratio),
+  avgLen: Number.isFinite(Number(f.avg_len)) ? Number(f.avg_len) : 0,
   examples: Array.isArray(f.examples) ? f.examples.slice(0, 3).map(str) : [],
 });
 

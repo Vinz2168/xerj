@@ -20,6 +20,10 @@
 //!   catalog exists, the graph entry only for a role that may read brains
 //!   AND only when a brain exists, and every entry names a real console
 //!   route, CLI command, or endpoint;
+//! - the `semantic` entry (#1099) is the node's own posture — dims,
+//!   similarity and the embedder's label from the live schema — and never
+//!   a vector count (the engine exposes none) nor a READY claim; an index
+//!   that lost its embedding says so in as many words;
 //! - a node with nothing indexed is the ordinary empty state (`catalog:
 //!   false`), not an error;
 //! - the endpoint is session-authorized: no cookie is a 401.
@@ -30,7 +34,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tower::ServiceExt;
 use xerj_common::config::Config;
-use xerj_common::types::{FieldConfig, FieldType, Schema};
+use xerj_common::types::{EmbeddingConfig, FieldConfig, FieldType, Schema};
 use xerj_console_api::{
     auth::{sessions, store},
     state::ClusterMode,
@@ -150,7 +154,13 @@ fn fields_json() -> String {
 /// a catalog describing two datasets (one larger, one smaller), one
 /// key-overlap correlation, a brain over the first dataset, and one user
 /// index the catalog does NOT describe.
-async fn boot() -> TestApp {
+///
+/// `embed_semantic` decides whether ax-mail's `body` carries the embedding
+/// config an autoindex run installs (the `semantic_text` mapping): `true` is
+/// the ordinary post-`xerj brain` node, `false` is an index that was rebuilt
+/// or mapped another way — the catalog still ELECTS `body`, but the index
+/// has nothing to embed it with (#1099's "no vectors on this node" case).
+async fn boot_with(embed_semantic: bool) -> TestApp {
     let dir = TempDir::new().unwrap();
     let mut cfg = Config::default();
     cfg.server.data_dir = dir.path().to_str().unwrap().to_string();
@@ -169,8 +179,22 @@ async fn boot() -> TestApp {
 
     // The dataset indices the catalog describes — 3 real documents in
     // ax-mail (the LIVE count the endpoint must join on), 1 in ax-pdfs.
+    // ax-mail's `body` carries the embedding config (dims/similarity) the
+    // es-compat layer installs for autoindex's `semantic_text` mapping.
+    let mut mail_schema = Schema::empty();
+    let mut body = FieldConfig::new("body", FieldType::Text);
+    if embed_semantic {
+        body.options.dimensions = Some(384);
+        body.options.similarity = Some("cosine".into());
+        body.embedding = Some(EmbeddingConfig {
+            endpoint: None,
+            model: None,
+            target_field: None,
+        });
+    }
+    mail_schema.add_field(body).expect("add body");
     engine
-        .create_index("ax-mail", schema(&[("body", FieldType::Text)]))
+        .create_index("ax-mail", mail_schema)
         .expect("create ax-mail");
     engine.get_index("ax-mail").unwrap()
         .index_documents_batched(vec![
@@ -308,6 +332,12 @@ async fn boot() -> TestApp {
     }
 }
 
+/// The ordinary post-`xerj brain` node: the elected semantic field carries
+/// its embedding config.
+async fn boot() -> TestApp {
+    boot_with(true).await
+}
+
 /// A node with NOTHING indexed — no catalog, no user index.
 async fn boot_empty() -> TestApp {
     let dir = TempDir::new().unwrap();
@@ -411,6 +441,10 @@ async fn the_payload_carries_the_catalogs_own_facts() {
     let body = by_name("body");
     assert_eq!(body["semantic"].as_bool(), Some(true), "the semantic_text field is flagged");
     assert_eq!(body["type"].as_str(), Some("semantic_text"));
+    // the spec's measured average value length round-trips — the SPA ranks
+    // the card's fields by coverage × avg_len, so the corpus's DOMINANT
+    // fields lead the table (#1098)
+    assert_eq!(body["avg_len"].as_f64(), Some(412.5));
     let page = by_name("page");
     assert_eq!(page["null_ratio"].as_f64(), Some(0.75));
     assert_eq!(page["coverage"].as_f64(), Some(0.25));
@@ -486,6 +520,71 @@ async fn the_capability_strip_is_grounded_in_facts() {
     assert!(!vids.contains(&"graph"), "viewer must not see the graph capability");
 }
 
+/// #1099 — the semantic capability is the NODE's own posture, computed from
+/// the live schema and the embedder, and it never claims a vector count the
+/// engine cannot back (the screenshot defect: "6,546,091 BODY VECTORS ·
+/// 384-D · COSINE — READY" on a node reporting no such number anywhere).
+#[tokio::test]
+async fn the_semantic_capability_is_the_nodes_own_facts_with_no_invented_count() {
+    let app = boot().await;
+    let (_, v) = get(&app, Some(&app.owner_cookie)).await;
+    let caps = data(&v)["capabilities"].as_array().unwrap();
+    let sem = caps
+        .iter()
+        .find(|c| c["id"].as_str() == Some("semantic"))
+        .expect("a semantic_text field with an embedding config earns the semantic entry");
+    // the facts are the schema's and the embedder's own: field, companion,
+    // dims (from the mapping here), similarity, and the embedder's label
+    let blurb = sem["blurb"].as_str().unwrap();
+    assert!(blurb.contains("`body`"), "names the elected field: {blurb}");
+    assert!(blurb.contains("`body_vector`"), "names the companion: {blurb}");
+    assert!(blurb.contains("384-D"), "dims from the mapping: {blurb}");
+    assert!(blurb.contains("cosine"), "similarity from the mapping: {blurb}");
+    assert!(
+        blurb.contains("lexical feature-hash (built-in, 384-dim, non-neural)"),
+        "the embedder's own honesty label, verbatim: {blurb}"
+    );
+    assert!(blurb.contains("NOT neural"), "the lexical case says so plainly: {blurb}");
+    assert!(blurb.contains("--embed-mode neural"), "and how to get neural: {blurb}");
+    // the honest-claims line: no vector count and no READY claim — the node
+    // exposes no per-field vector count on any stats surface, so none may
+    // appear here, whatever the client does with the payload
+    assert!(!blurb.contains("VECTOR"), "no vector count: {blurb}");
+    assert!(!blurb.contains("READY"), "no readiness claim: {blurb}");
+    for key in sem.as_object().unwrap().keys() {
+        assert!(!key.contains("count"), "no count key may ride the entry: {key}");
+    }
+    // it is not brain-gated — it describes the corpus, not the operator's role
+    let (_, vv) = get(&app, Some(&app.viewer_cookie)).await;
+    let viewer_has = data(&vv)["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["id"].as_str() == Some("semantic"));
+    assert!(viewer_has, "the viewer sees the node's semantic posture too");
+}
+
+/// #1099's other shape — the catalog's last run ELECTED a semantic field,
+/// but the live index carries no embedding for it (rebuilt / mapped another
+/// way): the entry must say plainly that there are no vectors to match,
+/// never a derived count and never READY.
+#[tokio::test]
+async fn an_elected_semantic_field_the_index_does_not_carry_is_stated_plainly() {
+    let app = boot_with(false).await;
+    let (_, v) = get(&app, Some(&app.owner_cookie)).await;
+    let caps = data(&v)["capabilities"].as_array().unwrap();
+    let sem = caps
+        .iter()
+        .find(|c| c["id"].as_str() == Some("semantic"))
+        .expect("the catalog elected body; the mismatch must be visible, not omitted");
+    let blurb = sem["blurb"].as_str().unwrap();
+    assert!(blurb.contains("`body`"), "names the elected field: {blurb}");
+    assert!(blurb.contains("no embedding"), "states the gap: {blurb}");
+    assert!(blurb.contains("no vectors to match"), "states it in those words: {blurb}");
+    assert!(!blurb.contains("READY"), "no readiness claim: {blurb}");
+    assert!(!blurb.contains("VECTOR"), "no vector count: {blurb}");
+}
+
 #[tokio::test]
 async fn nothing_indexed_is_the_empty_state_not_an_error() {
     let app = boot_empty().await;
@@ -504,5 +603,6 @@ async fn nothing_indexed_is_the_empty_state_not_an_error() {
         .collect();
     assert!(!ids.contains(&"map"), "no catalog → no map/ask capability");
     assert!(!ids.contains(&"ask"), "no catalog → no ask capability");
+    assert!(!ids.contains(&"semantic"), "no dataset elected a semantic field → no semantic claim");
     assert!(ids.contains(&"search"), "search is always real");
 }
