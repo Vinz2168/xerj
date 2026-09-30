@@ -552,6 +552,26 @@
           "query"
         ]
       }
+    },
+    {
+      "name": "xerj_plan",
+      "description": "Natural-language filter in, VALIDATED query DSL out. Proxies POST /_ask. Pass `prompt` (what to filter for, in plain words: 'mb events deeper than 100 km', 'countries with population above 100 million in 2007') and get back `{query, plan, confidence, indices}` where `query` is an ES query clause you can send straight to xerj_search as the `query` argument. Honesty: the planner is DETERMINISTIC AND RULE-BASED (dates, comparators, units, field-name and stored-value matching) — not an LLM, not fuzzy. Every query it returns already passed the node's own parser, so invalid DSL cannot come back. A phrase it cannot ground in the index (unknown field, value the index does not hold, ambiguous multi-index pattern) is a 422 that NAMES the phrase — it never guesses. Equality values come back in the index's canonical casing; numeric and date bounds are only ever the literals your prompt supplied. `confidence` says how much soft matching the plan needed (0.9 exact, lower per fallback, 0.5 bare match_all). Cheaper than writing DSL by hand, and wrong-guess-free: use it FIRST whenever the filter you want is expressible in words.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "The filter to plan, in plain words. Name the field the way the data does and values the index actually holds; dates as YYYY-MM-DD, years as plain numbers."
+          },
+          "index": {
+            "type": "string",
+            "description": "Index name or pattern. Defaults to `ax-*` — the prefix `xerj autoindex` writes — and a multi-index pattern is routed by the catalog's dataset descriptions to the one index that matches the prompt."
+          }
+        },
+        "required": [
+          "prompt"
+        ]
+      }
     }
   ]
 }

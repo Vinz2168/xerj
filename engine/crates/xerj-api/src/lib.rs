@@ -63,6 +63,7 @@
 // crate-level allows in xerj-engine and xerj-console-api).
 #![allow(clippy::result_large_err)]
 
+pub mod ask_api;
 pub mod audit_mw;
 pub mod auth;
 pub mod authz;

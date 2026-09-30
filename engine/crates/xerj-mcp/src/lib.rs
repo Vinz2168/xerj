@@ -9,12 +9,12 @@
 //!
 //! It speaks the MCP **stdio transport**: newline-delimited
 //! JSON-RPC 2.0 messages on stdin/stdout. It exposes XERJ to any MCP-capable
-//! agent host (Claude Desktop, IDE agents, custom orchestrators) as eleven
+//! agent host (Claude Desktop, IDE agents, custom orchestrators) as twelve
 //! tools that map 1:1 onto XERJ's real, verified REST surface. Every tool is
 //! a *thin proxy*: it constructs exactly the request the running engine
 //! already accepts and forwards it to a configurable base URL.
 //!
-//! ## The eleven canonical agent operations
+//! ## The twelve canonical agent operations
 //!
 //! | MCP tool               | XERJ endpoint                         | Real capability |
 //! |------------------------|---------------------------------------|-----------------|
@@ -28,6 +28,7 @@
 //! | `xerj_brain_link`      | `POST /_graph/{brain}/link`           | assert a link (idempotent, deterministic edge_id) |
 //! | `xerj_brain_unlink`    | `DELETE /_graph/{brain}/link/{id}`    | retire a link (soft-invalidate; never deletes) |
 //! | `xerj_brain_overview`  | `GET /_graph/{brain}/overview`        | whole-brain orientation: counts, hubs, detectors, timeline |
+//! | `xerj_plan`            | `POST /_ask`                          | natural-language prompt in, VALIDATED query DSL out (deterministic planner, not an LLM) |
 //!
 //! ## Honesty notes (must match the engine, never oversell)
 //!
@@ -112,9 +113,10 @@ USAGE:
     xerj mcp [OPTIONS]              (or the standalone binary: xerj-mcp [OPTIONS])
 
 Speaks MCP over stdio (newline-delimited JSON-RPC 2.0 on stdin/stdout) and
-proxies eleven tools — xerj_search, xerj_semantic_search, xerj_vector_search,
+proxies twelve tools — xerj_search, xerj_semantic_search, xerj_vector_search,
 xerj_hybrid_search, xerj_memory_store, xerj_memory_recall, xerj_brain_ego,
-xerj_brain_link, xerj_brain_unlink, xerj_brain_overview, xerj_code_search — to a
+xerj_brain_link, xerj_brain_unlink, xerj_brain_overview, xerj_code_search,
+xerj_plan — to a
 XERJ node that
 is ALREADY RUNNING. This command does not start a node; start one first with
 `xerj --data-dir ./data`.
@@ -550,8 +552,8 @@ fn max_tokens_arg_schema() -> Value {
     })
 }
 
-/// The ten tool specifications advertised via `tools/list`. Input schemas are
-/// plain JSON Schema; every property maps onto a field the engine accepts.
+/// The twelve tool specifications advertised via `tools/list`. Input schemas
+/// are plain JSON Schema; every property maps onto a field the engine accepts.
 ///
 /// Public because this is the single source of truth for the published
 /// agent-facing schema at `landing/docs/agents/schemas/mcp-tools.json`, which
@@ -909,6 +911,45 @@ pub fn tool_specs() -> Value {
                 },
                 "required": ["corpus", "query"]
             }
+        },
+        {
+            "name": "xerj_plan",
+            "description": concat!(
+                "Natural-language filter in, VALIDATED query DSL out. Proxies POST /_ask. ",
+                "Pass `prompt` (what to filter for, in plain words: 'mb events deeper ",
+                "than 100 km', 'countries with population above 100 million in 2007') and ",
+                "get back `{query, plan, confidence, indices}` where `query` is an ES ",
+                "query clause you can send straight to xerj_search as the `query` argument. ",
+                "Honesty: the planner is DETERMINISTIC AND RULE-BASED (dates, comparators, ",
+                "units, field-name and stored-value matching) — not an LLM, not fuzzy. ",
+                "Every query it returns already passed the node's own parser, so invalid ",
+                "DSL cannot come back. A phrase it cannot ground in the index (unknown ",
+                "field, value the index does not hold, ambiguous multi-index pattern) is a ",
+                "422 that NAMES the phrase — it never guesses. Equality values come back in ",
+                "the index's canonical casing; numeric and date bounds are only ever the ",
+                "literals your prompt supplied. `confidence` says how much soft matching ",
+                "the plan needed (0.9 exact, lower per fallback, 0.5 bare match_all). ",
+                "Cheaper than writing DSL by hand, and wrong-guess-free: use it FIRST ",
+                "whenever the filter you want is expressible in words."),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "The filter to plan, in plain words. Name the field \
+                         the way the data does and values the index actually holds; dates \
+                         as YYYY-MM-DD, years as plain numbers."
+                    },
+                    "index": {
+                        "type": "string",
+                        "description": "Index name or pattern. Defaults to `ax-*` — the \
+                         prefix `xerj autoindex` writes — and a multi-index pattern is \
+                         routed by the catalog's dataset descriptions to the one index \
+                         that matches the prompt."
+                    }
+                },
+                "required": ["prompt"]
+            }
         }
     ])
 }
@@ -958,6 +999,8 @@ async fn call_tool(ctx: &Ctx, msg: &Value) -> Value {
         "xerj_brain_link" => build_brain_link(&args),
         "xerj_brain_unlink" => build_brain_unlink(&args),
         "xerj_brain_overview" => build_brain_overview(&args),
+        // #1056: prompt in, validated DSL out — a plain engine proxy.
+        "xerj_plan" => build_plan(&args),
         "xerj_code_search" => return run_code_search(ctx, &args).await,
         other => return tool_text(format!("unknown tool: {other}"), true),
     };
@@ -1323,6 +1366,36 @@ fn build_memory_recall(args: &Value) -> Result<BuiltRequest, String> {
         Method::Post,
         format!("/_memory/{namespace}/_recall"),
         Some(Value::Object(body)),
+    ))
+}
+
+// ── xerj_plan: prompt in, validated DSL out (#1056) ─────────────────────────
+
+/// `xerj_plan` → `POST /_ask`. The planner itself lives in the engine
+/// (`xerj-api::ask_api`); this proxy only carries the two arguments. `index`
+/// defaults to the autoindex prefix exactly like `xerj_search` (#962): after
+/// `xerj autoindex` the common call is `xerj_plan(prompt=…)` and it just works.
+fn build_plan(args: &Value) -> Result<BuiltRequest, String> {
+    // Whitespace-only is refused here rather than shipped to the engine's
+    // 400: the caller should hear it from the tool they called.
+    let prompt = args
+        .get("prompt")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "missing or empty required string field `prompt`".to_string())?
+        .to_string();
+    let index = args
+        .get("index")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("ax-*")
+        .to_string();
+    Ok((
+        Method::Post,
+        "/_ask".to_string(),
+        Some(json!({ "index": index, "prompt": prompt })),
     ))
 }
 
@@ -1698,6 +1771,54 @@ mod tests {
         assert_eq!(path, "/ax-*/_search");
         let (_, path, _) = built(build_search(&json!({ "index": "docs" })));
         assert_eq!(path, "/docs/_search");
+    }
+
+    #[test]
+    fn plan_posts_prompt_to_ask_with_default_index() {
+        // #1056: the proxy carries exactly the two arguments; the planner
+        // itself lives in the engine. `index` defaults like xerj_search
+        // (#962) so the post-autoindex first call just works.
+        let (method, path, body) = built(build_plan(&json!({
+            "prompt": "mb events deeper than 100 km"
+        })));
+        assert_eq!(method, Method::Post);
+        assert_eq!(path, "/_ask");
+        assert_eq!(body["index"], "ax-*");
+        assert_eq!(body["prompt"], "mb events deeper than 100 km");
+        // whitespace-only index is absent; an explicit index still wins
+        let (_, _, body) = built(build_plan(&json!({
+            "prompt": "p", "index": "  "
+        })));
+        assert_eq!(body["index"], "ax-*");
+        let (_, _, body) = built(build_plan(&json!({
+            "prompt": "p", "index": "ax-quakes"
+        })));
+        assert_eq!(body["index"], "ax-quakes");
+    }
+
+    #[test]
+    fn plan_requires_a_prompt() {
+        let err = build_plan(&json!({ "index": "ax-quakes" })).unwrap_err();
+        assert!(err.contains("`prompt`"), "{err}");
+        let err = build_plan(&json!({ "prompt": "   " })).unwrap_err();
+        assert!(err.contains("`prompt`"), "{err}");
+    }
+
+    #[test]
+    fn plan_spec_requires_only_the_prompt_and_describes_the_contract() {
+        let specs = tool_specs();
+        let plan = specs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "xerj_plan")
+            .expect("xerj_plan advertised");
+        assert_eq!(plan["inputSchema"]["required"], json!(["prompt"]));
+        let desc = plan["description"].as_str().unwrap();
+        // the honesty lines the whole crate is held to
+        assert!(desc.contains("not an LLM"), "{desc}");
+        assert!(desc.contains("never guesses"), "{desc}");
+        assert!(desc.contains("422"), "{desc}");
     }
 
     #[test]
@@ -2283,7 +2404,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_has_all_eleven() {
+    fn tools_list_has_all_twelve() {
         let specs = tool_specs();
         let names: Vec<&str> = specs
             .as_array()
@@ -2291,7 +2412,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 11);
+        assert_eq!(names.len(), 12);
         for n in [
             "xerj_search",
             "xerj_semantic_search",
@@ -2304,8 +2425,10 @@ mod tests {
             "xerj_brain_unlink",
             "xerj_brain_overview",
             // #977: reference-coding retrieval, served by the same pipeline
-            // as `xerj code` (LAST in the list, by design).
+            // as `xerj code`.
             "xerj_code_search",
+            // #1056: prompt in, validated DSL out (LAST in the list).
+            "xerj_plan",
         ] {
             assert!(names.contains(&n), "missing tool {n}");
         }
