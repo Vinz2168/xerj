@@ -1,0 +1,50 @@
+{
+ "endpoint": "POST /_ask",
+ "measured": true,
+ "pairs_per_pass": 230,
+ "measured_passes": 3,
+ "http_counts": {
+  "warmup": {
+   "200": 230
+  },
+  "measured": {
+   "200": 690
+  }
+ },
+ "warmup": {
+  "n": 230,
+  "mean_ms": 3.424,
+  "p50_ms": 1.102,
+  "p90_ms": 1.628,
+  "p95_ms": 1.797,
+  "p99_ms": 2.303,
+  "max_ms": 468.927
+ },
+ "measured_pooled": {
+  "n": 690,
+  "mean_ms": 1.44,
+  "p50_ms": 1.129,
+  "p90_ms": 1.883,
+  "p95_ms": 2.033,
+  "p99_ms": 2.852,
+  "max_ms": 155.719
+ },
+ "gate": {
+  "line": "#1056 release gate: p50 <= 300 ms",
+  "threshold_ms": 300.0,
+  "p50_ms": 1.129,
+  "pass": true
+ },
+ "method_notes": [
+  "wall-clock over loopback HTTP on an idle node, not in-process CPU time \u2014 an upper bound on the CPU budget, stated as wall-clock",
+  "gold `index` sent with every prompt: catalog routing is not in the measured path (own acceptance line in #1056)",
+  "one warmup pass reported separately from the measured passes",
+  "quantiles are nearest-rank over the pooled measured passes; latency-raw.jsonl carries every request"
+ ],
+ "host": {
+  "system": "Linux",
+  "release": "7.0.0-27-generic",
+  "machine": "x86_64",
+  "python": "3.11.2"
+ }
+}

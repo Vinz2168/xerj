@@ -1,30 +1,30 @@
 # ask-plan — the #1056 gate: prompt in, validated DSL out
 
-> **STATUS: DESIGN — NOTHING MEASURED.** This directory ships evaluation
-> *inputs* (three licensed public datasets, a deterministic pair generator, a
-> run harness) and **zero results**. Every threshold below is a gate
-> definition, not a finding. `POST /_ask` does not exist in the engine yet
-> ([#1056](https://github.com/xerj-org/xerj/issues/1056) is the work item);
-> when `run.sh` finds it absent it stops after the fixture self-check, writes
-> `status.json` with `measured: false`, and invents nothing. This banner
-> applies to every file in this directory; each one repeats it.
+> **STATUS: gates 1, 2 and the latency gate measured; the token arms (gate 3)
+> not run.** This directory ships evaluation *inputs* (three licensed public
+> datasets, a deterministic pair generator, a run harness) plus the measured
+> results that exist so far — the table below says which is which. When
+> `run.sh` finds `POST /_ask` absent it stops after the fixture self-check,
+> writes `status.json` with `measured: false`, and invents nothing.
 
 Issue #1056 ships `POST /_ask` + the `xerj_plan` MCP tool: `{index or
 pattern, prompt}` in, `{query DSL, plan[], confidence, indices[]}` out, with
 every returned plan passing `xerj_query::parse_request` before it is returned.
-The issue's gate line is quoted verbatim in `run.sh`'s header; the three
+The issue's gate line is quoted verbatim in `run.sh`'s header; the
 measurable claims in it are what this harness exists to enforce:
 
 | # | gate line (from #1056) | threshold | status |
 |---|---|---|---|
-| 1 | "≥ 200 (prompt, gold result set) pairs over public tabular datasets" | **230 pairs shipped** (72 USGS / 78 exoplanets / 80 gapminder), derived from raw data | inputs built and verified; nothing scored |
-| 2 | "result-set F1 ≥ 0.9" | macro-F1 ≥ 0.9 over the pairs, AND zero invalid DSL out | **DESIGN — not measured** |
+| 1 | "≥ 200 (prompt, gold result set) pairs over public tabular datasets" | **230 pairs shipped** (72 USGS / 78 exoplanets / 80 gapminder), derived from raw data | inputs built, verified and scored |
+| 2 | "result-set F1 ≥ 0.9" | macro-F1 ≥ 0.9 over the pairs, AND zero invalid DSL out | **MEASURED 2026-09-30 — PASS: macro-F1 0.9975, 0 invalid DSL, 0 nondeterminism over 230 pairs × 3 runs** (run against the #1076 head via an unmodified scratch copy of this harness; the numbers and method are recorded in PR #1076's body — its raw files were not committed here) |
 | 3 | "agent harness … 16 runs per arm, real `claude -p` token counts … output tokens per solved structured-query task ≤ 50 % of agent-written DSL at equal solve rate" | ask-arm ≤ 0.5 × direct-arm at equal solve count | **DESIGN — not run** |
+| 4 | "p50 ≤ 300 ms" (the issue's CPU-budget line, measured as wall-clock — see the method note) | wall-clock p50 over loopback ≤ 300 ms | **MEASURED 2026-09-30 — PASS: p50 1.129 ms, p99 2.852 ms, n = 690 (230 pairs × 3 passes, all HTTP 200), 1 warmup pass reported separately** — [`results/2026-09-30-latency-gate/`](./results/2026-09-30-latency-gate/) |
 
 The engine-side acceptance lines that are *not* this harness's job (index
-routing top-1 by catalog description, the p50 ≤ 300 ms CPU budget, field
-gating internals) are listed under "Not covered" below, so nobody mistakes
-their absence for a claim.
+routing top-1 by catalog description, field gating internals) are listed
+under "Not covered" below, so nobody mistakes their absence for a claim. The
+latency gate IS this harness's job as of `scripts/latency_arm.py` — measured
+as wall-clock, with the CPU caveat stated there.
 
 ## The pairs
 
@@ -183,13 +183,15 @@ pairs**: every `query_equivalent` reproduces its gold doc-id set on the real
 engine. `POST /_ask` answered 405 and the harness stopped with
 `measured: false`, as designed.
 
-NOT measured, plainly: every F1, token, and latency number (there are none);
-`POST /_ask` behaviour (unimplemented); the agent arms (never run);
-determinism over real responses; the 422 class; index routing by catalog
-description (needs the autoindex catalog, out of this harness's scope for
-now); latency (the issue's p50 ≤ 300 ms **CPU** on a 20-field index is an
-engine-side acceptance test — over HTTP this harness sees wall-clock only, so
-it records wall-clock p50 in the raw file and claims nothing about CPU).
+NOT measured, plainly: the token arms (gate 3 — never run); index routing by
+catalog description (needs the autoindex catalog, out of this harness's
+scope for now). Latency is measured as WALL-CLOCK over loopback HTTP
+(`scripts/latency_arm.py`, gate row 4): the issue's line says **CPU** on a
+20-field index, and this harness cannot see in-process CPU time — loopback
+wall-clock on an idle node is an upper bound on it, which is what the gate
+row claims and nothing more. The fixture indices are small (655 / 3,000 /
+1,704 docs); the measured p50 is a fact about THIS fixture, not a promise
+about larger corpora.
 
 When a measured run lands, it lands in `results/` with its raw files, and
 this README's gate table gains a MEASURED row citing it — the table does not
