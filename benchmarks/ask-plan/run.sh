@@ -177,4 +177,12 @@ if [ -f "$RUN_DIR/status.json" ]; then
   echo "   harness is ready and waiting; nothing was measured and nothing was"
   echo "   fabricated. Re-run against a build with POST /_ask to populate"
   echo "   $RUN_DIR/summary.json and the README gate table."
+  exit 0
 fi
+
+# ── 5. the latency arm (p50 ≤ 300 ms gate; wall-clock, see latency_arm.py) ──
+# One warmup + N measured passes over the same 230 prompts, on the same node
+# the ask arm just used. Writes latency-raw.jsonl + latency-summary.json into
+# the SAME run dir; refuses to fabricate when /_ask is absent (it isn't here).
+XERJ_URL="$URL" python3 "$HERE/scripts/latency_arm.py" --out "$RUN_DIR" \
+  --passes "$DETERMINISM_RUNS" | tee "$RUN_DIR/latency.txt"
