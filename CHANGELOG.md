@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- Rolled `ROADMAP.md`'s tracker state after the issue tracker was emptied on
+  2026-09-29, the day of the rc.78 cut: the four issues still open after the
+  cut — #1038 and #1030 (their shipped halves are the rc.78 record below) and
+  the defects #1031/#1032, closed as deferred, not fixed — were closed, the
+  abandoned pointer #298 was unpinned, "In flight" emptied, the open-defects
+  shortlist became a plain-text deferred record (the release-notes gate checks
+  that section's issue links against the live tracker at every cut), and the
+  corpus-hub and mail-ingest lines state the closed statuses (PR
+  [#1053](https://github.com/xerj-org/xerj/pull/1053)).
+
 ## [1.0.0-rc.78] - 2026-09-29
 
 The index-size and corpus-packs release. Two headline changes: stage 1 of the
