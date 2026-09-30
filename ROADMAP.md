@@ -2,7 +2,7 @@
 
 This roadmap tracks capabilities that are **planned but not yet fully implemented**, so the project's public claims stay honest about what ships today versus what is coming. Status is verified against the actual code and by real API requests to the release binary, not aspirational.
 
-Last reviewed: 2026-09-26 (against `v1.0.0-rc.77` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298). This pass was a desk review of post-rc.77 `main` and the live tracker state, not a live re-verification: it rolled the *Next release* section and the open-defects shortlist forward — several entries from the 2026-09-21 review were stale within hours of that review (#950, #1015, #941, #874 and the stage-1 gating trio #937–#939 all closed the same evening; the fixes are recorded where the stale entries stood) — closed the CHANGELOG-gap GA item below (the rc.19–rc.70 backfill, PR [#1035](https://github.com/xerj-org/xerj/pull/1035)), marked the stage-2 object-storage item done ([#965](https://github.com/xerj-org/xerj/issues/965) wired in rc.77), and corrected the mail-ingest memory line to the post-[#1002](https://github.com/xerj-org/xerj/pull/1002) reality. The *Shipping today* claims were last live-verified against rc.76 (unchanged by this pass), and *The zero-token direction* below was verified separately on 2026-09-18, against `main` @ `4d8dadbf`.
+Last reviewed: 2026-09-29 (against `v1.0.0-rc.78` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.78 release-cut roll: *Next release* points at rc.79, the riding-to list folded into the rc.78 cut record below, and the open-defects shortlist was re-verified against the live tracker at cut time (#1031 and #1032 open; #1030 rides with them on the milestone) — the lesson of 2026-09-21, when several entries went stale within hours of that review, is why the shortlist is checked live at the cut rather than desk-carried. The 2026-09-26 desk review (PR [#1036](https://github.com/xerj-org/xerj/pull/1036)) stands as recorded: it closed the CHANGELOG-gap GA item (the rc.19–rc.70 backfill, PR [#1035](https://github.com/xerj-org/xerj/pull/1035)), marked the stage-2 object-storage item done ([#965](https://github.com/xerj-org/xerj/issues/965) wired in rc.77), and corrected the mail-ingest memory line to the post-[#1002](https://github.com/xerj-org/xerj/pull/1002) reality. The *Shipping today* claims were last live-verified against rc.76 (unchanged by this pass), and *The zero-token direction* below was verified separately on 2026-09-18, against `main` @ `4d8dadbf`.
 
 ## Follow the roadmap
 
@@ -29,81 +29,82 @@ These are implemented and exercised by real API requests / the test suite / benc
 - Bulk / scroll / delete-by-query, aliases, index templates, **executed** index-lifecycle policies (ISM-modeled, `_ilm/*` + `_plugins/_ism/*`, since rc.15), `_cat/*`, `_cluster/health`, `_count` / `_msearch` / `_mget`, `_update` / `_update_by_query` — all live-verified.
 - **A single native binary**, statically linked, no JVM, sub-second cold start.
 
-The release-by-release record of how all of this landed is [CHANGELOG.md](./CHANGELOG.md) — this file no longer duplicates it. The record is now complete rc.1 → rc.77: the rc.19–rc.70 gap was backfilled on 2026-09-26 from `git log` (merge subjects and commit bodies) and the GitHub release records, with a provenance banner in the file — the reconstructed entries are drier than ship-time ones, and every issue/PR link they carry was checked to sit inside its release window (PR [#1035](https://github.com/xerj-org/xerj/pull/1035)).
+The release-by-release record of how all of this landed is [CHANGELOG.md](./CHANGELOG.md) — this file no longer duplicates it. The record is now complete rc.1 → rc.78: the rc.19–rc.70 gap was backfilled on 2026-09-26 from `git log` (merge subjects and commit bodies) and the GitHub release records, with a provenance banner in the file — the reconstructed entries are drier than ship-time ones, and every issue/PR link they carry was checked to sit inside its release window (PR [#1035](https://github.com/xerj-org/xerj/pull/1035)).
 
-## Next release — [v1.0.0-rc.78](https://github.com/xerj-org/xerj/milestones)
+## Next release — [v1.0.0-rc.79](https://github.com/xerj-org/xerj/milestones)
 
-**rc.77 was cut on 2026-09-21** — its full contents are the
-[CHANGELOG.md](./CHANGELOG.md) entry, not this file. It is **the stateless-index and
-reader-fairness release**: `storage.backend = "s3"` works for real (#965 — one immutable
-ZBM1 bundle per segment instead of 104 PUTs, `snapshot.json` as the publication point,
-merges publish before retiring inputs, a fresh node adopts the bucket), and readers stop
-starving under sustained ingest (#1013 — the seqlock publish bracket no longer spans the
-flush build; the evenness check that catches a straddling capture is part of what
-shipped). The same release carries the systemone vote-text fixes (#1000/#1001: the vote
-text is exactly what the question points at, never the instruction prose — a measured
-32-point accuracy swing from wording alone), the console-tour pill race (#1011), and CI
-repairs (the reference-coding toolkit's tests now actually run).
+**rc.78 was cut on 2026-09-29** — its full contents are the
+[CHANGELOG.md](./CHANGELOG.md) entry, not this file. It is **the index-size
+stage-1 and corpus-packs release**: the durable-bytes epic
+[#1038](https://github.com/xerj-org/xerj/issues/1038) landed its first four
+format changes, each gated by the size harness — `.dv` bit-packing with a
+per-column chooser (ZNV2, PR
+[#1040](https://github.com/xerj-org/xerj/pull/1040)), `.post` block framing
+(ZPS2, PR [#1041](https://github.com/xerj-org/xerj/pull/1041)), typed-int /
+copy-of stored columns with a merge-path zstd chooser (ZBS4, PR
+[#1042](https://github.com/xerj-org/xerj/pull/1042)), and columnar-varint
+`.meta` records (ZFM5, PR
+[#1043](https://github.com/xerj-org/xerj/pull/1043)) — with the committed
+same-day pair at **5,398,478 → 3,989,254 B durable (−26.1 %)** on the 100k
+harness and a blog write-up (PR
+[#1044](https://github.com/xerj-org/xerj/pull/1044)); and `xerj corpus build`
+shipped portable, signed corpus packs (PRs
+[#1046](https://github.com/xerj-org/xerj/pull/1046)–[#1048](https://github.com/xerj-org/xerj/pull/1048),
+publish hardening
+[#1049](https://github.com/xerj-org/xerj/pull/1049)–[#1051](https://github.com/xerj-org/xerj/pull/1051))
+— the records half of
+[#1030](https://github.com/xerj-org/xerj/issues/1030) — with the first
+showcase pack `rust-vulns` published daily from a scheduled workflow.
 
-**On `main` since rc.77, riding to rc.78:** the flush bracket landed — flush
-drains freeze and the publication bracket wraps only the publish, closing
-[#1015](https://github.com/xerj-org/xerj/issues/1015) (PR
-[#1018](https://github.com/xerj-org/xerj/pull/1018)); the ingest-RSS
-investigation closed with fixes, not just measurements — id-position maps come
-from the `__id` projection with the stored reassembly streamed
-([#950](https://github.com/xerj-org/xerj/issues/950), PR
+The same release closed the idle-cost arc —
+[#874](https://github.com/xerj-org/xerj/issues/874) met at ~3× margin behind
+the at-rest fixture and its CI gate (the gauge-loop deletion PR
+[#1020](https://github.com/xerj-org/xerj/pull/1020), the lazy seen-set PRs
+[#1025](https://github.com/xerj-org/xerj/pull/1025)/[#1034](https://github.com/xerj-org/xerj/pull/1034),
+idle 206 → 64 kB per index) — the flush publication bracket
+([#1015](https://github.com/xerj-org/xerj/issues/1015), PR
+[#1018](https://github.com/xerj-org/xerj/pull/1018)), the ingest-RSS
+investigation ([#950](https://github.com/xerj-org/xerj/issues/950), PR
 [#1017](https://github.com/xerj-org/xerj/pull/1017), plus
 `POST /{index}/_cache/clear` in PR
-[#1009](https://github.com/xerj-org/xerj/pull/1009)); the by-query truncation
-class is closed — `_delete_by_query` pages the whole match set ids-only
-([#1019](https://github.com/xerj-org/xerj/issues/1019), PR
-[#1021](https://github.com/xerj-org/xerj/pull/1021)) and `_update_by_query`
-pages the match set with exact sig-text/enrich counts
-([#1022](https://github.com/xerj-org/xerj/issues/1022), PR
-[#1023](https://github.com/xerj-org/xerj/pull/1023)); the idle per-index budget
-is met with ~3× margin — the O(N) metrics gauge loop is deleted for
-scrape-time refresh behind an at-rest fixture and CI gate (PR
-[#1020](https://github.com/xerj-org/xerj/pull/1020), closing
-[#874](https://github.com/xerj-org/xerj/issues/874)), and the request-cache
-seen-set stopped allocating on first tracked search, idle 206 → 64 kB per index
-([#1024](https://github.com/xerj-org/xerj/issues/1024), PRs
-[#1025](https://github.com/xerj-org/xerj/pull/1025) and
-[#1034](https://github.com/xerj-org/xerj/pull/1034) — the `idle-budget` gate
-keeps CPU < 0.5 % of one core and ≤ 0.2 MB RSS per idle index);
-[discussion #1012](https://github.com/xerj-org/xerj/discussions/1012)'s
-email-labelling question has its measurement (PR
-[#1026](https://github.com/xerj-org/xerj/pull/1026): local `/_decide` on a
-synthetic four-label corpus — 1.000 accuracy on the templated tier, but 0.625
-at 0.902 mean confidence on a hand-authored boundary-crossing tier, the
-wrong-and-confident shape the discussion itself flags for the hosted path; no
-`autoindex` wiring exists yet); and `llms.txt`'s memory claims were corrected
-to the post-#1002 reality (PR
-[#1033](https://github.com/xerj-org/xerj/pull/1033), closing
-[#1028](https://github.com/xerj-org/xerj/issues/1028)).
+[#1009](https://github.com/xerj-org/xerj/pull/1009)), and the by-query
+truncation class whole (`_delete_by_query`
+[#1019](https://github.com/xerj-org/xerj/issues/1019)/PR
+[#1021](https://github.com/xerj-org/xerj/pull/1021), `_update_by_query`
+[#1022](https://github.com/xerj-org/xerj/issues/1022)/PR
+[#1023](https://github.com/xerj-org/xerj/pull/1023)). It also carries the
+email-labelling measurement and field report for
+[discussion #1012](https://github.com/xerj-org/xerj/discussions/1012) (PRs
+[#1026](https://github.com/xerj-org/xerj/pull/1026)/[#1027](https://github.com/xerj-org/xerj/pull/1027)),
+the README's plain-words Jev explanation (PR
+[#1010](https://github.com/xerj-org/xerj/pull/1010)), the `llms.txt` and
+whole-surface status corrections (PRs
+[#1033](https://github.com/xerj-org/xerj/pull/1033)/[#1037](https://github.com/xerj-org/xerj/pull/1037)),
+the CHANGELOG rc.19–rc.70 backfill (PR
+[#1035](https://github.com/xerj-org/xerj/pull/1035)), the 2026-09-26 review
+of this file (PR [#1036](https://github.com/xerj-org/xerj/pull/1036)), and
+the site work — corner brand and blog endings (PR
+[#1045](https://github.com/xerj-org/xerj/pull/1045)).
 
-**In flight for rc.78:** nothing on the board right now — the previous two
-in-flight items (#1015, #950) both closed on 2026-09-21, hours after the last
-review of this file, and their fixes are the "on `main` since rc.77" list
-above. The zero-token stage-1 defects found while measuring
-(#937/#938/#939) also closed with fixes in the same window — see the update
-under *The zero-token direction*.
+**In flight for rc.79:** the rc.78 milestone's three open issues ride
+forward — [#1030](https://github.com/xerj-org/xerj/issues/1030) (the
+pre-indexed half of the corpus-hub item below) and the two open defects
+below; nothing else is on the board.
 
-**Open defects carried into rc.78.**
+**Open defects carried into rc.79.**
 [#1031](https://github.com/xerj-org/xerj/issues/1031) (a source file that grows
 during an autoindex run aborts the run, is misclassified as a bulk/backend failure,
 and the retry advice points at the wrong fix), and
 [#1032](https://github.com/xerj-org/xerj/issues/1032) (three per-segment caches —
 `stored_value_cache`, `dv_cache`, `id_pos_cache` — stay unbounded until a merge
 retires their segment; the residual heap-per-doc retention after #1002) are the open
-defects with code consequences.
-Tracker [#298](https://github.com/xerj-org/xerj/issues/298) (this file's own review
-cadence) stays open by design. Two former trackers closed after the 2026-09-21
-review of this file: [#941](https://github.com/xerj-org/xerj/issues/941) (zero-token
-direction) closed 2026-09-21 when stage 1 was fully delivered, and
-[#874](https://github.com/xerj-org/xerj/issues/874) closed 2026-09-22 with its
-budget *met* — ~3× margin, via PRs
-[#1025](https://github.com/xerj-org/xerj/pull/1025)/[#1034](https://github.com/xerj-org/xerj/pull/1034)
-(see above). Everything else the rc.77 window closed is recorded in the
+defects with code consequences, live-verified open at the 2026-09-29 cut. The
+tracker that established this file's review cadence (issue #298) was closed as
+abandoned the same day — the cadence is machine-enforced by
+`docs_capability_lists` and the review history lives in this file and the
+CHANGELOG, so the issue had nothing left to track. Two former trackers, #941
+(zero-token direction) and #874 (idle cost), closed with fixes back in the
+rc.77 window. Everything else the rc.78 window closed is recorded in the
 CHANGELOG, not here.
 
 ## The road to [v1.0.0 GA](https://github.com/xerj-org/xerj/milestone/2)
@@ -114,7 +115,7 @@ The 1.0 bar: **every public claim verified against the release binary, and every
 - **Security hardening backlog** — cargo-audit and fuzzing landed in CI with rc.16 ([#207](https://github.com/xerj-org/xerj/issues/207) closed); the deferred TLS/auth/symlink hardening items from the Phase-2 security backlog remain.
 - **The mixed read-under-write p99 gap** — the 4 benchmark losses out of 85 measured comparisons, all the same root cause (reads landing on the live memtable under writer pressure). Written up in [`demo/playbooks/MIXED_READ_UNDER_WRITE_FINDING_2026-07-08.md`](./demo/playbooks/MIXED_READ_UNDER_WRITE_FINDING_2026-07-08.md); the candidate fix is a visibility/parity-mode design decision, not a micro-optimisation, and it stays on the GA gate until fixed or explicitly descoped with the benchmark loss kept public.
 - **Ship-or-descope every entry in *Known partials* below.** GA does not ship with a "partial" section that reads like a feature list.
-- **Close the CHANGELOG gap — closed 2026-09-26.** rc.19–rc.70 shipped without entries; the 52 sections are now backfilled from `git log` and the release records, with an in-file provenance banner and every link checked to sit inside its release window (PR [#1035](https://github.com/xerj-org/xerj/pull/1035), riding to rc.78). A project whose pitch is verified numbers cannot ask users to reconstruct releases from `git log` — and now it does not.
+- **Close the CHANGELOG gap — closed 2026-09-26.** rc.19–rc.70 shipped without entries; the 52 sections are now backfilled from `git log` and the release records, with an in-file provenance banner and every link checked to sit inside its release window (PR [#1035](https://github.com/xerj-org/xerj/pull/1035), shipped in rc.78). A project whose pitch is verified numbers cannot ask users to reconstruct releases from `git log` — and now it does not.
 
 ## The zero-token direction
 
