@@ -1,0 +1,32 @@
+{
+ "intent": "sem-body-absent",
+ "arm": "B",
+ "tool": "xerj_semantic_search",
+ "form": "semantic",
+ "target_index": "xc-map-gate-v-b1790790750-usearch-csharp-nuget-package",
+ "intent_text": "what the package build includes",
+ "guess_field": "body",
+ "control": null,
+ "actions": [
+  "map-no-semantic-no-text-fell-back-to-match_all"
+ ],
+ "request": {
+  "query": {
+   "match_all": {}
+  },
+  "size": 5
+ },
+ "http_status": 200,
+ "fields_used": [],
+ "error_reason": "",
+ "unknown_field_400": false,
+ "failure_kind": [],
+ "hits": 4,
+ "zero_hit_unknown_field_hint": false,
+ "hint_reason": "",
+ "map_shows": [
+  "Include",
+  "Pack",
+  "PackagePath"
+ ]
+}

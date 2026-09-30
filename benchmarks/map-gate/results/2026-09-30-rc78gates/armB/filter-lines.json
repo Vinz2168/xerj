@@ -1,0 +1,50 @@
+{
+ "intent": "filter-lines",
+ "arm": "B",
+ "tool": "xerj_search",
+ "form": "range",
+ "target_index": "xc-map-gate-v-b1790790750-usearch-docs",
+ "intent_text": "definitions between lines 100 and 200",
+ "guess_field": "line_number",
+ "control": null,
+ "actions": [
+  "map-exact-name"
+ ],
+ "request": {
+  "query": {
+   "range": {
+    "line": {
+     "gte": 100,
+     "lte": 200
+    }
+   }
+  },
+  "size": 5
+ },
+ "http_status": 200,
+ "fields_used": [
+  "line"
+ ],
+ "error_reason": "",
+ "unknown_field_400": false,
+ "failure_kind": [],
+ "hits": 325,
+ "zero_hit_unknown_field_hint": false,
+ "hint_reason": "",
+ "map_shows": [
+  "title",
+  "language",
+  "code",
+  "kind",
+  "line",
+  "name",
+  "path",
+  "body",
+  "section",
+  "end_line",
+  "start_line",
+  "text",
+  "defs",
+  "symbol_count"
+ ]
+}

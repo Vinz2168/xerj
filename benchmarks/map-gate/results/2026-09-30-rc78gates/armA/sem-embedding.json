@@ -1,0 +1,48 @@
+{
+ "intent": "sem-embedding",
+ "arm": "A",
+ "tool": "xerj_semantic_search",
+ "form": "semantic",
+ "target_index": "xc-map-gate-v-b1790790750-usearch-docs",
+ "intent_text": "index serialization format",
+ "guess_field": "embedding",
+ "control": null,
+ "actions": [
+  "guess"
+ ],
+ "request": {
+  "query": {
+   "semantic": {
+    "field": "embedding",
+    "query": "how the index is serialized to disk"
+   }
+  },
+  "size": 5
+ },
+ "http_status": 400,
+ "fields_used": [
+  "embedding"
+ ],
+ "error_reason": "semantic query on field [embedding]: it is not a `semantic_text` field, so there is no comparable stored vector to match. A `semantic` query requires either a `semantic_text` field (auto-embedded with the built-in lexical embedder) or an active embedding backend (`embedding.mode = \"neural\"`; `\"proxy\"` with `embedding.default_endpoint` set to an OpenAI-compatible endpoint; or `\"onnx-experimental\"` ",
+ "unknown_field_400": true,
+ "failure_kind": [
+  "semantic-non-semantic-field"
+ ],
+ "error_names_used_field": true,
+ "map_shows": [
+  "title",
+  "language",
+  "code",
+  "kind",
+  "line",
+  "name",
+  "path",
+  "body",
+  "section",
+  "end_line",
+  "start_line",
+  "text",
+  "defs",
+  "symbol_count"
+ ]
+}

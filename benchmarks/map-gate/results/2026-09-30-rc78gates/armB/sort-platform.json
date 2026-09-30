@@ -1,0 +1,51 @@
+{
+ "intent": "sort-platform",
+ "arm": "B",
+ "tool": "xerj_search",
+ "form": "sort",
+ "target_index": "xc-map-gate-v-b1790790750-usearch-csharp-directory-build",
+ "intent_text": "by target platform",
+ "guess_field": "platform",
+ "control": null,
+ "actions": [
+  "map-case-corrected"
+ ],
+ "request": {
+  "query": {
+   "match_all": {}
+  },
+  "sort": [
+   {
+    "Platform": "asc"
+   }
+  ],
+  "size": 5
+ },
+ "http_status": 200,
+ "fields_used": [
+  "Platform"
+ ],
+ "error_reason": "",
+ "unknown_field_400": false,
+ "failure_kind": [],
+ "hits": 3,
+ "zero_hit_unknown_field_hint": false,
+ "hint_reason": "",
+ "map_shows": [
+  "TargetOS",
+  "TargetOS_Condition",
+  "TargetArchitecture",
+  "CSharpDir",
+  "Configuration",
+  "Configuration_Condition",
+  "LangVersion",
+  "NativeLibBuildScriptsDir",
+  "NativeLibDir",
+  "PackageOutputPath",
+  "Platform",
+  "Platform_Condition",
+  "RepoRoot",
+  "RepoRoot_Condition",
+  "TargetArchitecture_Condition"
+ ]
+}

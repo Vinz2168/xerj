@@ -1,0 +1,50 @@
+{
+ "intent": "sort-linenumber",
+ "arm": "A",
+ "tool": "xerj_search",
+ "form": "sort",
+ "target_index": "xc-map-gate-v-b1790790750-hnswlib-docs",
+ "intent_text": "by line number",
+ "guess_field": "line_number",
+ "control": null,
+ "actions": [
+  "guess"
+ ],
+ "request": {
+  "query": {
+   "match_all": {}
+  },
+  "sort": [
+   {
+    "line_number": "asc"
+   }
+  ],
+  "size": 5
+ },
+ "http_status": 400,
+ "fields_used": [
+  "line_number"
+ ],
+ "error_reason": "No mapping found for [line_number] in order to sort on | No mapping found for [line_number] in order to sort on",
+ "unknown_field_400": true,
+ "failure_kind": [
+  "sort-unknown-field"
+ ],
+ "error_names_used_field": true,
+ "map_shows": [
+  "title",
+  "language",
+  "code",
+  "kind",
+  "line",
+  "name",
+  "path",
+  "body",
+  "defs",
+  "symbol_count",
+  "section",
+  "end_line",
+  "start_line",
+  "text"
+ ]
+}

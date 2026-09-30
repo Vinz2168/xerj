@@ -1,0 +1,51 @@
+{
+ "intent": "sort-platform",
+ "arm": "A",
+ "tool": "xerj_search",
+ "form": "sort",
+ "target_index": "xc-map-gate-v-b1790790750-usearch-csharp-directory-build",
+ "intent_text": "by target platform",
+ "guess_field": "platform",
+ "control": null,
+ "actions": [
+  "guess"
+ ],
+ "request": {
+  "query": {
+   "match_all": {}
+  },
+  "sort": [
+   {
+    "platform": "asc"
+   }
+  ],
+  "size": 5
+ },
+ "http_status": 400,
+ "fields_used": [
+  "platform"
+ ],
+ "error_reason": "No mapping found for [platform] in order to sort on | No mapping found for [platform] in order to sort on",
+ "unknown_field_400": true,
+ "failure_kind": [
+  "sort-unknown-field"
+ ],
+ "error_names_used_field": true,
+ "map_shows": [
+  "TargetOS",
+  "TargetOS_Condition",
+  "TargetArchitecture",
+  "CSharpDir",
+  "Configuration",
+  "Configuration_Condition",
+  "LangVersion",
+  "NativeLibBuildScriptsDir",
+  "NativeLibDir",
+  "PackageOutputPath",
+  "Platform",
+  "Platform_Condition",
+  "RepoRoot",
+  "RepoRoot_Condition",
+  "TargetArchitecture_Condition"
+ ]
+}

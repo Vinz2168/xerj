@@ -1,0 +1,65 @@
+{
+ "intent": "hyb-knn-leg",
+ "arm": "B",
+ "tool": "xerj_hybrid_search",
+ "form": "hybrid",
+ "target_index": "xc-map-gate-v-b1790790750-usearch-docs",
+ "intent_text": "lexical + vector fusion for HNSW construction",
+ "guess_field": "embedding",
+ "control": null,
+ "actions": [
+  "hybrid-legs:map-semantic-field"
+ ],
+ "request": {
+  "query": {
+   "hybrid": {
+    "queries": [
+     {
+      "query": {
+       "match": {
+        "code": "hnsw construction layer"
+       }
+      }
+     },
+     {
+      "query": {
+       "semantic": {
+        "field": "body",
+        "query": "graph construction for approximate search"
+       }
+      }
+     }
+    ],
+    "fusion": "rrf"
+   }
+  },
+  "size": 5
+ },
+ "http_status": 200,
+ "fields_used": [
+  "code",
+  "body"
+ ],
+ "error_reason": "",
+ "unknown_field_400": false,
+ "failure_kind": [],
+ "hits": 11,
+ "zero_hit_unknown_field_hint": false,
+ "hint_reason": "",
+ "map_shows": [
+  "title",
+  "language",
+  "code",
+  "kind",
+  "line",
+  "name",
+  "path",
+  "body",
+  "section",
+  "end_line",
+  "start_line",
+  "text",
+  "defs",
+  "symbol_count"
+ ]
+}

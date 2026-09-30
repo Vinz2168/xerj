@@ -1,0 +1,23 @@
+{
+ "gate": "unknown-field 400s from MCP-issued DSL down >=80% on the reference-coding harness (#1055, rc.79)",
+ "threshold": ">= 80% reduction in unknown-field 400s, arm A (no-map) vs arm B (with-map)",
+ "armA_no_map": {
+  "issued": 30,
+  "unknown_field_400": 20,
+  "other_400": 0,
+  "silent_zero_hit_with_hint": 0,
+  "silent_zero_hit_no_hint": 5,
+  "ok_with_hits": 5
+ },
+ "armB_with_map": {
+  "issued": 30,
+  "unknown_field_400": 0,
+  "other_400": 0,
+  "silent_zero_hit_with_hint": 0,
+  "silent_zero_hit_no_hint": 1,
+  "ok_with_hits": 29
+ },
+ "reduction_pct": 100.0,
+ "verdict": "PASS",
+ "note": "arm B's unknown_field_400 count is the gate's numerator; silent zero-hit misses (HTTP 200, wrong field) are a separate, non-gate metric counted here for honesty \u2014 xerj_map fixes those too but the gate text names 400s"
+}

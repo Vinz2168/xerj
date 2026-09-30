@@ -1,0 +1,50 @@
+{
+ "intent": "sort-lastmod",
+ "arm": "A",
+ "tool": "xerj_search",
+ "form": "sort",
+ "target_index": "xc-map-gate-v-b1790790750-hnswlib-docs",
+ "intent_text": "most recently changed files first",
+ "guess_field": "last_modified",
+ "control": null,
+ "actions": [
+  "guess"
+ ],
+ "request": {
+  "query": {
+   "match_all": {}
+  },
+  "sort": [
+   {
+    "last_modified": "asc"
+   }
+  ],
+  "size": 5
+ },
+ "http_status": 400,
+ "fields_used": [
+  "last_modified"
+ ],
+ "error_reason": "No mapping found for [last_modified] in order to sort on | No mapping found for [last_modified] in order to sort on",
+ "unknown_field_400": true,
+ "failure_kind": [
+  "sort-unknown-field"
+ ],
+ "error_names_used_field": true,
+ "map_shows": [
+  "title",
+  "language",
+  "code",
+  "kind",
+  "line",
+  "name",
+  "path",
+  "body",
+  "defs",
+  "symbol_count",
+  "section",
+  "end_line",
+  "start_line",
+  "text"
+ ]
+}

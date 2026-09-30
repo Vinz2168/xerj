@@ -1,0 +1,5 @@
+{"corpus":"map-gate-v","cloned_at":"2026-09-30T17:52:28Z","repos":[
+  {"repo":"usearch","url":"https://github.com/unum-cloud/usearch","licence":"Apache-2.0","sha":"cc23bbaf21ef52313c5a495adbc40cbd733cdcfb","files":175,"bytes":2146512},
+  {"repo":"instant-distance","url":"https://github.com/instant-labs/instant-distance","licence":"Apache-2.0","sha":"13ea89ac1ca038d19fbbe3c095c1aeddf713f859","files":27,"bytes":204055},
+  {"repo":"hnswlib","url":"https://github.com/nmslib/hnswlib","licence":"Apache-2.0","sha":"d9b3608c83d83b46c96e25088cb1d729b29dcfe9","files":65,"bytes":344905}
+]}

@@ -1,0 +1,40 @@
+{
+ "intent": "sort-version",
+ "arm": "B",
+ "tool": "xerj_search",
+ "form": "sort",
+ "target_index": "xc-map-gate-v-b1790790750-usearch-csharp-cloud-unum-usearch-tests",
+ "intent_text": "by package version",
+ "guess_field": "version",
+ "control": null,
+ "actions": [
+  "map-case-corrected"
+ ],
+ "request": {
+  "query": {
+   "match_all": {}
+  },
+  "sort": [
+   {
+    "Version": "asc"
+   }
+  ],
+  "size": 5
+ },
+ "http_status": 200,
+ "fields_used": [
+  "Version"
+ ],
+ "error_reason": "",
+ "unknown_field_400": false,
+ "failure_kind": [],
+ "hits": 4,
+ "zero_hit_unknown_field_hint": false,
+ "hint_reason": "",
+ "map_shows": [
+  "Include",
+  "Version",
+  "IncludeAssets",
+  "PrivateAssets"
+ ]
+}

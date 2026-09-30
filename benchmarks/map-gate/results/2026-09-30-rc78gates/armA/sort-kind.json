@@ -1,0 +1,50 @@
+{
+ "intent": "sort-kind",
+ "arm": "A",
+ "tool": "xerj_search",
+ "form": "sort",
+ "target_index": "xc-map-gate-v-b1790790750-instant-distance-docs",
+ "intent_text": "by symbol kind",
+ "guess_field": "type",
+ "control": null,
+ "actions": [
+  "guess"
+ ],
+ "request": {
+  "query": {
+   "match_all": {}
+  },
+  "sort": [
+   {
+    "type": "asc"
+   }
+  ],
+  "size": 5
+ },
+ "http_status": 400,
+ "fields_used": [
+  "type"
+ ],
+ "error_reason": "No mapping found for [type] in order to sort on | No mapping found for [type] in order to sort on",
+ "unknown_field_400": true,
+ "failure_kind": [
+  "sort-unknown-field"
+ ],
+ "error_names_used_field": true,
+ "map_shows": [
+  "title",
+  "language",
+  "code",
+  "kind",
+  "line",
+  "name",
+  "path",
+  "body",
+  "defs",
+  "symbol_count",
+  "section",
+  "end_line",
+  "start_line",
+  "text"
+ ]
+}

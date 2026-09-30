@@ -1,0 +1,42 @@
+{
+ "intent": "sem-description",
+ "arm": "A",
+ "tool": "xerj_semantic_search",
+ "form": "semantic",
+ "target_index": "xc-map-gate-v-b1790790750-json",
+ "intent_text": "which repos the corpus holds",
+ "guess_field": "description",
+ "control": null,
+ "actions": [
+  "guess"
+ ],
+ "request": {
+  "query": {
+   "semantic": {
+    "field": "description",
+    "query": "which repositories are indexed in this corpus"
+   }
+  },
+  "size": 5
+ },
+ "http_status": 400,
+ "fields_used": [
+  "description"
+ ],
+ "error_reason": "semantic query on field [description]: it is not a `semantic_text` field, so there is no comparable stored vector to match. A `semantic` query requires either a `semantic_text` field (auto-embedded with the built-in lexical embedder) or an active embedding backend (`embedding.mode = \"neural\"`; `\"proxy\"` with `embedding.default_endpoint` set to an OpenAI-compatible endpoint; or `\"onnx-experimental\"",
+ "unknown_field_400": true,
+ "failure_kind": [
+  "semantic-non-semantic-field"
+ ],
+ "error_names_used_field": true,
+ "map_shows": [
+  "bytes",
+  "cloned_at",
+  "corpus",
+  "files",
+  "licence",
+  "repo",
+  "sha",
+  "url"
+ ]
+}

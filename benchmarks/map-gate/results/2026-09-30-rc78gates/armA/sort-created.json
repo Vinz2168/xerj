@@ -1,0 +1,44 @@
+{
+ "intent": "sort-created",
+ "arm": "A",
+ "tool": "xerj_search",
+ "form": "sort",
+ "target_index": "xc-map-gate-v-b1790790750-json",
+ "intent_text": "newest corpus clone first",
+ "guess_field": "created_at",
+ "control": null,
+ "actions": [
+  "guess"
+ ],
+ "request": {
+  "query": {
+   "match_all": {}
+  },
+  "sort": [
+   {
+    "created_at": "asc"
+   }
+  ],
+  "size": 5
+ },
+ "http_status": 400,
+ "fields_used": [
+  "created_at"
+ ],
+ "error_reason": "No mapping found for [created_at] in order to sort on | No mapping found for [created_at] in order to sort on",
+ "unknown_field_400": true,
+ "failure_kind": [
+  "sort-unknown-field"
+ ],
+ "error_names_used_field": true,
+ "map_shows": [
+  "bytes",
+  "cloned_at",
+  "corpus",
+  "files",
+  "licence",
+  "repo",
+  "sha",
+  "url"
+ ]
+}

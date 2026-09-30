@@ -1,0 +1,43 @@
+{
+ "intent": "sort-lastmod",
+ "arm": "B",
+ "tool": "xerj_search",
+ "form": "sort",
+ "target_index": "xc-map-gate-v-b1790790750-hnswlib-docs",
+ "intent_text": "most recently changed files first",
+ "guess_field": "last_modified",
+ "control": null,
+ "actions": [
+  "dropped-sort:no-candidate-in-map"
+ ],
+ "request": {
+  "query": {
+   "match_all": {}
+  },
+  "size": 5
+ },
+ "http_status": 200,
+ "fields_used": [],
+ "error_reason": "",
+ "unknown_field_400": false,
+ "failure_kind": [],
+ "hits": 423,
+ "zero_hit_unknown_field_hint": false,
+ "hint_reason": "",
+ "map_shows": [
+  "title",
+  "language",
+  "code",
+  "kind",
+  "line",
+  "name",
+  "path",
+  "body",
+  "defs",
+  "symbol_count",
+  "section",
+  "end_line",
+  "start_line",
+  "text"
+ ]
+}

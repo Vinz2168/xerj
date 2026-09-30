@@ -1,0 +1,44 @@
+{
+ "intent": "sort-created",
+ "arm": "B",
+ "tool": "xerj_search",
+ "form": "sort",
+ "target_index": "xc-map-gate-v-b1790790750-json",
+ "intent_text": "newest corpus clone first",
+ "guess_field": "created_at",
+ "control": null,
+ "actions": [
+  "map-exact-name"
+ ],
+ "request": {
+  "query": {
+   "match_all": {}
+  },
+  "sort": [
+   {
+    "cloned_at": "asc"
+   }
+  ],
+  "size": 5
+ },
+ "http_status": 200,
+ "fields_used": [
+  "cloned_at"
+ ],
+ "error_reason": "",
+ "unknown_field_400": false,
+ "failure_kind": [],
+ "hits": 3,
+ "zero_hit_unknown_field_hint": false,
+ "hint_reason": "",
+ "map_shows": [
+  "bytes",
+  "cloned_at",
+  "corpus",
+  "files",
+  "licence",
+  "repo",
+  "sha",
+  "url"
+ ]
+}
