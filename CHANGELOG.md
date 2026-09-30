@@ -96,6 +96,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   published schema `landing/docs/agents/schemas/mcp-tools.json` was
   regenerated from the binary; `published_schema_drift` stays green. (PR
   [#1067](https://github.com/xerj-org/xerj/pull/1067).)
+- **`xerj_map` MCP tool: per-index field map from the autoindex catalog
+  ([#1055](https://github.com/xerj-org/xerj/issues/1055)).** The catalog
+  index (`autoindex-catalog`) holds, per dataset, the full `FieldSpec` list
+  the profiler inferred, but only the CLI could read it — an MCP agent
+  writing query DSL had to guess field names and ate unknown-field 400s on
+  the searches it then issued. The twelfth MCP tool reads the catalog (the
+  same `doc_kind:dataset` query `xerj autoindex map` runs, with
+  `sample_queries_json` projected out of `_source`) and renders, per index:
+  record count, time field and range, semantic body field, and every field —
+  name, `es_type`, date encoding, semantic tag, cardinality estimate,
+  coverage, up to 5 examples, and the sampled date AND numeric min-max.
+  Default response ≤ 4 KB per index (`max_bytes`, floor 1024); the documented
+  trim ladder cuts examples to one, then examples, then per-field notes, then
+  lowest-coverage fields, with `trimmed`/`fields_omitted` accounting for
+  every cut. An exact `index` name filters engine-side, a `*`-glob
+  client-side; a missing catalog is an error naming the fix, an empty one a
+  normal empty result. `FieldSpec` itself gained the numeric range
+  (`num_min`/`num_max` from the `int_min`/`int_max` `FieldAcc` has tracked
+  all along) — populated exactly on `long` fields, deliberately absent on
+  `double` (the accumulator tracks only the i64 subset, so a fractional
+  column would carry its integers' range stated as fact), with
+  `#[serde(default)]` so every pre-existing catalog `fields_json` and state
+  plan still deserialises. Published schema regenerated (12 tools);
+  `published_schema_drift` stays green. (PR
+  [#1074](https://github.com/xerj-org/xerj/pull/1074).)
 ### Fixed
 
 - **Release notes now compare against the previous engine release instead of
