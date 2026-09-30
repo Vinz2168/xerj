@@ -220,6 +220,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plan still deserialises. Published schema regenerated (12 tools);
   `published_schema_drift` stays green. (PR
   [#1074](https://github.com/xerj-org/xerj/pull/1074).)
+- **`_watcher` is real: `PUT /_watcher/watch/<id>` now either evaluates a
+  watch on schedule or refuses it with 501
+  ([#1062](https://github.com/xerj-org/xerj/issues/1062)).** The route used
+  to answer 201 `"active": true` to every body with no machinery behind it —
+  accepted-and-ignored, the #204 class at route level — and the alert
+  indices `.xerj_alert_rules` / `.xerj_alert_fires` were written by nothing.
+  One watch type is implemented: `trigger.schedule.interval` (>= 1s),
+  `input.search` over exactly one index, `condition.xerj_decide` (question,
+  positive_label, p_min, k, optional decide index) and an `index_alert`
+  action. A per-watch background task prefilters candidates with the watch's
+  own query (ascending `_seq_no` keyset paging, 100 per page — the #1022
+  shape), runs each rendered question through the real `/_decide`, and writes
+  a fire record into `.xerj_alert_fires` when the positive label wins
+  non-abstaining at or above `p_min`. Anything else (cron schedules,
+  transforms, other action types, multi-index input) is refused with a 501
+  that names what is not evaluated; malformed supported shapes are 400. Two
+  cursor subtleties are pinned by tests: the empty-index baseline is `-1`
+  because `_seq_no` is 0-based on the wire (a 0 baseline strands the first
+  document ever indexed), and the baseline is captured in `put_watch` before
+  the evaluator spawns so documents indexed between the 201 and the first
+  poll cannot be absorbed unjudged. Fire records carry the RAW decide
+  confidence, plus `p_cal` with `calibrated: true` when the node has a
+  fitted calibration (#1063, PR #1080) — the threshold stays on the raw
+  value. Honest limits: a restart does not resume watches (evaluators are
+  spawned by `put_watch` only), and the per-pass decide budget is 1000 with
+  the cursor held below a failure so the backlog is retried, never dropped.
+  Zero watches cost zero tasks; an idle watch's tick measured sub-second
+  (sub-millisecond, pinned by test). (PR
+  [#1082](https://github.com/xerj-org/xerj/pull/1082).)
+- **`xerj autoindex <folder> --label <question-set.json>` labels each
+  document at ingest through `POST /_decide`
+  ([#1062](https://github.com/xerj-org/xerj/issues/1062)).** The
+  question-set file (the `noul`/`choice` vocabulary `/v1/systemone` already
+  uses) is validated whole before the folder is walked; `{{field}}` in a
+  question renders against each record's own fields. A `noul` is one binary
+  vote; a `choice` is one vote per option with argmax over independent
+  binary votes (an option that lost its vote contributes `1 - confidence`).
+  Fields written: `label`/`label_p` for a single-question set, plus
+  `label_<id>`/`label_<id>_p` per question. Abstention is an answer —
+  `label: null` with the raw p carried for later calibration; `p` is the
+  RAW decide confidence everywhere. A FAILED decide fails the run before the
+  document is bulk-indexed: an index the operator believes is labelled is
+  the #204 defect class. The vote runs at both record sinks — the
+  generated/durable route decides inside `prepare_artifact` before sealing
+  (labels are part of the durable artifact; replays and #971 hardlink reuse
+  carry them without a second vote, and the question-set bytes are part of
+  `prepared_records_identity`, so a changed set re-prepares instead of
+  hardlinking differently-labelled NDJSON) and the legacy phase-B sink at
+  the same point. `--label` is refused by name on every route that cannot
+  apply it (folder `--watch`, object-storage watch, `map`, `status`,
+  `--dry-run`). Cost is ingest-time only — one round trip per noul (per
+  option, for a choice) per record; with the flag absent no `Labeler` is
+  constructed, so idle cost is zero by construction and the measured cost
+  (ms/doc, printed by the end-to-end test against a loopback node) is the
+  floor, not the ceiling. (PR
+  [#1082](https://github.com/xerj-org/xerj/pull/1082).)
 ### Fixed
 
 - **Release notes now compare against the previous engine release instead of
