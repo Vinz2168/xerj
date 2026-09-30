@@ -59,8 +59,11 @@ probability, and renormalises across the question's labels. A `noul` is scored
 as two competing statements (the positive label and its negation); a `choice`
 scores its own options. The trained model is the open `xerj-decide` artifact
 ([#1064](https://github.com/xerj-org/xerj/issues/1064)); the loader here is
-validated end to end against a deterministic test fixture, so **no accuracy,
-ECE, or latency number is claimed for tier 2 until that artifact is measured**.
+validated end to end against a deterministic test fixture, and the artifact's
+measured accuracy, calibration, and serving latency are published in
+[DECIDE_MODEL.md](./DECIDE_MODEL.md) — the honest summary being that binary
+`noul` on a trained label vocabulary is where tier 2 works, and transfer to an
+untrained label vocabulary is ≈ chance.
 
 The tier that answered is per-question evidence: `decisions.evidence.<id>.tier`
 is `history` or `local`, and a local answer carries

@@ -1,0 +1,18 @@
+# xerj-decide model manifest — verify with:
+#   sha256sum -c MANIFEST.sha256
+0c150d5b83f872ad572d840d02829f30b845ea58e098bc7c0745d097c4502b76  config.json
+aacfb01a75791a4e5c330113fe6c4713552426326237df72519267f7781d1197  tokenizer.json
+2dfdb8c33be5ace69243ea6d8a20a9ee905cfcfdf454f7eb7c49c05f73982bf0  model.safetensors
+
+--- provenance ---
+name:          xerj-decide-v1
+version:       1.0.0
+architecture:  ModernBertForSequenceClassification (candle-transformers 0.9)
+parameters:    7419907
+dtype:         F32
+harness:       benchmarks/decide-model 0.1.0 (candle 0.9, CPU) (seed 1064, corpus seed 1064)
+recipe:        5 epochs, lr 0.0006, warmup 0.06, wd 0.01, vocab 8742, hidden 6x256
+train pairs:   39009
+trained on:    banking77 — 9503 train / 500 dev rows, sha256 b06e26ac675513959a63135f11b94ea7786ed02da65db93a5650d8838cbc664b, CC-BY-4.0 (PolyAI-LDN/task-specific-datasets LICENSE)
+trained on:    sms-spam — 3500 train / 500 dev rows, sha256 7d039a24a6083ed9ef0f806ebad56bbb976e3aeb8de05669173bfdc4996c239d, CC-BY-4.0 (UCI ML Repository dataset page)
+weights:       Apache-2.0 (the xerj-decide weights, from xerj-org)

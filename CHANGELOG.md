@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`xerj-decide-v1`: the open tier-2 decide model — training/export harness,
+  measured eval card, upload-ready bundle
+  ([#1064](https://github.com/xerj-org/xerj/issues/1064), PR
+  [#1084](https://github.com/xerj-org/xerj/pull/1084)).** The decide
+  ladder's tier 2 (`--decide-mode local --decide-model-dir <dir>`) until now
+  had a loader and no artifact to load. `benchmarks/decide-model/` is the
+  deterministic harness that trains one: stdlib-plus-candle (CPU only), the
+  same `candle_transformers` ModernBERT `load` call the server loads with —
+  trainer and server run one forward, not two that might drift — splitmix64
+  for every random choice including weight init (candle's CPU RNG cannot be
+  seeded), per-epoch `stream_seed`, no clock or environment read in the
+  artifact path, and the one process-unstable step (the tokenizers crate's
+  wordpiece *fit*; measured 8,740/8,741/8,742 across runs) shipped as a
+  frozen committed input, `pinned/tokenizer.json`. The artifact — 7,419,907
+  params (256×6×4, FFN 768, vocab 8,742), 29,683,844 bytes of F32
+  safetensors — is verified by loading it back through `--decide-model-dir`
+  on a booted node; the weights exceed the 5 MB blob ceiling so the repo
+  carries the export script, manifest, config, tokenizer and VERSION, and
+  `scripts/publish_bundle.sh` assembles the complete upload bundle
+  (Apache-2.0 licence, digest-checked manifest, the card as README) with the
+  exact `huggingface-cli`/`curl` commands — publication is PENDING operator
+  credentials, and no published URL is claimed. Every number is measured and
+  in `docs/DECIDE_MODEL.md`: full-test-split Banking77 77-way choice
+  0.1185 acc / 0.072 ECE; SMS held-out noul 0.8850 acc / 0.310 ECE / F1
+  0.686; leave-one-out zero-shot ≈ chance in both directions (Banking77
+  0.0094 vs 1/77 ≈ 0.013 chance; SMS 0.1982) — the honest boundary of the
+  "no history" claim; serving latency on a booted private-port node (release
+  build, CPU, sequential client): `/_decide` noul p50 13.0 ms / p99 13.9,
+  `/v1/systemone` noul 13.2/14.3, 5-way choice 21.6/23.5, full 77-way
+  228.1/237.1; against the history vote's published 0.819 BM25 / 0.937
+  hybrid (Banking77) and 0.983 BM25 (SMS), tier 1 stays ahead on its home
+  ground, as it should. Wide-choice ranking and calibration at this size are
+  named as unsolved in the card, not buried. Reference-coding corpora are
+  absent in this sandbox and were not consulted.
 - **systemone: calibration layer — `p_cal` beside every `p_raw`, published
   reliability curve ([#1063](https://github.com/xerj-org/xerj/issues/1063), PR
   [#1080](https://github.com/xerj-org/xerj/pull/1080)).** A ladder
