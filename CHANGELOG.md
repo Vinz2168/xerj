@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+
+- **Local zero-shot decision head — tier 2 of the System One decide ladder
+  ([#1057](https://github.com/xerj-org/xerj/issues/1057), PR
+  [#1072](https://github.com/xerj-org/xerj/pull/1072)).** `/v1/systemone` and
+  `/_decide` now answer through an ordered ladder per question: the history
+  vote wins wherever it has labelled support (unchanged); a local
+  ModernBERT-class candle classifier — cargo feature `decide-local`, armed by
+  `XERJ_DECIDE_MODE=local` + `XERJ_DECIDE_MODEL_DIR` — answers every
+  no-support class (no `[decisions]` index, a missing/unsearchable one, no
+  labelled neighbour), so the same request that 503'd/422'd answers 200 and
+  tiers mix per-question in one response; a hosted key stays reserved. The
+  head scores NLI (premise, hypothesis) pairs per candidate label and
+  renormalises, loads from a local model directory only (no hf-hub, no new
+  outbound client — the egress inventory is unchanged), echoes its own id
+  `xerj-decide-local-1` (never a Jev name), and fails loudly (503 naming the
+  directory) rather than fabricating a probability. Default builds keep the
+  exact previous 503/422 contract. Loader validated end to end against a
+  deterministic test fixture; no accuracy/ECE/latency number is claimed until
+  the trained `xerj-decide` artifact (#1064) is measured at release.
+
 - **Token-budgeted MCP responses: `max_tokens` on every search tool
   ([#1058](https://github.com/xerj-org/xerj/issues/1058)).** The five MCP
   search tools (`xerj_search`, `xerj_hybrid_search`, `xerj_semantic_search`,

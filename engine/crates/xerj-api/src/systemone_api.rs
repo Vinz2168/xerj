@@ -1,6 +1,6 @@
-//! The local judge: System One wire-compatible decisions from a vote.
+//! The local judge: System One wire-compatible decisions from a ladder.
 //!
-//! Two surfaces, one mechanism:
+//! Two surfaces, one ladder:
 //!
 //! - `POST /v1/systemone` (native router) speaks TypeSafe's documented System
 //!   One request/response shape, so a client written for their API —
@@ -16,6 +16,28 @@
 //! Nothing leaves the node. This module adds no outbound client; the vote is
 //! an ordinary search against an ordinary index. That is the point of the
 //! feature — the same interface, with the evidence staying home.
+//!
+//! # The decide ladder (#1057)
+//!
+//! Both surfaces answer through the same ordered ladder, per question:
+//!
+//! 1. **History vote** — when `[decisions] index` is configured and returns
+//!    labelled support, the vote wins. It is the measured tier and it shows
+//!    its evidence.
+//! 2. **Local zero-shot head** (feature `decide-local`,
+//!    `XERJ_DECIDE_MODE=local`, the env half of `--decide-mode local`) — a
+//!    ModernBERT-class candle classifier ([`xerj_ai::decide`]) loaded from
+//!    `XERJ_DECIDE_MODEL_DIR`. It answers every no-support outcome: no
+//!    `[decisions] index` at all, a configured index that is missing, and a
+//!    question whose payload retrieves no labelled neighbour. Its model echo
+//!    is [`LOCAL_MODEL_ID`] — the same never-a-Jev-name discipline.
+//! 3. **Hosted key** — reserved, not built. When tiers 1 and 2 cannot
+//!    answer, the documented errors stand rather than a fabricated
+//!    probability.
+//!
+//! The default build (no `decide-local`, or the mode unset) behaves exactly
+//! as before: 503 with no `[decisions]` index, 422 `no_support` / on a
+//! history that cannot answer.
 //!
 //! # The wire contract, and where we deliberately break it
 //!
@@ -34,7 +56,8 @@
 //! acknowledged and skipped: judge rules are not retrieval vocabulary.
 //! References that resolve to nothing, and a payload with no text at all,
 //! are 422s naming the question — never a confident vote on text the
-//! question never saw.
+//! question never saw. (These are request-shape refusals: the local head
+//! does not rescue them, because there is no payload to classify.)
 //!
 //! Response: `{ model, answers, usage }` with `answers` keyed exactly by the
 //! question ids sent and each answer carrying only its documented fields —
@@ -46,14 +69,25 @@
 //! 1. `model` is echoed as `xerj-history-vote-1`, never as a Jev model name.
 //!    Echoing `jev-1.13.0` would claim these probabilities are the hosted
 //!    model's. The requested name is reported as `decisions.requested_model`.
+//!    When the local tier answered (all or part of the request), the echo is
+//!    still `xerj-history-vote-1` for wire compatibility, `decisions.model`
+//!    names the tier that answered each question per-question in
+//!    `decisions.evidence.*.tier`, and `decisions.local_model` names the
+//!    local head.
 //! 2. A question with no support — an empty history, or no labelled
 //!    neighbour — is a 422 naming the question ids. Zero support must not
 //!    become a fabricated 0.5. (`/_decide` says the same thing as `abstain`.)
+//!    The local tier is the documented exception: enabled, it answers those
+//!    same questions with the head's probabilities instead.
 //!
 //! `score` questions (2–10 ordinal levels, weighted-average answer) have no
 //! vote analogue and no benchmark: 422, in the docs.
 
 use std::collections::BTreeMap;
+#[cfg(feature = "decide-local")]
+use std::path::Path;
+#[cfg(feature = "decide-local")]
+use std::path::PathBuf;
 use std::time::Instant;
 
 use axum::extract::State;
@@ -69,6 +103,11 @@ use crate::state::AppState;
 /// The model id this endpoint truthfully is. Never a Jev name.
 pub const MODEL_ID: &str = "xerj-history-vote-1";
 
+/// The model id the local zero-shot tier truthfully is — the same discipline
+/// as [`MODEL_ID`]: never a Jev name, because these probabilities are the
+/// local head's, not a hosted judge's.
+pub const LOCAL_MODEL_ID: &str = "xerj-decide-local-1";
+
 /// One question's vote text is bounded so a caller cannot make the node
 /// search for a novel of its choosing; matches the rerank stage's philosophy
 /// of caller-chosen cost with a server-side ceiling.
@@ -80,6 +119,260 @@ const MAX_CHOICE_OPTIONS: usize = 255;
 const MAX_QUESTIONS: usize = 300;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// The decide ladder (#1057)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The tiers of the decide ladder, in resolution order. History wins where
+/// it has support; the local head answers what history cannot; the hosted
+/// tier is reserved and unbuilt, so the ladder bottoms out in the documented
+/// errors rather than a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecideTier {
+    /// Tier 1: the weighted nearest-neighbour vote over `[decisions] index`.
+    History,
+    /// Tier 2: the local zero-shot decision head (feature `decide-local`,
+    /// `XERJ_DECIDE_MODE=local`).
+    Local,
+    /// Tier 3: a hosted decision provider key. Not yet built — see the
+    /// module header. When [`resolve_tier`] returns `None` the caller
+    /// answers with today's error contract.
+    Hosted,
+}
+
+/// What the history index said for one question. The ladder treats every
+/// no-support outcome the same way: the local head may answer it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HistorySupport {
+    /// Labelled neighbours came back.
+    Supported,
+    /// No `[decisions] index` is configured at all.
+    NotConfigured,
+    /// The configured index does not exist or could not be searched; the
+    /// string is the cause, surfaced to the operator when no tier can
+    /// answer.
+    Unusable(String),
+    /// The index answered with no labelled neighbour.
+    NoLabelledNeighbour,
+}
+
+/// Resolve the ladder for one question. Pure, and unit-tested: the order is
+/// the contract.
+pub(crate) fn resolve_tier(support: &HistorySupport, local_enabled: bool) -> Option<DecideTier> {
+    match support {
+        HistorySupport::Supported => Some(DecideTier::History),
+        HistorySupport::NotConfigured
+        | HistorySupport::Unusable(_)
+        | HistorySupport::NoLabelledNeighbour => {
+            if local_enabled {
+                Some(DecideTier::Local)
+            } else {
+                None // Hosted is not built; the caller answers with the error.
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DecideSettings — the node's ladder configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The node's decide-ladder configuration, resolved once at boot and held in
+/// [`AppState`] — the same seam `state.rerank` uses. The runtime switch is
+/// `XERJ_DECIDE_MODE` / `XERJ_DECIDE_MODEL_DIR` (the env half of
+/// `--decide-mode local`; the CLI flag lands with the xerj-server wiring),
+/// mirroring how `XERJ_EMBED_MODE` backs `--embed-mode`.
+#[derive(Clone, Default)]
+pub struct DecideSettings {
+    /// The local tier, when enabled and compiled in.
+    #[cfg(feature = "decide-local")]
+    local: Option<LocalTier>,
+}
+
+impl std::fmt::Debug for DecideSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Not the handle: whether the tier is armed. The model directory is
+        // in the logs and the error bodies, not needed on every Debug print.
+        f.debug_struct("DecideSettings")
+            .field("local", &self.local_available())
+            .finish()
+    }
+}
+
+/// The enabled local tier: a lazily-loaded decision head and the directory
+/// it loads from.
+#[cfg(feature = "decide-local")]
+#[derive(Clone)]
+pub struct LocalTier {
+    handle: xerj_ai::decide::DecideHandle,
+}
+
+impl DecideSettings {
+    /// The default node: history vote only, today's error contract.
+    pub fn history_only() -> Self {
+        Self::default()
+    }
+
+    /// A node with the local tier enabled, pointing at `model_dir`. Public
+    /// so tests can arm a node directly and the xerj-server `--decide-mode`
+    /// wiring can construct the same thing.
+    #[cfg(feature = "decide-local")]
+    pub fn local(model_dir: PathBuf) -> Self {
+        Self {
+            local: Some(LocalTier {
+                handle: xerj_ai::decide::DecideHandle::new(xerj_ai::decide::DecideConfig {
+                    model_dir,
+                }),
+            }),
+        }
+    }
+
+    /// Resolve the settings from raw strings — pure, and unit-tested.
+    /// Returns the settings plus an operator-facing warning when the request
+    /// could not be honoured as asked (unknown mode, missing directory,
+    /// feature not compiled in). A warning, never a panic: a boot that
+    /// dies inside state construction hides the message that explains it.
+    pub fn resolve(mode: &str, model_dir: Option<&str>) -> (Self, Option<String>) {
+        let mode = mode.trim().to_ascii_lowercase();
+        match mode.as_str() {
+            "" | "history" => (Self::history_only(), None),
+            "local" => Self::resolve_local(model_dir),
+            other => (
+                Self::history_only(),
+                Some(format!(
+                    "XERJ_DECIDE_MODE={other:?} is not a decide mode; use history or local"
+                )),
+            ),
+        }
+    }
+
+    #[cfg_attr(not(feature = "decide-local"), allow(unused_variables))]
+    fn resolve_local(model_dir: Option<&str>) -> (Self, Option<String>) {
+        #[cfg(feature = "decide-local")]
+        {
+            match model_dir.map(str::trim).filter(|d| !d.is_empty()) {
+                Some(dir) => {
+                    let path = PathBuf::from(dir);
+                    if path.is_dir() {
+                        (Self::local(path), None)
+                    } else {
+                        // Arm it anyway: the first request then fails loudly
+                        // naming the directory, which is the honest failure
+                        // for a mode the operator explicitly asked for.
+                        (
+                            Self::local(path),
+                            Some(format!(
+                                "XERJ_DECIDE_MODEL_DIR={dir:?} is not a directory; the \
+                                 local decide tier is armed and its first request will \
+                                 name this path until the model directory is in place"
+                            )),
+                        )
+                    }
+                }
+                None => (
+                    Self::history_only(),
+                    Some(
+                        "XERJ_DECIDE_MODE=local needs XERJ_DECIDE_MODEL_DIR naming the \
+                         directory holding config.json, tokenizer.json and \
+                         model.safetensors; staying on the history vote"
+                            .to_string(),
+                    ),
+                ),
+            }
+        }
+        #[cfg(not(feature = "decide-local"))]
+        {
+            (
+                Self::history_only(),
+                Some(
+                    "XERJ_DECIDE_MODE=local was requested but this binary was built \
+                     without the decide-local feature; rebuild with \
+                     `cargo build --release -p xerj-server --features decide-local`"
+                        .to_string(),
+                ),
+            )
+        }
+    }
+
+    /// Read [`Self::resolve`]'s inputs from the environment and log any
+    /// warning. Read exactly once, at [`AppState`] construction — the same
+    /// resolve-once discipline as `state.rerank`, so request paths never
+    /// race on process-wide env state.
+    pub fn from_env() -> Self {
+        let mode = std::env::var("XERJ_DECIDE_MODE").unwrap_or_default();
+        let dir = std::env::var("XERJ_DECIDE_MODEL_DIR").ok();
+        let (settings, warning) = Self::resolve(&mode, dir.as_deref());
+        if let Some(warning) = warning {
+            tracing::error!("{warning}");
+        }
+        settings
+    }
+
+    /// Whether the local tier can answer (compiled in, enabled, model not
+    /// yet necessarily loaded — the load is lazy and its failure surfaces on
+    /// the request that triggered it).
+    pub fn local_available(&self) -> bool {
+        #[cfg(feature = "decide-local")]
+        {
+            self.local.is_some()
+        }
+        #[cfg(not(feature = "decide-local"))]
+        {
+            false
+        }
+    }
+
+    /// The armed local tier, cloned, when compiled in and enabled. `None`
+    /// otherwise — including when the feature is off, so a call site needs no
+    /// cfg of its own to ask "is there a local tier on this node?" (Only the
+    /// code that USES the tier is feature-gated.)
+    #[cfg(feature = "decide-local")]
+    pub(crate) fn local_tier(&self) -> Option<LocalTier> {
+        self.local.clone()
+    }
+
+    #[cfg(not(feature = "decide-local"))]
+    pub(crate) fn local_tier(&self) -> Option<std::convert::Infallible> {
+        None
+    }
+}
+
+#[cfg(feature = "decide-local")]
+impl LocalTier {
+    /// The configured model directory, surfaced in error bodies.
+    pub(crate) fn model_dir(&self) -> &Path {
+        self.handle.model_dir()
+    }
+
+    /// Score one request per question. The head loads lazily on first use,
+    /// and the forward pass runs off the async executor
+    /// ([`xerj_ai::decide`]).
+    pub(crate) async fn score(
+        &self,
+        requests: Vec<xerj_ai::decide::ScoreRequest>,
+    ) -> anyhow::Result<Vec<Vec<f32>>> {
+        self.handle.score(requests).await
+    }
+}
+
+/// The candidate labels one question is judged against, in order — the local
+/// head's label vocabulary for that question. Pure, and always compiled: it
+/// is the shared definition of what "an answer" is for each kind, used by the
+/// tier check above and the local scoring pass below.
+fn labels_for(question: &Question, cfg: &DecisionsConfig) -> Vec<String> {
+    match &question.kind {
+        // A noul is scored as two competing statements — the positive label
+        // and its negation — so the answer is a comparison, never one
+        // unopposed score. `hypothesis("not spam")` reads exactly
+        // `negation_hypothesis("spam")`.
+        Kind::Noul => vec![
+            cfg.positive_label.clone(),
+            format!("not {}", cfg.positive_label),
+        ],
+        Kind::Choice { options } => options.clone(),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /v1/systemone
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -89,7 +382,8 @@ pub async fn systemone(
 ) -> axum::response::Response {
     let started = Instant::now();
     let cfg = state.config.decisions.clone();
-    if cfg.index.is_empty() {
+    let local_enabled = state.decide.local_available();
+    if cfg.index.is_empty() && !local_enabled {
         return not_configured();
     }
 
@@ -114,109 +408,263 @@ pub async fn systemone(
         }
     }
 
-    // One vote per question. Collected first so a no-support question fails
-    // the whole request — the wire has no per-question error field, and a
-    // half-answered judgement history would look like a ranking.
+    // One ladder resolution per question. Unsupported questions are
+    // collected first so a no-support question still fails the whole
+    // request when no tier can answer it — the wire has no per-question
+    // error field, and a half-answered judgement history would look like a
+    // ranking.
     let mut answers = serde_json::Map::new();
     let mut evidence = serde_json::Map::new();
     let mut unsupported: Vec<String> = Vec::new();
-    for (id, question) in &parsed {
-        let neighbours = match vote_neighbours(&state, &cfg, &question.vote_text).await {
-            Ok(n) => n,
-            Err(resp) => return resp, // index missing / search failure: surfaced, not guessed
+    // (index into `parsed`, the question's candidate labels). The labels are
+    // resolved per kind here so the local scoring pass below never re-parses
+    // the question.
+    let mut local_needed: Vec<(usize, Vec<String>)> = Vec::new();
+    for (i, (id, question)) in parsed.iter().enumerate() {
+        let support = if cfg.index.is_empty() {
+            Err(HistorySupport::NotConfigured)
+        } else {
+            vote_neighbours(&state, &cfg, &question.vote_text).await
         };
-        let labelled: Vec<(f64, &str)> = neighbours
-            .iter()
-            .map(|(w, label, _)| (*w, label.as_str()))
-            .collect();
-        if labelled.is_empty() {
-            unsupported.push(id.clone());
-            continue;
-        }
-        let total: f64 = labelled.iter().map(|(w, _)| *w).sum();
-        let mut weight_by_label: BTreeMap<&str, f64> = BTreeMap::new();
-        for (w, label) in &labelled {
-            *weight_by_label.entry(label).or_insert(0.0) += *w;
-        }
-        let share = |label: &str| weight_by_label.get(label).copied().unwrap_or(0.0) / total;
-        match &question.kind {
-            Kind::Noul => {
-                // Exactly the documented fields — clients parse answers
-                // strictly and break on extras.
-                answers.insert(
-                    id.clone(),
-                    json!({ "type": "noul", "noul": round6(share(&cfg.positive_label)) }),
-                );
-            }
-            Kind::Choice { options } => {
-                let criteria_total: f64 = options
+        match support {
+            Ok(neighbours) => {
+                let labelled: Vec<(f64, &str)> = neighbours
                     .iter()
-                    .map(|o| weight_by_label.get(o.as_str()).copied().unwrap_or(0.0))
-                    .sum();
-                if criteria_total <= 0.0 {
-                    unsupported.push(id.clone());
+                    .map(|(w, label, _)| (*w, label.as_str()))
+                    .collect();
+                // A choice also needs weight on at least one of ITS options;
+                // neighbours that share no label with the criteria cannot
+                // answer the question asked.
+                let criteria_ok = match &question.kind {
+                    Kind::Noul => true,
+                    Kind::Choice { options } => options.iter().any(|o| {
+                        labelled
+                            .iter()
+                            .any(|(w, label)| *label == o.as_str() && *w > 0.0)
+                    }),
+                };
+                if labelled.is_empty() || !criteria_ok {
+                    // Tier 2: the local head answers what the history
+                    // cannot; without it the documented errors stand.
+                    if resolve_tier(&HistorySupport::NoLabelledNeighbour, local_enabled).is_some() {
+                        local_needed.push((i, labels_for(question, &cfg)));
+                    } else {
+                        unsupported.push(id.clone());
+                    }
                     continue;
                 }
-                let mut probabilities = serde_json::Map::new();
-                for option in options {
-                    probabilities.insert(
-                        option.clone(),
-                        json!(round6(
-                            weight_by_label.get(option.as_str()).copied().unwrap_or(0.0) / total
-                        )),
-                    );
+                let total: f64 = labelled.iter().map(|(w, _)| *w).sum();
+                let mut weight_by_label: BTreeMap<&str, f64> = BTreeMap::new();
+                for (w, label) in &labelled {
+                    *weight_by_label.entry(label).or_insert(0.0) += *w;
                 }
-                let (winner, _) = options
+                let share =
+                    |label: &str| weight_by_label.get(label).copied().unwrap_or(0.0) / total;
+                match &question.kind {
+                    Kind::Noul => {
+                        // Exactly the documented fields — clients parse answers
+                        // strictly and break on extras.
+                        answers.insert(
+                            id.clone(),
+                            json!({ "type": "noul", "noul": round6(share(&cfg.positive_label)) }),
+                        );
+                    }
+                    Kind::Choice { options } => {
+                        let mut probabilities = serde_json::Map::new();
+                        for option in options {
+                            probabilities.insert(
+                                option.clone(),
+                                json!(round6(
+                                    weight_by_label.get(option.as_str()).copied().unwrap_or(0.0)
+                                        / total
+                                )),
+                            );
+                        }
+                        let (winner, _) = options
+                            .iter()
+                            .map(|o| (o, weight_by_label.get(o.as_str()).copied().unwrap_or(0.0)))
+                            .max_by(|(a, aw), (b, bw)| aw.partial_cmp(bw).unwrap().then(a.cmp(b)))
+                            .expect("non-empty options");
+                        answers.insert(
+                            id.clone(),
+                            json!({
+                                "type": "choice",
+                                "choice": winner,
+                                "confidence": round6(weight_by_label.get(winner.as_str()).copied().unwrap_or(0.0) / total),
+                                "probabilities": Value::Object(probabilities),
+                            }),
+                        );
+                    }
+                }
+                let (best_label, best_weight) = weight_by_label
                     .iter()
-                    .map(|o| (o, weight_by_label.get(o.as_str()).copied().unwrap_or(0.0)))
-                    .max_by(|(a, aw), (b, bw)| aw.partial_cmp(bw).unwrap().then(a.cmp(b)))
-                    .expect("non-empty options");
-                answers.insert(
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .expect("non-empty");
+                evidence.insert(
                     id.clone(),
                     json!({
-                        "type": "choice",
-                        "choice": winner,
-                        "confidence": round6(weight_by_label.get(winner.as_str()).copied().unwrap_or(0.0) / total),
-                        "probabilities": Value::Object(probabilities),
+                        "tier": "history",
+                        "label": best_label,
+                        "support": round6(best_weight / total),
+                        "neighbours": labelled.len(),
+                        "found": neighbours.len(),
                     }),
                 );
             }
+            Err(failure) => {
+                match resolve_tier(&failure, local_enabled) {
+                    Some(DecideTier::Local) => {
+                        local_needed.push((i, labels_for(question, &cfg)));
+                    }
+                    _ => {
+                        // Unusable is surfaced as the index error it is;
+                        // NotConfigured cannot occur (guarded above).
+                        let HistorySupport::Unusable(cause) = failure else {
+                            unreachable!("NotConfigured is guarded at the top of the handler");
+                        };
+                        return index_error(&cfg.index, &cause);
+                    }
+                }
+            }
         }
-        let (best_label, best_weight) = weight_by_label
-            .iter()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .expect("non-empty");
-        evidence.insert(
-            id.clone(),
-            json!({
-                "label": best_label,
-                "support": round6(best_weight / total),
-                "neighbours": labelled.len(),
-                "found": neighbours.len(),
-            }),
-        );
     }
     if !unsupported.is_empty() {
         return no_support(&unsupported, &cfg);
     }
 
+    // Tier 2: score every local-bound question in one batched pass. A model
+    // that cannot load is an honest failure — never a fabricated answer and
+    // never a silent fallthrough to the errors the operator switched away
+    // from.
+    #[cfg_attr(not(feature = "decide-local"), allow(unused_mut))]
+    let mut local_answered = 0usize;
+    #[cfg(feature = "decide-local")]
+    if !local_needed.is_empty() {
+        let Some(local) = state.decide.local_tier() else {
+            unreachable!("local_needed is only populated when the local tier is armed");
+        };
+        let requests: Vec<xerj_ai::decide::ScoreRequest> = local_needed
+            .iter()
+            .map(|(i, labels)| {
+                let question = &parsed[*i].1;
+                xerj_ai::decide::ScoreRequest {
+                    premise: question.vote_text.clone(),
+                    hypotheses: labels
+                        .iter()
+                        .map(|l| xerj_ai::decide::hypothesis(l))
+                        .collect(),
+                }
+            })
+            .collect();
+        let scores = match local.score(requests).await {
+            Ok(scores) => scores,
+            Err(e) => return local_unavailable(&e, local.model_dir()),
+        };
+        for ((i, labels), scores) in local_needed.iter().zip(scores) {
+            let (id, question) = &parsed[*i];
+            let mut by_label: serde_json::Map<String, Value> = serde_json::Map::new();
+            for (label, score) in labels.iter().zip(&scores) {
+                by_label.insert(label.clone(), json!(round6(*score as f64)));
+            }
+            match &question.kind {
+                Kind::Noul => {
+                    // The positive label is `labels[0]`; its negation is
+                    // `labels[1]`. The pair sums to 1, so the positive's
+                    // share is the noul.
+                    answers.insert(
+                        id.clone(),
+                        json!({ "type": "noul", "noul": round6(scores[0] as f64) }),
+                    );
+                }
+                Kind::Choice { options } => {
+                    // `labels_for` made labels == options, in order, so the
+                    // per-option score is a direct zip.
+                    let score_of = |option: &str| {
+                        scores[options
+                            .iter()
+                            .position(|o| o == option)
+                            .expect("every option is a scored label")]
+                    };
+                    let winner = options
+                        .iter()
+                        .max_by(|a, b| {
+                            score_of(a)
+                                .partial_cmp(&score_of(b))
+                                .unwrap()
+                                .then(a.cmp(b))
+                        })
+                        .expect("non-empty options");
+                    let mut probabilities = serde_json::Map::new();
+                    for option in options {
+                        probabilities
+                            .insert(option.clone(), json!(round6(score_of(option) as f64)));
+                    }
+                    answers.insert(
+                        id.clone(),
+                        json!({
+                            "type": "choice",
+                            "choice": winner,
+                            "confidence": round6(score_of(winner) as f64),
+                            "probabilities": Value::Object(probabilities),
+                        }),
+                    );
+                }
+            }
+            let (best_label, best_score) = labels
+                .iter()
+                .zip(&scores)
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .expect("labels are non-empty");
+            evidence.insert(
+                id.clone(),
+                json!({
+                    "tier": "local",
+                    "model": LOCAL_MODEL_ID,
+                    "label": best_label,
+                    "support": round6(*best_score as f64),
+                    "hypotheses": Value::Object(by_label),
+                }),
+            );
+            local_answered += 1;
+        }
+    }
+
+    let index_echo = if cfg.index.is_empty() {
+        LOCAL_MODEL_ID.to_string()
+    } else {
+        cfg.index.clone()
+    };
     state.metrics.record_query(
-        &cfg.index,
-        "systemone_vote",
+        &index_echo,
+        if local_answered > 0 {
+            "systemone_local"
+        } else {
+            "systemone_vote"
+        },
         started.elapsed().as_secs_f64(),
     );
+    let mut decisions = serde_json::Map::new();
+    decisions.insert("index".into(), json!(index_echo));
+    decisions.insert("k".into(), json!(cfg.k));
+    decisions.insert("model".into(), json!(MODEL_ID));
+    decisions.insert(
+        "requested_model".into(),
+        json!(body.get("model").and_then(Value::as_str).unwrap_or("")),
+    );
+    decisions.insert("evidence".into(), Value::Object(evidence));
+    decisions.insert(
+        "took_ms".into(),
+        json!(started.elapsed().as_millis() as u64),
+    );
+    if local_answered > 0 {
+        decisions.insert("local_model".into(), json!(LOCAL_MODEL_ID));
+        decisions.insert("local_answered".into(), json!(local_answered));
+    }
     Json(json!({
         "model": MODEL_ID,
         "answers": Value::Object(answers),
         "usage": { "input_tokens": 0, "output_tokens": 0 },
-        "decisions": {
-            "index": cfg.index,
-            "k": cfg.k,
-            "model": MODEL_ID,
-            "requested_model": body.get("model").and_then(Value::as_str).unwrap_or(""),
-            "evidence": Value::Object(evidence),
-            "took_ms": started.elapsed().as_millis() as u64,
-        }
+        "decisions": Value::Object(decisions),
     }))
     .into_response()
 }
@@ -225,37 +673,56 @@ pub async fn systemone(
 // GET /v1/models
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The official SDKs list models before calling. One truthful entry.
+/// The official SDKs list models before calling. Truthful entries only: the
+/// vote, and — when the local tier is armed — the local head, each under its
+/// own never-a-Jev-name id.
 pub async fn models(State(state): State<AppState>) -> axum::response::Response {
     let configured = !state.config.decisions.index.is_empty();
-    Json(json!({
-        "models": [{
-            "name": MODEL_ID,
-            "description": if configured {
-                "Weighted nearest-neighbour vote over the configured decisions index — local, no egress"
-            } else {
-                "Weighted nearest-neighbour vote over a labelled-history index (no [decisions] index configured: /v1/systemone answers 503)"
-            },
-            "release_date": "2026-09-20",
-        }]
-    }))
-    .into_response()
+    let local = state.decide.local_available();
+    let vote_description = if configured {
+        "Weighted nearest-neighbour vote over the configured decisions index — local, no egress"
+    } else if local {
+        "Weighted nearest-neighbour vote over a labelled-history index (no [decisions] index \
+         configured: /v1/systemone answers from the local decision head)"
+    } else {
+        "Weighted nearest-neighbour vote over a labelled-history index (no [decisions] index \
+         configured: /v1/systemone answers 503)"
+    };
+    let mut models = vec![json!({
+        "name": MODEL_ID,
+        "description": vote_description,
+        "release_date": "2026-09-20",
+    })];
+    if local {
+        models.push(json!({
+            "name": LOCAL_MODEL_ID,
+            "description": "Local zero-shot decision head (ModernBERT-class, candle) — answers \
+                            noul and choice with no history index; local files only, no egress",
+            "release_date": "2026-09-29",
+        }));
+    }
+    Json(json!({ "models": models })).into_response()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /_decide
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The audit surface: the same vote, naming its index per request, returning
-/// the neighbours it judged by, and abstaining instead of erroring.
+/// The audit surface: the same ladder as `/v1/systemone`, naming its index
+/// per request, returning the neighbours it judged by, and abstaining instead
+/// of erroring. The local tier is the one difference in kind: with it armed,
+/// `index` becomes optional — a caller with no labelled history at all still
+/// gets an answer, tier-tagged.
 pub async fn decide(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> axum::response::Response {
     let started = Instant::now();
     let defaults = &state.config.decisions;
+    let local = state.decide.local_tier();
     let index = match body.get("index").and_then(Value::as_str) {
         Some(i) if !i.trim().is_empty() => i.to_string(),
+        _ if local.is_some() => String::new(),
         _ => return unprocessable("`index` must name the judgement-history index"),
     };
     let question = match body.get("question").and_then(Value::as_str) {
@@ -281,11 +748,38 @@ pub async fn decide(
     cfg.label_field = defaults.label_field.clone();
     cfg.text_field = defaults.text_field.clone();
 
-    let neighbours =
-        match vote_neighbours(&state, &cfg, &clip(&question, MAX_VOTE_TEXT_CHARS)).await {
-            Ok(n) => n,
-            Err(resp) => return resp,
-        };
+    let neighbours = if cfg.index.is_empty() {
+        Err(HistorySupport::NotConfigured)
+    } else {
+        vote_neighbours(&state, &cfg, &clip(&question, MAX_VOTE_TEXT_CHARS)).await
+    };
+    // The ladder, /_decide-shaped: an empty or unreachable history hands the
+    // question to the local head; with no tier able to answer, the audit
+    // surface does what it always did — abstain on zero support, error on an
+    // unusable index.
+    let support = match &neighbours {
+        Ok(n) if n.is_empty() => HistorySupport::NoLabelledNeighbour,
+        Ok(_) => HistorySupport::Supported,
+        Err(failure) => failure.clone(),
+    };
+    if resolve_tier(&support, local.is_some()) == Some(DecideTier::Local) {
+        #[cfg(feature = "decide-local")]
+        {
+            let Some(local) = local.as_ref() else {
+                unreachable!("resolve_tier names Local only when the tier is armed");
+            };
+            return decide_local(&state, local, &question, &positive, &index, k, started).await;
+        }
+    }
+    let neighbours = match neighbours {
+        Ok(n) => n,
+        Err(failure) => {
+            let HistorySupport::Unusable(cause) = failure else {
+                unreachable!("NotConfigured implies the local tier, which answered above")
+            };
+            return index_error(&cfg.index, &cause);
+        }
+    };
     let total: f64 = neighbours.iter().map(|(w, _, _)| *w).sum();
     let mut weight_by_label: BTreeMap<String, f64> = BTreeMap::new();
     for (w, label, _) in &neighbours {
@@ -340,10 +834,71 @@ pub async fn decide(
         "confidence": round6(confidence),
         "abstain": abstain,
         "neighbours": neighbour_list,
+        "tier": "history",
         "took_ms": started.elapsed().as_millis() as u64,
     });
     if let Some(r) = reason {
         resp["reason"] = json!(r);
+    }
+    Json(resp).into_response()
+}
+
+/// The local tier's `/_decide` answer: the head's probabilities over the
+/// positive label and its negation, tier-tagged, abstaining by the same
+/// `decisions.min_confidence` rule the history vote uses. `neighbours` is
+/// empty — having none is exactly what tier 2 means here.
+#[cfg(feature = "decide-local")]
+async fn decide_local(
+    state: &AppState,
+    local: &LocalTier,
+    question: &str,
+    positive: &str,
+    index: &str,
+    k: usize,
+    started: Instant,
+) -> axum::response::Response {
+    let defaults = &state.config.decisions;
+    let labels = [positive.to_string(), format!("not {positive}")];
+    let requests = vec![xerj_ai::decide::ScoreRequest {
+        premise: clip(question, MAX_VOTE_TEXT_CHARS),
+        hypotheses: labels
+            .iter()
+            .map(|l| xerj_ai::decide::hypothesis(l))
+            .collect(),
+    }];
+    let scores = match local.score(requests).await {
+        Ok(scores) => scores,
+        Err(e) => return local_unavailable(&e, local.model_dir()),
+    };
+    let scores = &scores[0];
+    let (label, confidence) = if scores[0] >= scores[1] {
+        (labels[0].clone(), scores[0] as f64)
+    } else {
+        (labels[1].clone(), scores[1] as f64)
+    };
+    let abstain = confidence < defaults.min_confidence;
+    state.metrics.record_query(
+        LOCAL_MODEL_ID,
+        "decide_local",
+        started.elapsed().as_secs_f64(),
+    );
+    let mut resp = json!({
+        "index": index,
+        "k": k,
+        "positive_label": positive,
+        "label": label,
+        "confidence": round6(confidence),
+        "abstain": abstain,
+        "neighbours": [],
+        "tier": "local",
+        "model": LOCAL_MODEL_ID,
+        "took_ms": started.elapsed().as_millis() as u64,
+    });
+    if abstain {
+        resp["reason"] = json!(format!(
+            "confidence {:.3} below decisions.min_confidence {:.3}",
+            confidence, defaults.min_confidence
+        ));
     }
     Json(resp).into_response()
 }
@@ -486,15 +1041,17 @@ fn parse_question(id: &str, q: &Value, state_val: &Value) -> Result<Question, St
 }
 
 /// One weighted-neighbour record: (weight, label, hit). Unlabelled hits are
-/// dropped here — they carry no vote.
+/// dropped here — they carry no vote. An index that cannot be reached at all
+/// is [`HistorySupport::Unusable`] carrying the cause, so the decide ladder
+/// can offer the question to the next tier instead of pre-baking the error.
 async fn vote_neighbours(
     state: &AppState,
     cfg: &DecisionsConfig,
     text: &str,
-) -> Result<Vec<(f64, String, xerj_query::executor::Hit)>, axum::response::Response> {
+) -> Result<Vec<(f64, String, xerj_query::executor::Hit)>, HistorySupport> {
     let idx = match state.engine.get_index(&cfg.index) {
         Ok(i) => i,
-        Err(e) => return Err(index_error(&cfg.index, &e.to_string())),
+        Err(e) => return Err(HistorySupport::Unusable(e.to_string())),
     };
     // The text field is configuration, not a literal — build the match by
     // hand so the field name is data, not syntax.
@@ -508,14 +1065,14 @@ async fn vote_neighbours(
     let search_req = match parse_request(&query_body) {
         Ok(r) => r,
         Err(e) => {
-            return Err(unprocessable(&format!(
+            return Err(HistorySupport::Unusable(format!(
                 "internal query would not parse: {e}"
             )))
         }
     };
     let result = match idx.search(&search_req).await {
         Ok(r) => r,
-        Err(e) => return Err(index_error(&cfg.index, &e.to_string())),
+        Err(e) => return Err(HistorySupport::Unusable(e.to_string())),
     };
     let mut out = Vec::with_capacity(result.hits.len());
     for (i, hit) in result.hits.into_iter().enumerate() {
@@ -647,6 +1204,25 @@ fn index_error(index: &str, cause: &str) -> axum::response::Response {
     )
 }
 
+/// The local tier could not answer — the model directory is wrong or the
+/// weights will not load. 503, naming the directory and the env var, because
+/// the tier was explicitly armed: every request fails loudly until the
+/// operator fixes it, never with a fabricated probability and never by
+/// silently falling back to the errors the operator switched away from.
+#[cfg(feature = "decide-local")]
+fn local_unavailable(err: &anyhow::Error, model_dir: &Path) -> axum::response::Response {
+    error_body(
+        503,
+        "local_decide_unavailable",
+        format!(
+            "the local decision tier could not answer: {err:#}. The model directory is {} \
+             (set by XERJ_DECIDE_MODEL_DIR) and must hold config.json, tokenizer.json and \
+             model.safetensors",
+            model_dir.display()
+        ),
+    )
+}
+
 fn no_support(ids: &[String], cfg: &DecisionsConfig) -> axum::response::Response {
     error_body(
         422,
@@ -664,4 +1240,134 @@ fn no_support(ids: &[String], cfg: &DecisionsConfig) -> axum::response::Response
             cfg.k,
         ),
     )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests — the ladder's order is the contract, so it is unit-tested directly
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn no_support_classes() -> Vec<HistorySupport> {
+        vec![
+            HistorySupport::NotConfigured,
+            HistorySupport::Unusable("index gone".into()),
+            HistorySupport::NoLabelledNeighbour,
+        ]
+    }
+
+    /// Tier 1 wins wherever it has support — even with the local head armed,
+    /// it never overrides measured evidence. Every no-support class falls to
+    /// the local head when armed, and to nothing (the documented errors) when
+    /// not. The hosted tier is reserved: it never resolves.
+    #[test]
+    fn tier_order_is_history_then_local_then_the_documented_errors() {
+        for support in no_support_classes() {
+            assert_eq!(
+                resolve_tier(&support, false),
+                None,
+                "{support:?}: no local tier → the documented error stands"
+            );
+        }
+        assert_eq!(
+            resolve_tier(&HistorySupport::Supported, false),
+            Some(DecideTier::History)
+        );
+        // History wins even with the local tier armed.
+        assert_eq!(
+            resolve_tier(&HistorySupport::Supported, true),
+            Some(DecideTier::History)
+        );
+        for support in no_support_classes() {
+            assert_eq!(
+                resolve_tier(&support, true),
+                Some(DecideTier::Local),
+                "{support:?}: the local head answers what history cannot"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_defaults_to_history_only_without_a_warning() {
+        for mode in ["", "  ", "history", "History"] {
+            let (settings, warning) = DecideSettings::resolve(mode, None);
+            assert!(
+                !settings.local_available(),
+                "{mode:?}: default node is history-only"
+            );
+            assert!(warning.is_none(), "{mode:?}: {warning:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_mode_stays_on_history_and_names_the_valid_ones() {
+        let (settings, warning) = DecideSettings::resolve("hosted", None);
+        assert!(!settings.local_available());
+        let warning = warning.expect("warning");
+        assert!(warning.contains("hosted"), "{warning}");
+        assert!(warning.contains("local"), "{warning}");
+        assert!(warning.contains("history"), "{warning}");
+    }
+
+    #[cfg(feature = "decide-local")]
+    #[test]
+    fn local_mode_arms_only_with_a_model_dir() {
+        // The mode without a directory: history stays, the warning names the
+        // env var and the files it expects.
+        let (settings, warning) = DecideSettings::resolve("local", None);
+        assert!(!settings.local_available(), "no dir → not armed");
+        let warning = warning.expect("warning");
+        assert!(warning.contains("XERJ_DECIDE_MODEL_DIR"), "{warning}");
+        assert!(warning.contains("model.safetensors"), "{warning}");
+
+        // A real directory: armed, silent.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (settings, warning) = DecideSettings::resolve("local", dir.path().to_str());
+        assert!(settings.local_available(), "dir present → armed");
+        assert!(warning.is_none(), "{warning:?}");
+
+        // A missing directory: still armed — the operator asked for the tier,
+        // so its first request names the path rather than the node quietly
+        // pretending to be history-only.
+        let (settings, warning) =
+            DecideSettings::resolve("local", Some("/nonexistent/xerj-decide"));
+        assert!(
+            settings.local_available(),
+            "armed even when the dir is absent"
+        );
+        let warning = warning.expect("warning");
+        assert!(warning.contains("/nonexistent/xerj-decide"), "{warning}");
+    }
+
+    #[cfg(not(feature = "decide-local"))]
+    #[test]
+    fn local_mode_without_the_feature_warns_to_rebuild() {
+        let (settings, warning) = DecideSettings::resolve("local", Some("/any/dir"));
+        assert!(!settings.local_available());
+        let warning = warning.expect("warning");
+        assert!(warning.contains("decide-local"), "{warning}");
+    }
+
+    #[test]
+    fn labels_for_gives_a_noul_two_sides_and_a_choice_its_options() {
+        let cfg = DecisionsConfig::default();
+        let noul = Question {
+            vote_text: "payload".into(),
+            kind: Kind::Noul,
+        };
+        assert_eq!(
+            labels_for(&noul, &cfg),
+            vec!["true".to_string(), "not true".to_string()],
+            "a noul is a comparison, never one unopposed score"
+        );
+        let choice = Question {
+            vote_text: "payload".into(),
+            kind: Kind::Choice {
+                options: vec!["billing".into(), "tech".into()],
+            },
+        };
+        assert_eq!(labels_for(&choice, &cfg), vec!["billing", "tech"]);
+    }
 }

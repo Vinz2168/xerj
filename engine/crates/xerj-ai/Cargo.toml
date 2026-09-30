@@ -39,12 +39,18 @@ sha2 = { version = "0.10", optional = true }
 default = []
 # Bundles the neural BERT embedder. Adds ~candle + tokenizers to the build.
 neural = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:hf-hub", "dep:sha2"]
+# Local zero-shot decision head (issue #1057, tier 2 of the System One decide
+# ladder): a ModernBERT-class candle classifier loaded from a local model
+# directory. Deliberately does NOT include hf-hub — this tier has no download
+# path and adds nothing to the published egress inventory.
+decide-local = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
 # Experimental local ONNX backend; xerj-server exposes it only when the
 # feature is propagated and explicitly selected at runtime.
 onnx-experimental = ["dep:ort", "dep:tokenizers", "dep:sha2"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+tempfile = { workspace = true }
 
 [[example]]
 name = "onnx_experimental"
