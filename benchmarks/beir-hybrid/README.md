@@ -24,7 +24,7 @@ post-#940 deterministic path — every arm reproduced to the fourth decimal):
 |---|---|---|
 | beats hybrid 0.699 SciFact by more than the 3-run spread | hybrid+judge **0.5967** vs hybrid **0.7045** (spread 0.0000) — loses by 0.1077 | **FAIL** |
 | beats hybrid 0.345 NFCorpus by more than the 3-run spread | hybrid+judge **0.2924** vs hybrid **0.3419** (spread 0.0000) — loses by 0.0495 | **FAIL** |
-| FiQA ≥ 0.30 (hosted Jev rerank 0.3638) | bm25+judge **0.1650** (vs BM25 0.2382) | **FAIL** |
+| FiQA ≥ 0.30 (hosted Jev rerank 0.3638) | bm25+judge **0.1650** ×3 runs, spread 0.0000 (vs BM25 0.2382; re-run raw log `results/2026-09-30-judge-gate/fiqa-quality-bm30arms.log` — the first attempt aborted mid-arm, see manifest) | **FAIL** |
 | adds ≤ 40 ms p50 for top-30 on CPU | **+0.7 / +0.5 / +0.6 ms** added p50 (SciFact / NFCorpus / FiQA), node pinned to 8 cores; server-side `judged.took_ms` p50 0 ms | **PASS** |
 
 The always-compiled judge is a lexical scorer with no semantic signal, and it
