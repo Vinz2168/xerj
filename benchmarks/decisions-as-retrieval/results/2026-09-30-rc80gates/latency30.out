@@ -1,0 +1,6 @@
+loadavg before: 2.21 10.24 17.20 3/4610 1339833
+decide_noul          cold    40.1ms  p50     8.4ms  p99    14.2ms  mean     8.9ms  — POST /_decide, no index, 30 distinct SMS texts (2 hypotheses)
+systemone_noul       cold    13.3ms  p50     8.4ms  p99    14.2ms  mean     9.0ms  — POST /v1/systemone, one noul (2 hypotheses), 30 distinct texts
+systemone_choice_5   cold    28.7ms  p50    20.0ms  p99    32.3ms  mean    20.4ms  — POST /v1/systemone, 5-option choice, 30 distinct texts
+systemone_choice_77  cold   509.7ms  p50   282.6ms  p99   549.0ms  mean   317.0ms  — POST /v1/systemone, 77-option choice (77 hypotheses), 30 distinct texts
+loadavg after: 3.09 10.03 17.02 4/4606 1339836

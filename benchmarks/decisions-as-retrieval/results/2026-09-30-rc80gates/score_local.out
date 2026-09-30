@@ -1,0 +1,25 @@
+  sms 500/1574 14.3 ms/item
+  sms 1000/1574 14.4 ms/item
+  sms 1500/1574 14.5 ms/item
+  b77 250/3080 262.8 ms/item
+  b77 500/3080 281.1 ms/item
+  b77 750/3080 313.5 ms/item
+  b77 1000/3080 329.7 ms/item
+  b77 1250/3080 338.2 ms/item
+  b77 1500/3080 344.5 ms/item
+  b77 1750/3080 354.2 ms/item
+  b77 2000/3080 363.1 ms/item
+  b77 2250/3080 368.0 ms/item
+  b77 2500/3080 370.6 ms/item
+  b77 2750/3080 374.0 ms/item
+  b77 3000/3080 376.2 ms/item
+  agnews 1000/7600 70.9 ms/item
+  agnews 2000/7600 60.5 ms/item
+  agnews 3000/7600 57.2 ms/item
+  agnews 4000/7600 55.4 ms/item
+  agnews 5000/7600 54.2 ms/item
+  agnews 6000/7600 53.6 ms/item
+  agnews 7000/7600 53.2 ms/item
+{"set": "SMS held-out noul (1574 rows)", "n": 1574, "accuracy": 0.9193, "ECE": 0.287, "conf>=0.8 share": 0.1811, "acc@>=0.8": 0.8035, "ms/item": 14.6, "ECE_noul_p_raw": 0.3439, "spam_P": 0.643, "spam_R": 0.982, "spam_F1": 0.778}
+{"set": "Banking77 test choice (77-way, 3080 rows)", "n": 3080, "accuracy": 0.1185, "ECE": 0.0717, "conf>=0.8 share": 0.0, "acc@>=0.8": 0.0, "ms/item": 376.1}
+{"set": "AG News test choice (4-way, 7600 rows \u2014 never trained)", "n": 7600, "accuracy": 0.2599, "ECE": 0.06, "conf>=0.8 share": 0.0, "acc@>=0.8": 0.0, "ms/item": 52.8}

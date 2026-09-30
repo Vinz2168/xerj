@@ -1,0 +1,34 @@
+{
+ "ts": "2026-09-30T18:41:47",
+ "n": 30,
+ "results": {
+  "decide_noul": {
+   "desc": "POST /_decide, no index, 30 distinct SMS texts (2 hypotheses)",
+   "cold_ms": 40.1,
+   "p50_ms": 8.4,
+   "p99_ms": 14.2,
+   "mean_ms": 8.9
+  },
+  "systemone_noul": {
+   "desc": "POST /v1/systemone, one noul (2 hypotheses), 30 distinct texts",
+   "cold_ms": 13.3,
+   "p50_ms": 8.4,
+   "p99_ms": 14.2,
+   "mean_ms": 9.0
+  },
+  "systemone_choice_5": {
+   "desc": "POST /v1/systemone, 5-option choice, 30 distinct texts",
+   "cold_ms": 28.7,
+   "p50_ms": 20.0,
+   "p99_ms": 32.3,
+   "mean_ms": 20.4
+  },
+  "systemone_choice_77": {
+   "desc": "POST /v1/systemone, 77-option choice (77 hypotheses), 30 distinct texts",
+   "cold_ms": 509.7,
+   "p50_ms": 282.6,
+   "p99_ms": 549.0,
+   "mean_ms": 317.0
+  }
+ }
+}

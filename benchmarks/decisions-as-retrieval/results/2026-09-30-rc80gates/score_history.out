@@ -1,0 +1,10 @@
+  indexed sms4000: 4000 docs
+  indexed b77: 10003 docs
+  b77 500/3080
+  b77 1000/3080
+  b77 1500/3080
+  b77 2000/3080
+  b77 2500/3080
+  b77 3000/3080
+{"set": "SMS held-out \u2014 tier-1 history vote (/_decide, k=10, 4000 docs)", "n": 1574, "accuracy": 0.9848, "ECE": 0.0129, "conf>=0.8 share": 0.9638, "acc@>=0.8": 0.9914, "ms/item": 3.9, "ECE_noul_p_raw": 0.0149, "spam_P": 0.976, "spam_R": 0.916, "spam_F1": 0.945}
+{"set": "Banking77 test \u2014 tier-1 history vote (/v1/systemone, k=10, 10003 docs)", "n": 3080, "accuracy": 0.8289, "ECE": 0.0808, "conf>=0.8 share": 0.5143, "acc@>=0.8": 0.9855, "ms/item": 3.5}
