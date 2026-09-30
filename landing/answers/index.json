@@ -98,8 +98,8 @@
       "canonical_url": "https://xerj.org/answers/does-xerj-support-s3-alerting-plugins",
       "markdown_url": "https://xerj.org/answers/does-xerj-support-s3-alerting-plugins.md",
       "cluster": "Capabilities and limits",
-      "updated": "2026-09-26",
-      "summary": "Since v1.0.0-rc.77 the index CAN live in an S3-compatible bucket (storage.backend = \"s3\": one immutable bundle object per segment family plus snapshot.json). _watcher never runs a watch; plugins are built-in."
+      "updated": "2026-09-30",
+      "summary": "Since v1.0.0-rc.77 the index CAN live in an S3-compatible bucket; since rc.78 record packs are real; since rc.80 _watcher evaluates exactly one watch shape and refuses every other with 501. Plugins stay built-in."
     },
     {
       "title": "Audit a PHP codebase with an index, not grep",
