@@ -444,6 +444,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GET _settings` does not echo the analysis block and `_analyze` shows the
   standard path even when the stemmer is declared and provably applied by
   search.
+- **Measured the #1060 local-judge gate on the rc.80 release binary: the
+  lexical judge LOSES, and the number ships (PR
+  [#1090](https://github.com/xerj-org/xerj/pull/1090)).** New BEIR harness
+  `benchmarks/beir-hybrid/judge_gate.py` (same qrels/nDCG@10 scoring as
+  `eval.py`, 3 runs per arm, shuffled order, size-30 pages, judge carrying no
+  `min_p` — reorder-only) on `xerj v1.0.0-rc.78` with the neural embedder,
+  node pinned to 8 cores: hybrid+judge **0.5967** SciFact vs hybrid **0.7045**
+  (−0.1077), **0.2924** NFCorpus vs **0.3419** (−0.0495), bm25+judge
+  **0.1650** FiQA against the 0.30 bar (hosted Jev rerank: 0.3638) — the
+  quality gate FAILS on all three rows and the stage stays opt-in with no
+  quality claim, per its own "loses, does not ship" rule; nothing was tuned
+  or re-rolled. The cost AC passes with room: **+0.7 / +0.5 / +0.6 ms** added
+  p50 for a judged top-30 page (server-side `judged.took_ms` p50 0 ms). Every
+  arm reproduced to the fourth decimal across runs AND across a node restart
+  (post-#940 determinism), and the BM25 arms reproduce the 2026-09-18
+  baselines bit-for-bit (0.6572 / 0.3016 / 0.2382), validating the harness.
+  Also recorded: hybrid on the 57,638-doc FiQA index costs 13-26 s/query
+  (14.7-15.1 s server-side), and an informational `min_p: 0.5` arm empties
+  274 of 300 SciFact pages — the lexical scale is not thresholdable at round
+  numbers. Raw logs and sha256s:
+  `benchmarks/beir-hybrid/results/2026-09-30-judge-gate/`.
 - Rolled `ROADMAP.md`'s tracker state after the issue tracker was emptied on
   2026-09-29, the day of the rc.78 cut: the four issues still open after the
   cut — #1038 and #1030 (their shipped halves are the rc.78 record below) and
