@@ -7,16 +7,18 @@
 //! ## Design philosophy
 //!
 //! Unlike Elasticsearch's 3000+ configuration knobs, xerj deliberately exposes
-//! **129 settings**, each meaningful and production-tested. Every default
+//! **130 settings**, each meaningful and production-tested. Every default
 //! is chosen so that a fresh deployment with zero configuration changes performs
 //! well for the majority of workloads.
 //!
 //! ## Modules
 //!
-//! - [`config`]  — TOML-based configuration (129 settings)
+//! - [`config`]  — TOML-based configuration (130 settings)
 //! - [`feedback`] — the bug/UX-report invitation shared by every `--help`
 //! - [`error`]   — Unified error type ([`XerjError`])
 //! - [`types`]   — Core domain types (documents, fields, IDs)
+//! - [`calibration`] — probability calibration for the decide surface:
+//!   isotonic (PAVA) and temperature (Platt) scaling, reliability curves, ECE
 //! - [`field_coercion`] — ES-faithful ingest-time coercion/enforcement for
 //!   numeric and boolean fields (the one predicate every write path shares)
 //! - [`schema`]  — Index schema management and mapping evolution
@@ -28,6 +30,7 @@
 //! - [`xccode`]  — the reference-coding semantics shared by `xerj code`,
 //!   `xerj corpus`, and the `xerj_code_search` MCP tool (issue #977)
 
+pub mod calibration;
 pub mod config;
 pub mod error;
 pub mod feedback;

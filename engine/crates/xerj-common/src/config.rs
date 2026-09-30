@@ -1,6 +1,6 @@
 //! xerj configuration system.
 //!
-//! Configuration is intentionally minimal: **129 settings** versus
+//! Configuration is intentionally minimal: **130 settings** versus
 //! Elasticsearch's 3000+. Every option is named, documented, and has a sensible
 //! production-ready default. The format is TOML, loaded from a single file.
 //!
@@ -39,6 +39,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use crate::calibration::CalibrationMethod;
 use crate::error::XerjError;
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -98,12 +99,12 @@ pub struct Config {
     /// Second-stage reranking provider — 3 settings. Inert until a key is set.
     pub rerank: RerankProviderConfig,
     /// Typed decisions answered from a labelled-history index by
-    /// nearest-neighbour vote — 7 settings. Inert until `decisions.index`
+    /// nearest-neighbour vote — 8 settings. Inert until `decisions.index`
     /// names an index that exists.
     pub decisions: DecisionsConfig,
 }
 
-// 23 sub-configs, 129 leaf settings in total. Do not maintain that sum by hand
+// 23 sub-configs, 130 leaf settings in total. Do not maintain that sum by hand
 // — `journey_zero_config` in xerj-engine/tests/product_experience.rs counts a
 // serialised `Config::default()` and fails if this comment and the module
 // header stop matching. `Default` is derived: every field is a sub-config that
@@ -484,7 +485,7 @@ impl Config {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Sub-configs  (129 user-facing settings total; counted by
+// Sub-configs  (130 user-facing settings total; counted by
 // `journey_zero_config`, not by hand)
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -2342,7 +2343,7 @@ impl RerankProviderConfig {
 /// weighted nearest-neighbour vote over a labelled-history index — the
 /// retrieval analogue of a judge model, with the evidence staying on the node.
 ///
-/// **6 settings.**
+/// **8 settings.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DecisionsConfig {
@@ -2368,6 +2369,12 @@ pub struct DecisionsConfig {
     /// (issue #1061). 2.0 — the issue's ≥ 2x floor for corrections — is the
     /// default; 1.0 makes corrections count exactly like any other example.
     pub human_weight: f64,
+    /// Probability calibration for the decide surface (issue #1063): fit a
+    /// correction from raw probabilities to calibrated ones on a held-out
+    /// 20 % of the labelled history, then ship `p_cal` beside every `p_raw`.
+    /// `isotonic` (PAVA) or `temperature` (one scalar on the log-odds);
+    /// `none` (the default) ships `p_raw` alone and no `p_cal` at all.
+    pub calibration: CalibrationMethod,
 }
 
 impl Default for DecisionsConfig {
@@ -2380,6 +2387,7 @@ impl Default for DecisionsConfig {
             positive_label: "true".to_string(),
             min_confidence: 0.0,
             human_weight: 2.0,
+            calibration: CalibrationMethod::None,
         }
     }
 }
@@ -3190,7 +3198,7 @@ mod tests {
         ("lifecycle", 1),
         ("wal_tap", 10),
         ("rerank", 3),
-        ("decisions", 7),
+        ("decisions", 8),
     ];
 
     /// Count the settings by *counting them*.
@@ -3233,7 +3241,7 @@ mod tests {
             "the section table must sum to the whole config"
         );
         assert_eq!(
-            total, 129,
+            total, 130,
             "the total settings count changed. It is quoted in this module's \
              header, in xerj-common/src/lib.rs, in engine/README.md, in \
              xerj.default.toml and in EXPECTED_SETTINGS in \
@@ -3260,6 +3268,38 @@ mod tests {
         .unwrap();
         assert!(!cfg.bind_address_is_loopback(), "0.0.0.0 is not loopback");
         assert!(cfg.grpc_h2c_exposed_off_loopback());
+    }
+
+    /// `decisions.calibration` parses the issue's two methods and refuses a
+    /// typo by naming the valid ones — the same refusal shape as every other
+    /// enum setting, so an operator hears about `calibration = "isotonic2"`
+    /// at boot, not from a response that silently shipped no p_cal.
+    #[test]
+    fn decisions_calibration_parses_the_two_methods_and_refuses_a_typo() {
+        for (value, expected) in [
+            ("isotonic", CalibrationMethod::Isotonic),
+            ("temperature", CalibrationMethod::Temperature),
+        ] {
+            let cfg = Config::from_toml_str(&format!(
+                "[decisions]\nindex = \"judgements\"\ncalibration = \"{value}\"\n"
+            ))
+            .expect("parses");
+            assert_eq!(cfg.decisions.calibration, expected);
+        }
+        // The default is none: an uncalibrated node, not a hidden isotonic.
+        assert_eq!(
+            DecisionsConfig::default().calibration,
+            CalibrationMethod::None
+        );
+        let err = Config::from_toml_str(
+            "[decisions]\nindex = \"judgements\"\ncalibration = \"isotonic2\"\n",
+        )
+        .expect_err("typo must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("calibration") && msg.contains("isotonic"),
+            "the error names the field and the valid values: {msg}"
+        );
     }
 
     #[test]

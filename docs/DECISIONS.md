@@ -119,6 +119,65 @@ number or the config refuses to boot (0 would erase a correction from the
 vote, a negative value would invert it). The boosted weight is the weight the
 vote used, so `/_decide` shows it in each neighbour's `weight`.
 
+## Calibration: `p_cal` beside every `p_raw` (#1063)
+
+A ladder probability ranks before it odds. On the FiQA rerank baseline a
+hosted noul of 0.93 meant relevance 34 % of the time — ECE 0.3109
+([benchmarks/decisions-calibration](../benchmarks/decisions-calibration)).
+With `[decisions] calibration` set, the node fits a correction on its own
+recorded outcomes and ships the calibrated probability BESIDE the raw one:
+
+- **`isotonic`** — non-decreasing regression of the empirical positive rate
+  on the raw probability (PAVA), interpolated between knots. The method that
+  meets the FiQA gate: held-out ECE 0.0330 against raw 0.3831 on the same
+  bins (gate ≤ 0.10).
+- **`temperature`** — one scalar on the log-odds, `p' = σ(logit(p)/T)`,
+  fitted on negative log-likelihood. Rank-preserving by construction, and
+  the right tool on a thin history; on the FiQA-shaped curve it barely moves
+  (held-out 0.3903) because one scalar cannot map 0.93 → 0.34 while keeping
+  0.05 → 0.0002.
+
+Both fit on a **deterministic held-out fifth** of the outcome pairs
+(stable-sorted, every fifth held out — no RNG, no clock, so the same history
+produces bit-identical `p_cal`), and the fit is cached per index and
+refreshed at most once a minute; `GET /_decide/_calibration` always refits.
+
+**Recording an outcome — the fit's data contract.** A history document is a
+calibration pair when it carries the truth `label` (the configured
+`label_field`), the `p` that was served **for that document's own label**,
+and **no `source` field**:
+
+```sh
+curl -X PUT localhost:9200/judgements/_doc/outcome-42 -H 'content-type: application/json' \
+  -d '{"text": "the message that was decided", "label": "false", "p": 0.9}'
+```
+
+That reads as "the system said 0.9 for its own label; the truth was `false`"
+— the positive-label probability 1 − 0.9 against outcome 0. A document with
+`source` is a flywheel answer, i.e. the model's own prediction, and is
+excluded: a fit on predictions would learn the model is right by
+construction. `human: true` corrections carrying the `p` they correct are the
+best pairs there are — truth plus the number that was wrong. Ten labelled
+pairs minimum, or the node says so instead of extrapolating.
+
+**The honesty rules, all three on the wire.** No calibration configured → no
+`p_cal` field at all (`calibration: {"configured": "none"}` on `/_decide`).
+Configured but unfitted → `p_cal: null` with the reason published in the
+`calibration` block beside it. Fitted → `p_cal` is the fit's value, and it is
+never a copy of `p_raw` pretending to be calibrated. Whenever `p_cal`
+exists, the `calibration` block rides with it — method, scope, the fit's ECE
+raw and calibrated, and what it was fitted on — so **no probability ships
+without an ECE beside it**. `p_raw` is always the honest raw share;
+`confidence` keeps its raw meaning and the abstain gate keeps applying to it
+(calibration changes what the number means, not the verdict).
+
+**Scope.** The calibrated quantity is the positive label's probability — the
+noul's answer, `/_decide`'s `p_raw`. Per-option `choice` shares are a
+different quantity and are not calibrated by this fit (the block says
+`"scope": "noul"`). The fit applies to every tier's noul through one seam —
+history vote, local head, and (when that tier is built) a hosted passthrough
+score — with no usable fit meaning "say so", never `p_cal = p_raw`.
+
 ## Set it up
 
 ```toml
@@ -131,6 +190,7 @@ text_field     = "text"
 positive_label = "true"         # the label whose share a noul answers
 min_confidence = 0.0            # /_decide abstains below this
 human_weight   = 2.0            # vote-weight multiplier for history docs carrying human: true
+calibration    = "none"         # none | isotonic | temperature — p_cal beside every p_raw (#1063)
 ```
 
 The history index is ordinary documents: one per example, with the text the
@@ -222,11 +282,13 @@ tier is armed), `question` (required), `k` (default the configured 10,
 clamped 1..100), `positive_label` (default the configured one). The response
 returns the label, its confidence, the verdict (`abstain` below
 `decisions.min_confidence`, or when no labelled neighbour exists), the **tier**
-and **source** that answered (the same tier name under both fields), and the
-**neighbours** — each with `_id`, `label`, `_score` (the engine's own BM25
-score), `weight` (1/rank, × `decisions.human_weight` for a `human: true`
-document), and the text — so every answer can be checked against the evidence
-that produced it. A local-tier answer has no neighbours (having none is what
+and **source** that answered (the same tier name under both fields), the
+**`p_raw`** — the positive label's vote share, the quantity a noul answers,
+not the winner's confidence — with **`p_cal`** beside it when calibration is
+configured (see above), and the **neighbours** — each with `_id`, `label`,
+`_score` (the engine's own BM25 score), `weight` (1/rank, ×
+`decisions.human_weight` for a `human: true` document), and the text — so
+every answer can be checked against the evidence that produced it. A local-tier answer has no neighbours (having none is what
 tier 2 means) and carries `tier: "local"`, `source: "local"`,
 `model: "xerj-decide-local-1"`; when it did not abstain and the request named
 an index, it is cached into that index (the flywheel above).
@@ -236,6 +298,27 @@ curl -s localhost:9200/_decide -H 'content-type: application/json' \
   -d '{"index":"judgements","question":"refund my subscription","k":5}'
 ```
 
+## `GET /_decide/_calibration`
+
+The publication (#1063): the reliability curve of a labelled history — every
+occupied bin's `[lo, hi)`, count, mean probability and empirical positive
+rate — for the raw probabilities and (when fitted) the calibrated ones, the
+ECE of each, the fit's parameters (an isotonic fit's knots, or the
+temperature), the pair counts (fitted on / held out / total), and the date
+range of the fitted documents. Always refits, so it doubles as the
+operator's refresh; the fit it publishes becomes the cached fit every decide
+request reads.
+
+```sh
+curl -s 'localhost:9200/_decide/_calibration?index=judgements'
+```
+
+`?index=` names the history (default: the configured `[decisions] index`; a
+request naming nothing on a node that configures nothing is a 422, not an
+empty curve). The raw curve and raw ECE publish even when calibration is not
+configured — the reliability of the raw probabilities is audit information
+in its own right — with a `reason` naming the setting that would fit them.
+
 ## Numbers, and only the ones we measured
 
 Measured, ours, reproducible (raw JSON and runners in the results dirs):
@@ -243,6 +326,12 @@ Banking77 77-way intent 0.933 accuracy / ECE 0.012 (86.9% of traffic clears
 confidence 0.8 at 0.979 accuracy); SMS spam 0.983 accuracy / 0.944 F1 under a
 millisecond on BM25 alone; both in
 [benchmarks/decisions-as-retrieval](../benchmarks/decisions-as-retrieval).
+The calibration gate: isotonic held-out ECE 0.0330 against raw 0.3831 on the
+FiQA rerank baseline's own curve (published raw 0.3109 reproduced exactly;
+gate ≤ 0.10), measured at bin granularity from the retained aggregates —
+the pair-level re-run needs the model's raw scores and is the rc.80 final
+form — in
+[benchmarks/decisions-calibration](../benchmarks/decisions-calibration).
 The wire gate transcript is in
 [benchmarks/systemone-gate](../benchmarks/systemone-gate). A third, smaller
 run measures `/_decide` itself on an email-labelling history — 4 labels,
