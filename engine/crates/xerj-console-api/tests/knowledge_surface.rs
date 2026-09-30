@@ -196,7 +196,9 @@ async fn boot_with(embed_semantic: bool) -> TestApp {
     engine
         .create_index("ax-mail", mail_schema)
         .expect("create ax-mail");
-    engine.get_index("ax-mail").unwrap()
+    engine
+        .get_index("ax-mail")
+        .unwrap()
         .index_documents_batched(vec![
             (Some("m1".into()), json!({"body": "term sheet attached"})),
             (Some("m2".into()), json!({"body": "lunch on friday"})),
@@ -206,7 +208,9 @@ async fn boot_with(embed_semantic: bool) -> TestApp {
     engine
         .create_index("ax-pdfs", schema(&[("text", FieldType::Text)]))
         .expect("create ax-pdfs");
-    engine.get_index("ax-pdfs").unwrap()
+    engine
+        .get_index("ax-pdfs")
+        .unwrap()
         .index_documents_batched(vec![(
             Some("p1".into()),
             json!({"text": "invoice 2026-09"}),
@@ -218,7 +222,9 @@ async fn boot_with(embed_semantic: bool) -> TestApp {
     engine
         .create_index("weblogs", schema(&[("message", FieldType::Text)]))
         .expect("create weblogs");
-    engine.get_index("weblogs").unwrap()
+    engine
+        .get_index("weblogs")
+        .unwrap()
         .index_documents_batched(vec![(
             Some("w1".into()),
             json!({"message": "timeout on shard 2"}),
@@ -369,7 +375,12 @@ async fn get(app: &TestApp, cookie: Option<&str>) -> (axum::http::StatusCode, Va
     if let Some(c) = cookie {
         b = b.header("cookie", c);
     }
-    let resp = app.router.clone().oneshot(b.body(Body::empty()).unwrap()).await.unwrap();
+    let resp = app
+        .router
+        .clone()
+        .oneshot(b.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let v: Value = serde_json::from_slice(&bytes).expect("json body");
@@ -412,7 +423,11 @@ async fn the_payload_carries_the_catalogs_own_facts() {
     // …and the LIVE doc counts are joined on (3 real docs, not the catalog's 91).
     let datasets = d["datasets"].as_array().unwrap();
     assert_eq!(datasets.len(), 2);
-    assert_eq!(datasets[0]["index"].as_str(), Some("ax-mail"), "largest first");
+    assert_eq!(
+        datasets[0]["index"].as_str(),
+        Some("ax-mail"),
+        "largest first"
+    );
     assert_eq!(datasets[0]["live_docs"].as_u64(), Some(3));
     assert_eq!(datasets[0]["records"].as_u64(), Some(91));
     assert_eq!(datasets[1]["index"].as_str(), Some("ax-pdfs"));
@@ -439,7 +454,11 @@ async fn the_payload_carries_the_catalogs_own_facts() {
         Some("sam@acme.example")
     );
     let body = by_name("body");
-    assert_eq!(body["semantic"].as_bool(), Some(true), "the semantic_text field is flagged");
+    assert_eq!(
+        body["semantic"].as_bool(),
+        Some(true),
+        "the semantic_text field is flagged"
+    );
     assert_eq!(body["type"].as_str(), Some("semantic_text"));
     // the spec's measured average value length round-trips — the SPA ranks
     // the card's fields by coverage × avg_len, so the corpus's DOMINANT
@@ -486,12 +505,16 @@ async fn the_capability_strip_is_grounded_in_facts() {
     let d = data(&v);
     let caps = d["capabilities"].as_array().unwrap();
     let ids: Vec<&str> = caps.iter().filter_map(|c| c["id"].as_str()).collect();
-    for must in ["search", "read", "graph", "ask", "map", "decide", "watch", "share"] {
+    for must in [
+        "search", "read", "graph", "ask", "map", "decide", "watch", "share",
+    ] {
         assert!(ids.contains(&must), "missing capability {must}: {ids:?}");
     }
     // every entry names its real surface
     for c in caps {
-        let named = ["href", "command", "endpoint"].iter().any(|k| c[*k].is_string());
+        let named = ["href", "command", "endpoint"]
+            .iter()
+            .any(|k| c[*k].is_string());
         assert!(named, "capability without a real surface: {c:#?}");
     }
     // a console route is an in-app hash route; nothing else can be an href
@@ -517,7 +540,10 @@ async fn the_capability_strip_is_grounded_in_facts() {
         .iter()
         .filter_map(|c| c["id"].as_str())
         .collect();
-    assert!(!vids.contains(&"graph"), "viewer must not see the graph capability");
+    assert!(
+        !vids.contains(&"graph"),
+        "viewer must not see the graph capability"
+    );
 }
 
 /// #1099 — the semantic capability is the NODE's own posture, computed from
@@ -537,22 +563,37 @@ async fn the_semantic_capability_is_the_nodes_own_facts_with_no_invented_count()
     // dims (from the mapping here), similarity, and the embedder's label
     let blurb = sem["blurb"].as_str().unwrap();
     assert!(blurb.contains("`body`"), "names the elected field: {blurb}");
-    assert!(blurb.contains("`body_vector`"), "names the companion: {blurb}");
+    assert!(
+        blurb.contains("`body_vector`"),
+        "names the companion: {blurb}"
+    );
     assert!(blurb.contains("384-D"), "dims from the mapping: {blurb}");
-    assert!(blurb.contains("cosine"), "similarity from the mapping: {blurb}");
+    assert!(
+        blurb.contains("cosine"),
+        "similarity from the mapping: {blurb}"
+    );
     assert!(
         blurb.contains("lexical feature-hash (built-in, 384-dim, non-neural)"),
         "the embedder's own honesty label, verbatim: {blurb}"
     );
-    assert!(blurb.contains("NOT neural"), "the lexical case says so plainly: {blurb}");
-    assert!(blurb.contains("--embed-mode neural"), "and how to get neural: {blurb}");
+    assert!(
+        blurb.contains("NOT neural"),
+        "the lexical case says so plainly: {blurb}"
+    );
+    assert!(
+        blurb.contains("--embed-mode neural"),
+        "and how to get neural: {blurb}"
+    );
     // the honest-claims line: no vector count and no READY claim — the node
     // exposes no per-field vector count on any stats surface, so none may
     // appear here, whatever the client does with the payload
     assert!(!blurb.contains("VECTOR"), "no vector count: {blurb}");
     assert!(!blurb.contains("READY"), "no readiness claim: {blurb}");
     for key in sem.as_object().unwrap().keys() {
-        assert!(!key.contains("count"), "no count key may ride the entry: {key}");
+        assert!(
+            !key.contains("count"),
+            "no count key may ride the entry: {key}"
+        );
     }
     // it is not brain-gated — it describes the corpus, not the operator's role
     let (_, vv) = get(&app, Some(&app.viewer_cookie)).await;
@@ -561,7 +602,10 @@ async fn the_semantic_capability_is_the_nodes_own_facts_with_no_invented_count()
         .unwrap()
         .iter()
         .any(|c| c["id"].as_str() == Some("semantic"));
-    assert!(viewer_has, "the viewer sees the node's semantic posture too");
+    assert!(
+        viewer_has,
+        "the viewer sees the node's semantic posture too"
+    );
 }
 
 /// #1099's other shape — the catalog's last run ELECTED a semantic field,
@@ -580,7 +624,10 @@ async fn an_elected_semantic_field_the_index_does_not_carry_is_stated_plainly() 
     let blurb = sem["blurb"].as_str().unwrap();
     assert!(blurb.contains("`body`"), "names the elected field: {blurb}");
     assert!(blurb.contains("no embedding"), "states the gap: {blurb}");
-    assert!(blurb.contains("no vectors to match"), "states it in those words: {blurb}");
+    assert!(
+        blurb.contains("no vectors to match"),
+        "states it in those words: {blurb}"
+    );
     assert!(!blurb.contains("READY"), "no readiness claim: {blurb}");
     assert!(!blurb.contains("VECTOR"), "no vector count: {blurb}");
 }
@@ -603,6 +650,9 @@ async fn nothing_indexed_is_the_empty_state_not_an_error() {
         .collect();
     assert!(!ids.contains(&"map"), "no catalog → no map/ask capability");
     assert!(!ids.contains(&"ask"), "no catalog → no ask capability");
-    assert!(!ids.contains(&"semantic"), "no dataset elected a semantic field → no semantic claim");
+    assert!(
+        !ids.contains(&"semantic"),
+        "no dataset elected a semantic field → no semantic claim"
+    );
     assert!(ids.contains(&"search"), "search is always real");
 }

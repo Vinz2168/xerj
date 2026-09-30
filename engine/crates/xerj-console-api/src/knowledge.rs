@@ -51,10 +51,7 @@
 //! catalog's own recorded number or the engine's live one, labelled by
 //! which; nothing on this surface is sample or illustrative data.
 
-use axum::{
-    extract::State,
-    response::Response,
-};
+use axum::{extract::State, response::Response};
 use serde_json::{json, Map, Value};
 
 use crate::auth::sessions::AuthSession;
@@ -182,7 +179,9 @@ fn parse_fields(fields_json: Option<&Value>) -> Vec<Value> {
         // card only needs "is this the semantic body field".
         let semantic = get("semantic").and_then(Value::as_str).is_some();
         let card = get("cardinality_est").and_then(Value::as_u64);
-        let overflow = get("cardinality_overflow").and_then(Value::as_bool).unwrap_or(false);
+        let overflow = get("cardinality_overflow")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let examples = strings_of(get("examples"));
         out.push(json!({
             "name": name,
@@ -266,7 +265,10 @@ fn relation_row(doc: &Value) -> Option<Value> {
     match g("corr_kind").and_then(Value::as_str) {
         Some("key_overlap") => {
             obj.insert("kind".into(), json!("key_overlap"));
-            obj.insert("grade".into(), json!(str_of(g("grade")).unwrap_or_default()));
+            obj.insert(
+                "grade".into(),
+                json!(str_of(g("grade")).unwrap_or_default()),
+            );
             obj.insert("overlap".into(), json!(u64_of(g("overlap"))));
             obj.insert("containment".into(), json!(f64_of(g("containment"))));
             obj.insert(
@@ -283,10 +285,15 @@ fn relation_row(doc: &Value) -> Option<Value> {
             obj.insert("kind".into(), json!("time_alignment"));
             obj.insert("range_overlap".into(), json!(f64_of(g("range_overlap"))));
             obj.insert("shared_buckets".into(), json!(u64_of(g("shared_buckets"))));
-            obj.insert("pearson_r".into(), json!(g("pearson_r").and_then(Value::as_f64)));
+            obj.insert(
+                "pearson_r".into(),
+                json!(g("pearson_r").and_then(Value::as_f64)),
+            );
             obj.insert(
                 "activity_correlated".into(),
-                json!(g("activity_correlated").and_then(Value::as_bool).unwrap_or(false)),
+                json!(g("activity_correlated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)),
             );
         }
         _ => return None,
@@ -432,16 +439,18 @@ fn semantic_blurb(sem: &SemanticCapability) -> String {
 /// The capability strip. Every entry names a shipped surface — console route
 /// (`href`), CLI command (`command`), or HTTP endpoint (`endpoint`) — and
 /// availability is computed from facts on the node, not from a feature list.
-fn capabilities(catalog: bool, brains: &[Value], semantic: Option<&SemanticCapability>) -> Vec<Value> {
-    let mut caps = vec![
-        json!({
-            "id": "search",
-            "title": "Search it",
-            "blurb": "Seven query types — match, phrase, prefix, term, range, semantic, hybrid lexical+vector — with facets and a request preview.",
-            "href": "#/discover",
-            "kind": "console",
-        }),
-    ];
+fn capabilities(
+    catalog: bool,
+    brains: &[Value],
+    semantic: Option<&SemanticCapability>,
+) -> Vec<Value> {
+    let mut caps = vec![json!({
+        "id": "search",
+        "title": "Search it",
+        "blurb": "Seven query types — match, phrase, prefix, term, range, semantic, hybrid lexical+vector — with facets and a request preview.",
+        "href": "#/discover",
+        "kind": "console",
+    })];
     // The semantic row is computed from the node's own schema and embedder
     // (#1099): dims, similarity and the embedder's label come from the engine,
     // and no vector count is ever claimed — the engine backs none.
@@ -462,7 +471,10 @@ fn capabilities(catalog: bool, brains: &[Value], semantic: Option<&SemanticCapab
         "kind": "console",
     }));
     if let Some(brain) = brains.first() {
-        let name = brain.get("name").and_then(Value::as_str).unwrap_or_default();
+        let name = brain
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let links = brain.get("links").and_then(Value::as_u64).unwrap_or(0);
         caps.push(json!({
             "id": "graph",
@@ -582,7 +594,12 @@ pub async fn knowledge(
     // 4. Whole-corpus totals. `records`/`files`/`bytes` are the catalog's
     //    own last-run numbers (one run rewrites its dataset doc); `docs` is
     //    the engine's live count across every user index.
-    let sum = |k: &str| datasets.iter().map(|d| d[k].as_u64().unwrap_or(0)).sum::<u64>();
+    let sum = |k: &str| {
+        datasets
+            .iter()
+            .map(|d| d[k].as_u64().unwrap_or(0))
+            .sum::<u64>()
+    };
     let totals = json!({
         "datasets": datasets.len(),
         "records": sum("records"),

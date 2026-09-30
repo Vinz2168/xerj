@@ -31,7 +31,8 @@ use axum::{
 };
 
 use crate::{
-    auth, cluster, dashboards, data_sources, graph, knowledge, prefs, spa, state::ConsoleState, views,
+    auth, cluster, dashboards, data_sources, graph, knowledge, prefs, spa, state::ConsoleState,
+    views,
 };
 
 /// Build the full Xerj Console router. Mount at the root of an axum Router
