@@ -43,7 +43,7 @@ use crate::time::now_iso;
 /// scope (absent guard = engine-internal work, allow). This proxy is
 /// therefore its own boundary and must refuse the namespace itself — with
 /// the same NotFound as a system index, so existence doesn't leak.
-fn is_hidden_index(name: &str) -> bool {
+pub(crate) fn is_hidden_index(name: &str) -> bool {
     indices::is_system_index(name) || xerj_common::types::is_reserved_index(name)
 }
 
@@ -153,6 +153,10 @@ pub async fn list_indices(
             "docs": stats.doc_count,
             "segments": stats.segment_count,
             "fields": stats.field_count,
+            // On-disk store bytes, measured from the index's data dir —
+            // the same number /_cat/indices reports (es_compat's
+            // dir_size_bytes, mirrored in knowledge.rs for this crate).
+            "bytes": crate::knowledge::dir_size_bytes(idx.data_dir()),
             "shards": 1,
             "replicas": 0,
         }));

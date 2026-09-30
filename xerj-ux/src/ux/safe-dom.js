@@ -43,6 +43,10 @@ export const TAGS = new Set([
   'pre', 'code', 'mark', 'article', 'section', 'header', 'footer', 'nav',
   'button', 'b', 'strong', 'em', 'small', 'dl', 'dt', 'dd', 'br', 'hr',
   'label', 'input', 'select', 'option', 'time',
+  // The only interactive element added for the knowledge surface: a
+  // disclosure. It collapses/expands content the browser itself — no
+  // script, no focus behaviour to get wrong, nothing loads.
+  'details', 'summary',
 ]);
 
 /** Attribute names a render function may set (plus `data-*` / `aria-*`). */

@@ -2313,6 +2313,30 @@ button.sb-grouphead { width: 100%; }
 .cp-empty p { margin: 8px 0; }
 .cp-cmd { font-size: var(--fs-20); margin: var(--sp-2) 0; white-space: pre-wrap; }
 
+/* knowledge surface: field chips carry their measured facts, the rest of
+   the field list folds into a disclosure, relations and capabilities get
+   their own rows/strip (ux/corpus-render.js) */
+.cp-field__meta { margin-left: 6px; }
+.cp-field__ex { margin-left: 6px; color: var(--z-mute); }
+.cp-field--sem .cp-field__name { color: var(--z-accent); }
+.cp-fields__all { width: 100%; margin-top: 2px; }
+.cp-fields__all > summary { cursor: pointer; font-size: var(--fs-11); letter-spacing: var(--track-ui); color: var(--z-mute); }
+.cp-fields__all > summary:hover { color: var(--z-ink); }
+.cp-fields__all[open] > summary { color: var(--z-ink); margin-bottom: 6px; }
+.cp-rels { display: flex; flex-direction: column; gap: 10px; max-width: 100ch; }
+.cp-rel { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; font-size: var(--fs-13); }
+.cp-rel__pair { color: var(--z-ink); overflow-wrap: anywhere; }
+.cp-rel__why { color: var(--z-mute); }
+.cp-rel__ex { font-size: var(--fs-11); flex-basis: 100%; overflow-wrap: anywhere; }
+.cp-caps { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: var(--sp-3) var(--gap-x); }
+.cp-cap { border-top: 1px solid var(--z-faint); padding-top: 10px; min-width: 0; }
+.cp-cap__title { font-weight: 700; }
+.cp-cap__blurb { margin: 6px 0; color: var(--z-mute); font-size: var(--fs-13); line-height: 1.5; }
+.cp-cap__go { font-size: var(--fs-11); letter-spacing: var(--track-ui); }
+a.cp-cap__go { text-decoration: none; }
+a.cp-cap__go:hover { color: var(--z-accent); }
+.cp-cap--cli .cp-cap__go, .cp-cap--http .cp-cap__go { color: var(--z-ink); overflow-wrap: anywhere; }
+
 /* reader */
 .rd-search { display: flex; gap: var(--sp-2); align-items: center; border-bottom: 1px solid var(--z-faint); padding-bottom: 10px; margin-bottom: var(--sp-3); flex-wrap: wrap; }
 .rd-q { flex: 1 1 320px; min-width: 0; background: transparent; border: 0; outline: 0; color: var(--z-ink); font-family: var(--font-data); font-size: var(--fs-16); padding: 6px 0; }

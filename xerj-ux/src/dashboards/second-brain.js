@@ -51,7 +51,13 @@ export const secondBrain = {
       // agent-asserted links may carry no quote, and structural links
       // carry a rationale, not note text. The kicker must not claim
       // more than the schema enforces (spec §7.1, amended 2026-07-30).
-      kicker: 'WHAT YOUR NOTES BELIEVE · EVERY LINK SHOWS ITS EVIDENCE · REPLAYABLE AT ANY MOMENT',
+      // It says DOCUMENTS, not notes: the corpus is whatever was indexed
+      // (mail, PDFs, code), and this page is its graph layer — reached
+      // from CORPUS, not a separate "knowledge base".
+      kicker: 'THE LINKS BETWEEN YOUR DOCUMENTS · EVERY LINK SHOWS ITS EVIDENCE · REPLAYABLE AT ANY MOMENT',
+      // The caption ties this page back to the one knowledge surface: the
+      // corpus (sizes, fields, relations, capabilities) lives on CORPUS.
+      caption: 'The graph layer of the corpus CORPUS shows: links between the documents you indexed, each with its evidence. Sizes, fields and relations live on CORPUS.',
       meta: [time, 'XERJ-GRAPH'],
       // Eyebrows speak user words — link / believed / retired / taught.
       // Schema vocabulary (edge, src/dst, as-of) stays in the API and

@@ -54,6 +54,7 @@ pub mod data_sources;
 pub mod error;
 pub mod graph;
 pub mod indices;
+pub mod knowledge;
 pub mod prefs;
 pub mod response;
 pub mod router;

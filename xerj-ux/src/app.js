@@ -26,7 +26,7 @@ import { sbBrainsPresent } from './data/brains-probe.js';
 import { dataFeaturesPresent, emptyDataFeatures } from './data/data-probe.js';
 import { indexNames } from './data/schema.js';
 import { mount } from './ux/safe-dom.js';
-import { renderCorpus } from './ux/corpus-render.js';
+import { renderCorpus, renderRelations, renderCapabilities } from './ux/corpus-render.js';
 import { ReaderView, parseReaderRoute } from './ux/reader-view.js';
 import { readerHref } from './ux/reader-render.js';
 import { makeReaderApi } from './data/reader-api.js';
@@ -550,8 +550,9 @@ function parseRoute() {
 }
 
 // Build the data context that the section views (DATA / SETTINGS)
-// need. Async because real API calls will replace these mocks in one
-// step once the engine ships /v1/clusters etc.
+// need. Async because the reads hit the console's data-sources facade
+// (data/data-sources.js — real-only; an unreachable engine yields
+// empty lists, never seeded rows).
 async function buildSectionData(sectionId) {
   if (sectionId === 'data') {
     const clusters = await listClusters();
@@ -1228,6 +1229,13 @@ function mountSafePanels(dash, data) {
     const st = data && data.status ? data : { status: 'error', error: (data && data.error) || 'the catalog returned nothing' };
     mount(corpusEl, renderCorpus(st, { guest: false }));
   }
+  // The knowledge surface's other two panels — the relations autoindex
+  // inferred and the capability strip. Same rule as the grid above: nodes
+  // only, and an honest empty state rather than an omission.
+  const relsEl = document.querySelector('[data-safe-mount="corpus-relations"]');
+  if (relsEl) mount(relsEl, renderRelations(data || {}));
+  const capsEl = document.querySelector('[data-safe-mount="corpus-capabilities"]');
+  if (capsEl) mount(capsEl, renderCapabilities(data || {}));
   const readerEl = document.querySelector('[data-safe-mount="reader"]');
   if (readerEl) {
     readerView.attach(readerEl);

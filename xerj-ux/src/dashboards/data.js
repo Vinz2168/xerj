@@ -1,18 +1,19 @@
 // ============================================================
 // Section — DATA
 //
-// Cluster / index / field browser. This is the product surface
-// for "what data does the engine have, where does it live,
-// what fields are indexed, and how are they encoded".
-//
-// The three functions in data/data-sources.js are the ONLY
-// place that swaps from mock to live fetch when the engine is
-// ready. When the backend ships /v1/clusters + /v1/indices,
-// this page becomes live automatically.
+// Index / field inventory of the built-in engine. Every row on this
+// page comes from a real endpoint the console serves:
+//   GET /_xerj-console/api/v1/data-sources/connections
+//   GET …/connections/built-in/indices          (names, docs, store bytes)
+//   GET …/connections/built-in/indices/:i/fields (names, types)
+// An unreachable engine yields empty tables and a line saying so — never
+// sample clusters or seeded index names (data/data-sources.js is
+// real-only). Sizes, per-dataset fields with coverage/examples and the
+// capability strip live on CORPUS, the knowledge surface; this page is
+// the flat inventory under it.
 // ============================================================
 
 import { esc }                 from '../ux/text.js';
-import { Citations }           from '../ux/charts-ops.js';
 import { Markdown }            from '../ux/tables.js';
 import { defaultClusterId }    from '../data/data-sources.js';
 
@@ -43,15 +44,18 @@ export const dataSection = {
     const activeIndices = indicesByCluster[active] || [];
     const focusIndex = data.focusIndex || activeIndices[0]?.name;
     const fields = fieldsByIndex[focusIndex] || [];
+    const unreachable = !clusters.length;
 
     return {
       title: 'DATA',
-      kicker: 'CLUSTERS · INDICES · FIELDS',
+      kicker: 'CONNECTIONS · INDICES · FIELDS',
       meta: [time, 'SOURCES'],
-      caption: 'What the engine actually has. Every row on this page maps to a real endpoint: `GET /v1/clusters`, `GET /v1/clusters/:id/indices`, `GET /v1/indices/:name/_mapping`. The mock values flip to live fetch the day the backend ships — nothing else on this page changes.',
+      caption: unreachable
+        ? 'No data source could be read. This page lists only what the engine reports — sign in, or start the node, and reload.'
+        : 'What the engine actually has: one row per index (documents, on-disk store bytes) and each index\'s mapping. Per-dataset structure, coverage and examples live on CORPUS.',
       panels: [
 
-        { id: 'clusters', eyebrow: 'CLUSTERS · CLICK TO SET DEFAULT', cols: 12, type: 'clusters',
+        { id: 'clusters', eyebrow: 'CONNECTIONS · CLICK TO SET DEFAULT', cols: 12, type: 'clusters',
           render: () => renderClusters(clusters, active),
         },
 
@@ -59,50 +63,24 @@ export const dataSection = {
           render: () => renderIndices(activeIndices, focusIndex),
         },
 
-        { id: 'fields', eyebrow: `FIELDS · ${focusIndex || '—'} · FROM /v1/indices/:name/_mapping`, cols: 6, type: 'fields',
+        { id: 'fields', eyebrow: `FIELDS · ${focusIndex || '—'} · FROM THE INDEX MAPPING`, cols: 6, type: 'fields',
           render: () => renderFields(fields),
         },
 
-        { id: 'howTo', eyebrow: 'CONNECTING A NEW CLUSTER', cols: 12, type: 'markdown',
+        { id: 'howTo', eyebrow: 'WHERE THESE NUMBERS COME FROM', cols: 12, type: 'markdown',
           render: () => Markdown(
-`## Point XERJ.ai at a cluster
+`## One connection, read live
 
-Today, clusters are defined in \`src/data/data-sources.js\` and read from
-mock arrays. **When the engine ships** the HTTP bindings that this page
-expects, clusters will be configured through this UI instead.
+This node has one data source — its built-in engine — listed by
+\`GET /_xerj-console/api/v1/data-sources/connections\`. Indices and fields
+come from the same facade. Doc counts and store bytes are the engine's own
+(\`Index::stats\` and the index's data directory), not estimates.
 
-\`\`\`
-POST /v1/clusters
-{
-  "id":   "prod-us",
-  "name": "PROD-US",
-  "url":  "https://xerj-us-east-1.internal:8080",
-  "auth": { "type": "bearer", "token": "$XERJ_TOKEN" }
-}
-\`\`\`
-
-The current default cluster is stored in \`localStorage.xerj.cluster\`,
-which you can inspect under SETTINGS. Every query goes to that cluster
-unless a specific dashboard panel overrides it via its \`source: { cluster }\`
-binding.`
+The default connection is stored in \`localStorage.xerj.cluster\`, visible
+under SETTINGS. The knowledge surface — sizes, per-dataset fields,
+relations, capabilities — is CORPUS, the section this inventory sits
+under.`
           ),
-        },
-
-        { id: 'citations', eyebrow: 'WHY THIS SECTION EXISTS · USER FEEDBACK', cols: 12, type: 'citations',
-          render: () => Citations({
-            items: [
-              { id: 'gh-6498',  source: 'github', score: 57,
-                title: 'Remove index pattern mapping cache',
-                url: 'https://github.com/elastic/kibana/issues/6498' },
-              { id: 'gh-17888', source: 'github', score: 45,
-                title: 'Per-user profiles, settings in Kibana',
-                url: 'https://github.com/elastic/kibana/issues/17888' },
-              { id: 'gh-17542', source: 'github', score: 57,
-                title: 'Ability to change the index pattern on a visualization',
-                url: 'https://github.com/elastic/kibana/issues/17542' },
-            ],
-            total: 451,
-          }),
         },
 
       ],
@@ -113,7 +91,7 @@ binding.`
 // ---------- renderers -----------------------------------
 
 function renderClusters(clusters, active) {
-  if (!clusters.length) return '<div class="mono faint">No clusters configured.</div>';
+  if (!clusters.length) return '<div class="mono faint">No data source readable. Sign in and reload — this page never shows a sample.</div>';
   const rows = clusters.map((c) => {
     const isActive = c.id === active;
     const status = {
@@ -128,15 +106,15 @@ function renderClusters(clusters, active) {
         <span class="mg-cluster-url mono faint">${esc(c.url)}</span>
         <span class="mg-cluster-stat mono">${humanCount(c.indices)}&nbsp;idx</span>
         <span class="mg-cluster-stat mono">${humanCount(c.docs)}&nbsp;docs</span>
-        <span class="mg-cluster-ver mono faint">${esc(c.version)}</span>
+        <span class="mg-cluster-ver mono faint">${esc(c.version || '')}</span>
       </button>`;
   }).join('');
   return `<div class="mg-clusters">${rows}</div>`;
 }
 
 function renderIndices(indices, focusIndex) {
-  if (!indices.length) return '<div class="mono faint">No indices in this cluster.</div>';
-  const cols = ['NAME', 'DOCS', 'SIZE', 'SHARDS', 'RETENTION'];
+  if (!indices.length) return '<div class="mono faint">No indices on this engine.</div>';
+  const cols = ['NAME', 'DOCS', 'SIZE', 'SHARDS'];
   const headRow = `<div class="mg-idx-row mg-idx-head">${cols.map((c) => `<span>${esc(c)}</span>`).join('')}</div>`;
   const body = indices.map((i) => {
     const cells = [
@@ -144,7 +122,6 @@ function renderIndices(indices, focusIndex) {
       humanCount(i.docs),
       humanBytes(i.bytes),
       String(i.shards),
-      i.retention_days == null ? '∞' : i.retention_days + 'd',
     ];
     return `<div class="mg-idx-row">${cells.map((c) => `<span>${c}</span>`).join('')}</div>`;
   }).join('');
@@ -153,15 +130,17 @@ function renderIndices(indices, focusIndex) {
 
 function renderFields(fields) {
   if (!fields.length) return '<div class="mono faint">No mapping for this index.</div>';
-  const cols = ['FIELD', 'TYPE', 'CARDINALITY', 'ENCODING', 'RATIO'];
+  // FIELD and TYPE only: cardinality, encoding and compression ratio are
+  // not on this endpoint, and a column that guesses from the type is a
+  // claim about the on-disk format this page cannot make. The measured
+  // per-field facts (coverage, null%, examples) live on CORPUS, from the
+  // autoindex catalog.
+  const cols = ['FIELD', 'TYPE'];
   const headRow = `<div class="mg-fld-row mg-fld-head">${cols.map((c) => `<span>${esc(c)}</span>`).join('')}</div>`;
   const body = fields.map((f) => `
     <div class="mg-fld-row">
       <span class="mono">${esc(f.name)}</span>
-      <span class="mono faint">${esc(f.type)}</span>
-      <span class="mono">${humanCount(f.cardinality)}</span>
-      <span class="mono faint">${esc(f.encoding)}</span>
-      <span class="mono">${(f.ratio * 100).toFixed(0)}%</span>
+      <span class="mono faint">${esc(f.type)}${f.semantic ? ' · semantic' : ''}</span>
     </div>`).join('');
   return `<div class="mg-fld-table">${headRow}${body}</div>`;
 }
