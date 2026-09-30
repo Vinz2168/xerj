@@ -59,6 +59,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   else keeps the 1/rank arithmetic the published measurements used. The
   issue's Banking77 replay gate and the TypeSafe-terms question on retaining
   provider outputs are release-time gates, deliberately not claimed here.
+- **Local `judge` stage on `_search`: `_p_relevant` per hit, `min_p` pruning,
+  zero tokens, zero egress ([#1060](https://github.com/xerj-org/xerj/issues/1060),
+  PR [#1077](https://github.com/xerj-org/xerj/pull/1077)).** A `_search` body
+  may now carry `"judge": {"local": true, "min_p": 0.5}`: the node re-scores
+  the hits it was about to return against the question in process — no
+  provider, no key, no network call — and each judged hit carries
+  `_p_relevant`, a 0..1 relevance probability on an absolute scale. The
+  engine's `_score` is NOT replaced (the one deliberate difference from
+  `rerank`): a client sorting by `_score` keeps the engine's number while a
+  client thresholding `_p_relevant` gets a cut a BM25 score can never give.
+  `min_p` drops hits below the threshold and counts them in the response's
+  `judged` block (`{applied, scorer, query, judged, kept, dropped, took_ms}`).
+  Which judge judged is on the wire: `judged.scorer` is `lexical` or `model`.
+  The always-compiled arm is a deterministic lexical scorer (window-local
+  BM25 saturation, page-local IDF, K1/B from xerj-fts) with NO semantic
+  signal — named as such, never passed off as a model; the model arm (cargo
+  feature `decide-local`) reuses the #1072 decide loader and is unmeasured in
+  this sandbox — the issue's BEIR bar (0.699 SciFact / 0.345 NFCorpus, FiQA
+  ≥ 0.30) and ≤ 40 ms p50 top-30 gates bind at release. Strictness mirrors
+  the rerank stage: `sort`/`search_after`/`collapse`/`scroll`/`size:0`/
+  `_source:false`-without-fields refused by name before the search runs, and
+  every surface that does not run the stage (scroll continuation, `_msearch`,
+  the search templates, `_async_search`, `_rank_eval`, the native `/v1`
+  search API, the gRPC Search RPC) refuses the block by name instead of
+  silently returning unjudged hits under a 200. The MCP tools `xerj_search`
+  and `xerj_hybrid_search` take the same `judge` argument (query required on
+  hybrid, carried from the plain string otherwise), their descriptions state
+  the honest ceiling and the zero-egress difference from `rerank`, and the
+  published schema is regenerated.
 
 - **`--decide-mode` / `--decide-model-dir`: the tier-2 decide head is armable
   from the command line (PR
