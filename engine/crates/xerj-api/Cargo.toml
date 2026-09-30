@@ -12,10 +12,11 @@ authors.workspace = true
 neural = ["xerj-engine/neural"]
 # Local zero-shot decision head (issue #1057): tier 2 of the System One
 # decide ladder, answering /v1/systemone and /_decide when the history
-# index has no support. Mirrors how `neural` is gated — off by default,
-# enabled by whoever links this crate (the xerj-server wiring is a
-# follow-up). Also arms the `judge` stage's model arm (issue #1060): the
-# same loader, the same model directory, the same loaded copy.
+# index has no support. Mirrors how `neural` is gated — enabled by whoever
+# links this crate; since rc.80 the shipped binary turns it on through
+# `xerj-server`'s default feature set (runtime stays opt-in via
+# `--decide-mode local`). Also arms the `judge` stage's model arm (issue
+# #1060): the same loader, the same model directory, the same loaded copy.
 decide-local = ["dep:xerj-ai", "xerj-ai/decide-local", "xerj-rerank/judge-local"]
 onnx-experimental = ["xerj-engine/onnx-experimental"]
 
