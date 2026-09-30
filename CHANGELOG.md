@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Token-budgeted MCP responses: `max_tokens` on every search tool
+  ([#1058](https://github.com/xerj-org/xerj/issues/1058)).** The five MCP
+  search tools (`xerj_search`, `xerj_hybrid_search`, `xerj_semantic_search`,
+  `xerj_vector_search`, `xerj_code_search`) returned whatever the engine
+  sent, so an agent that asked for 50 hits got all 50 verbatim — context
+  cost unknown and unbounded. All five now take `max_tokens` and are held to
+  it: the response text NEVER exceeds the budget, enforced by construction
+  (a note reserve is subtracted before any content is admitted) and pinned
+  by tests across a range of budgets on both response surfaces. Tokens are
+  counted with one named tokenizer — XERJ's `StandardTokenizer` (UAX #29
+  word boundaries, the same word split the engine's analyzer uses for BM25;
+  `unicode-segmentation` depended on directly so the count is identical by
+  construction without pulling the FTS stack into the thin proxy) — an
+  honest proxy for model-context tokens that under-counts subword splits,
+  stated in the argument's description. Overlapping file:line passages are
+  deduped before budgeting (higher-ranked shown passage wins); hits that no
+  longer fit are returned as locators only (file:line, index/id — the
+  citation, never the passage) while they fit, and a `_token_budget`
+  accounting block reports kept, locator-only, deduped, dropped, and
+  `tokens_used`. The engine never sees the argument (request bodies are
+  bit-identical), errors are never truncated, nothing binding returns the
+  engine text byte-identical, and a budget below 32 (not even the envelope
+  fits) is a builder error, never a silent drop. Generalises
+  `xerj_code_search`'s char-level `full` cap to the whole response. The
+  published schema `landing/docs/agents/schemas/mcp-tools.json` was
+  regenerated from the binary; `published_schema_drift` stays green. (PR
+  [#1067](https://github.com/xerj-org/xerj/pull/1067).)
+
 ### Documentation
 
 - Rolled `ROADMAP.md`'s tracker state after the issue tracker was emptied on

@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "xerj_search",
-      "description": "Full-text / keyword / structured search over a XERJ index. Proxies POST /{index}/_search. Pass `query` as a PLAIN STRING for the definition-first code search (ranks the file that defines a symbol above files that merely mention it — the right default for code), or as an ES query-DSL object (e.g. {\"term\":{\"status\":\"open\"}}, or a bool clause) for structured queries. Omit `query` for match_all. Optional `rerank` adds a second stage that re-judges the top hits with an external relevance model — read that argument's description before using it: it needs a provider the operator configured, and it sends document text off the machine.",
+      "description": "Full-text / keyword / structured search over a XERJ index. Proxies POST /{index}/_search. Pass `query` as a PLAIN STRING for the definition-first code search (ranks the file that defines a symbol above files that merely mention it — the right default for code), or as an ES query-DSL object (e.g. {\"term\":{\"status\":\"open\"}}, or a bool clause) for structured queries. Omit `query` for match_all. Optional `rerank` adds a second stage that re-judges the top hits with an external relevance model — read that argument's description before using it: it needs a provider the operator configured, and it sends document text off the machine. Pass `max_tokens` to cap the response at a token budget (never exceeded; see that argument for the tokenizer and the locator-only rule).",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -37,13 +37,18 @@
               "boolean"
             ],
             "description": "Optional second-stage reranking. XERJ sends the text of the top `window` hits plus the question to an external relevance model, which returns a calibrated probability (0..1) per document. Hits are reordered by it, that probability REPLACES `_score`, and `min_score` prunes by it — an absolute relevance cut, which a BM25 score cannot give you. WORTH IT WHEN: a natural-language question over prose where the right document is probably in the top 30 but not at the top; or you need a yes/no relevance threshold rather than a relative rank. NOT WORTH IT FOR: exact identifier or symbol lookups (the first stage already ranks the definition first), filters, sorted or aggregation-only requests — it adds a paid network round-trip per search. NEEDS A CONFIGURED PROVIDER: the node's operator must have set a provider key (`[rerank] api_key` or TYPESAFE_API_KEY). You cannot supply one in this call. Without it the search fails with HTTP 503 `rerank_exception`; do not retry, repeat the search without `rerank`. HTTP 403 means the operator disabled it. PRIVACY: this is the only search-time feature that sends document text off the node. Proxy embeddings (`[embedding] default_endpoint`) and the WAL tap also send text off the node when an operator configures them, so never tell a user that nothing else leaves the machine — do not use rerank on data that must stay local unless the user has agreed. Only fields the response returns are sent, so `_source` filtering also limits what leaves. Pass true or {} for defaults, or an object with: `query` (string): the natural-language question to judge documents against. Filled in for you when the tool's `query` is a plain string (that mode also returns the matching passage, which leads the text the judge reads); REQUIRED when the tool's `query` is a `bool`, a `knn`, or anything else with no single question in it (the node refuses rather than guess). `window` (int, default 30, max 300): how many top hits are judged — every one is a paid judgement; `from`+`size` must fit inside it. `min_score` (0..1): drop hits judged below this probability. `fields` (string[]): which returned fields to send; default is every returned string field. `instructions` (string): override what \"relevant\" means for this corpus. `timeout_ms` (int, default 10000). `model` (string). Cannot be combined with `sort`. READ THE RESPONSE'S `_rerank` BLOCK: `applied: true` means the order is the judge's and every `_score` is a probability or null (a hit with no verdict, counted in `unjudged`, sorts last); `applied: false` means the provider missed the deadline or answered nothing usable, and you are looking at the engine's own order with engine scores, stated in `reason`."
+          },
+          "max_tokens": {
+            "type": "integer",
+            "minimum": 32,
+            "description": "Token budget for this response: the returned text NEVER exceeds it. Tokens are counted with XERJ's StandardTokenizer (UAX #29 word boundaries) — the same word split the engine's own analyzer uses for BM25. Honest scope: that under-counts model-context subwords (snake_case is ONE token here), so treat it as a deterministic proxy, not a BPE count. The budget covers the whole response text (JSON keys and syntax included). Overlapping file:line passages are deduped first (higher-ranked wins). Hits that no longer fit are listed as LOCATORS ONLY (file:line, index/id) rather than dropped, and the response's `_token_budget` block accounts for every hit: kept, locator-only, deduped, dropped. Errors are never truncated — a refusal you cannot read end-to-end is worse than a long response. Minimum 32."
           }
         }
       }
     },
     {
       "name": "xerj_semantic_search",
-      "description": "Meaning-based search over a `semantic_text` field. The query text is embedded SERVER-SIDE by XERJ's built-in lexical embedder (no external API key), then matched by vector similarity. Proxies POST /{index}/_search with {\"query\":{\"semantic\":{...}}}.",
+      "description": "Meaning-based search over a `semantic_text` field. The query text is embedded SERVER-SIDE by XERJ's built-in lexical embedder (no external API key), then matched by vector similarity. Proxies POST /{index}/_search with {\"query\":{\"semantic\":{...}}}. Pass `max_tokens` to cap the response at a token budget (never exceeded; see that argument for the tokenizer and the locator-only rule).",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -65,6 +70,11 @@
           "filter": {
             "type": "object",
             "description": "Optional ES query clause applied as a pre-filter."
+          },
+          "max_tokens": {
+            "type": "integer",
+            "minimum": 32,
+            "description": "Token budget for this response: the returned text NEVER exceeds it. Tokens are counted with XERJ's StandardTokenizer (UAX #29 word boundaries) — the same word split the engine's own analyzer uses for BM25. Honest scope: that under-counts model-context subwords (snake_case is ONE token here), so treat it as a deterministic proxy, not a BPE count. The budget covers the whole response text (JSON keys and syntax included). Overlapping file:line passages are deduped first (higher-ranked wins). Hits that no longer fit are listed as LOCATORS ONLY (file:line, index/id) rather than dropped, and the response's `_token_budget` block accounts for every hit: kept, locator-only, deduped, dropped. Errors are never truncated — a refusal you cannot read end-to-end is worse than a long response. Minimum 32."
           }
         },
         "required": [
@@ -76,7 +86,7 @@
     },
     {
       "name": "xerj_vector_search",
-      "description": "K-nearest-neighbour search over a `dense_vector` field, given a caller-supplied query vector. NOTE: unfiltered kNN is HNSW-served (approximate) with exact rescoring — measured recall@10 1.00 on the official bench query; num_candidates sets the beam width (floored at 800). Filtered kNN, non-cosine metrics, SQ8 fields, and small indexes run an exact brute-force scan. Proxies POST /{index}/_search with a top-level {\"knn\":{...}}.",
+      "description": "K-nearest-neighbour search over a `dense_vector` field, given a caller-supplied query vector. NOTE: unfiltered kNN is HNSW-served (approximate) with exact rescoring — measured recall@10 1.00 on the official bench query; num_candidates sets the beam width (floored at 800). Filtered kNN, non-cosine metrics, SQ8 fields, and small indexes run an exact brute-force scan. Proxies POST /{index}/_search with a top-level {\"knn\":{...}}. Pass `max_tokens` to cap the response at a token budget (never exceeded; see that argument for the tokenizer and the locator-only rule).",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -105,6 +115,11 @@
           "filter": {
             "type": "object",
             "description": "Optional ES query clause applied as a pre-filter."
+          },
+          "max_tokens": {
+            "type": "integer",
+            "minimum": 32,
+            "description": "Token budget for this response: the returned text NEVER exceeds it. Tokens are counted with XERJ's StandardTokenizer (UAX #29 word boundaries) — the same word split the engine's own analyzer uses for BM25. Honest scope: that under-counts model-context subwords (snake_case is ONE token here), so treat it as a deterministic proxy, not a BPE count. The budget covers the whole response text (JSON keys and syntax included). Overlapping file:line passages are deduped first (higher-ranked wins). Hits that no longer fit are listed as LOCATORS ONLY (file:line, index/id) rather than dropped, and the response's `_token_budget` block accounts for every hit: kept, locator-only, deduped, dropped. Errors are never truncated — a refusal you cannot read end-to-end is worse than a long response. Minimum 32."
           }
         },
         "required": [
@@ -116,7 +131,7 @@
     },
     {
       "name": "xerj_hybrid_search",
-      "description": "Hybrid search: fuse several sub-queries (e.g. a lexical `match` plus a vector `knn`) into one ranked list. Fusion is `rrf` (reciprocal-rank) or `linear` (weighted). Proxies POST /{index}/_search with {\"query\":{\"hybrid\":{\"queries\":[...],\"fusion\":...}}}. Optional `rerank` re-judges the fused top hits with an external relevance model; here `rerank.query` is REQUIRED, because a hybrid search has several sub-queries and no single question to read.",
+      "description": "Hybrid search: fuse several sub-queries (e.g. a lexical `match` plus a vector `knn`) into one ranked list. Fusion is `rrf` (reciprocal-rank) or `linear` (weighted). Proxies POST /{index}/_search with {\"query\":{\"hybrid\":{\"queries\":[...],\"fusion\":...}}}. Optional `rerank` re-judges the fused top hits with an external relevance model; here `rerank.query` is REQUIRED, because a hybrid search has several sub-queries and no single question to read. Pass `max_tokens` to cap the response at a token budget (never exceeded; see that argument for the tokenizer and the locator-only rule).",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -159,6 +174,11 @@
               "boolean"
             ],
             "description": "Optional second-stage reranking. XERJ sends the text of the top `window` hits plus the question to an external relevance model, which returns a calibrated probability (0..1) per document. Hits are reordered by it, that probability REPLACES `_score`, and `min_score` prunes by it — an absolute relevance cut, which a BM25 score cannot give you. WORTH IT WHEN: a natural-language question over prose where the right document is probably in the top 30 but not at the top; or you need a yes/no relevance threshold rather than a relative rank. NOT WORTH IT FOR: exact identifier or symbol lookups (the first stage already ranks the definition first), filters, sorted or aggregation-only requests — it adds a paid network round-trip per search. NEEDS A CONFIGURED PROVIDER: the node's operator must have set a provider key (`[rerank] api_key` or TYPESAFE_API_KEY). You cannot supply one in this call. Without it the search fails with HTTP 503 `rerank_exception`; do not retry, repeat the search without `rerank`. HTTP 403 means the operator disabled it. PRIVACY: this is the only search-time feature that sends document text off the node. Proxy embeddings (`[embedding] default_endpoint`) and the WAL tap also send text off the node when an operator configures them, so never tell a user that nothing else leaves the machine — do not use rerank on data that must stay local unless the user has agreed. Only fields the response returns are sent, so `_source` filtering also limits what leaves. Pass true or {} for defaults, or an object with: `query` (string, REQUIRED for this tool): the natural-language question to judge documents against. `window` (int, default 30, max 300): how many top hits are judged — every one is a paid judgement; `from`+`size` must fit inside it. `min_score` (0..1): drop hits judged below this probability. `fields` (string[]): which returned fields to send; default is every returned string field. `instructions` (string): override what \"relevant\" means for this corpus. `timeout_ms` (int, default 10000). `model` (string). Cannot be combined with `sort`. READ THE RESPONSE'S `_rerank` BLOCK: `applied: true` means the order is the judge's and every `_score` is a probability or null (a hit with no verdict, counted in `unjudged`, sorts last); `applied: false` means the provider missed the deadline or answered nothing usable, and you are looking at the engine's own order with engine scores, stated in `reason`."
+          },
+          "max_tokens": {
+            "type": "integer",
+            "minimum": 32,
+            "description": "Token budget for this response: the returned text NEVER exceeds it. Tokens are counted with XERJ's StandardTokenizer (UAX #29 word boundaries) — the same word split the engine's own analyzer uses for BM25. Honest scope: that under-counts model-context subwords (snake_case is ONE token here), so treat it as a deterministic proxy, not a BPE count. The budget covers the whole response text (JSON keys and syntax included). Overlapping file:line passages are deduped first (higher-ranked wins). Hits that no longer fit are listed as LOCATORS ONLY (file:line, index/id) rather than dropped, and the response's `_token_budget` block accounts for every hit: kept, locator-only, deduped, dropped. Errors are never truncated — a refusal you cannot read end-to-end is worse than a long response. Minimum 32."
           }
         },
         "required": [
@@ -472,7 +492,7 @@
     },
     {
       "name": "xerj_code_search",
-      "description": "Reference-coding retrieval over a corpus of peer projects: how did real codebases solve this problem? Returns the matching definition (not a byte window), the file:line to cite, and per-hit licence warnings — AGPL/SSPL/Elastic/BUSL/GPL/LGPL/MPL sources are approach-only. Refuses indices older than 30 days (override with stale_ok). A no-match is NOT an error: it says the corpus is wrong for the task. Corpora: `xerj corpus list`.",
+      "description": "Reference-coding retrieval over a corpus of peer projects: how did real codebases solve this problem? Returns the matching definition (not a byte window), the file:line to cite, and per-hit licence warnings — AGPL/SSPL/Elastic/BUSL/GPL/LGPL/MPL sources are approach-only. Refuses indices older than 30 days (override with stale_ok). A no-match is NOT an error: it says the corpus is wrong for the task. Pass `max_tokens` to cap the response at a token budget (never exceeded; see that argument for the tokenizer and the locator-only rule). Corpora: `xerj corpus list`.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -520,6 +540,11 @@
               "strict"
             ],
             "description": "strict strips passage text from restricted-licence hits, keeping locator + warning (default warn)."
+          },
+          "max_tokens": {
+            "type": "integer",
+            "minimum": 32,
+            "description": "Token budget for this response: the returned text NEVER exceeds it. Tokens are counted with XERJ's StandardTokenizer (UAX #29 word boundaries) — the same word split the engine's own analyzer uses for BM25. Honest scope: that under-counts model-context subwords (snake_case is ONE token here), so treat it as a deterministic proxy, not a BPE count. The budget covers the whole response text (JSON keys and syntax included). Overlapping file:line passages are deduped first (higher-ranked wins). Hits that no longer fit are listed as LOCATORS ONLY (file:line, index/id) rather than dropped, and the response's `_token_budget` block accounts for every hit: kept, locator-only, deduped, dropped. Errors are never truncated — a refusal you cannot read end-to-end is worse than a long response. Minimum 32."
           }
         },
         "required": [
