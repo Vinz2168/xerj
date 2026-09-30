@@ -14,6 +14,26 @@ default settings. Metric: nDCG@10 on each dataset's BEIR `test` split, computed 
 
 Raw output: [`results/`](./results).
 
+## The local-judge gate (#1060) — MEASURED 2026-09-30: FAIL on quality, PASS on cost
+
+The rc.80 gate for the opt-in local `judge` stage (PR #1077), on the release
+binary `xerj v1.0.0-rc.78`, same harness protocol (3 runs, shuffled order,
+post-#940 deterministic path — every arm reproduced to the fourth decimal):
+
+| Gate row (issue #1060, verbatim) | Measured | Verdict |
+|---|---|---|
+| beats hybrid 0.699 SciFact by more than the 3-run spread | hybrid+judge **0.5967** vs hybrid **0.7045** (spread 0.0000) — loses by 0.1077 | **FAIL** |
+| beats hybrid 0.345 NFCorpus by more than the 3-run spread | hybrid+judge **0.2924** vs hybrid **0.3419** (spread 0.0000) — loses by 0.0495 | **FAIL** |
+| FiQA ≥ 0.30 (hosted Jev rerank 0.3638) | bm25+judge **0.1650** (vs BM25 0.2382) | **FAIL** |
+| adds ≤ 40 ms p50 for top-30 on CPU | **+0.7 / +0.5 / +0.6 ms** added p50 (SciFact / NFCorpus / FiQA), node pinned to 8 cores; server-side `judged.took_ms` p50 0 ms | **PASS** |
+
+The always-compiled judge is a lexical scorer with no semantic signal, and it
+loses to both first stages on all three datasets. Per the gate's own rule the
+stage stays opt-in and unnamed-by-default — no quality claim ships with it.
+Full analysis, run logs and sha256s:
+[`results/2026-09-30-judge-gate/`](./results/2026-09-30-judge-gate/);
+harness: [`judge_gate.py`](./judge_gate.py).
+
 ## What this says
 
 1. **Hybrid is the best arm XERJ has, on both datasets, and it already ships.** No new

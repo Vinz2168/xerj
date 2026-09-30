@@ -1,0 +1,26 @@
+index=scifact queries=300 mode=quality size=30 url=http://localhost:9642
+docs=5183
+run 1 bm30                     nDCG@10=0.6572 empty=  0
+run 1 hy30                     nDCG@10=0.7045 empty=  0
+run 1 bm30+judge               nDCG@10=0.5966 empty=  0 judge_took_ms_p50=0 kept_avg=30.0 dropped_avg=0.0
+run 1 hy30+judge               nDCG@10=0.5967 empty=  0 judge_took_ms_p50=0 kept_avg=30.0 dropped_avg=0.0
+run 1 hy30+judge min_p=0.5     nDCG@10=0.0767 empty=274 judge_took_ms_p50=0 kept_avg=0.1 dropped_avg=29.9
+run 2 bm30                     nDCG@10=0.6572 empty=  0
+run 2 hy30                     nDCG@10=0.7045 empty=  0
+run 2 bm30+judge               nDCG@10=0.5966 empty=  0 judge_took_ms_p50=0 kept_avg=30.0 dropped_avg=0.0
+run 2 hy30+judge               nDCG@10=0.5967 empty=  0 judge_took_ms_p50=0 kept_avg=30.0 dropped_avg=0.0
+run 2 hy30+judge min_p=0.5     nDCG@10=0.0767 empty=274 judge_took_ms_p50=0 kept_avg=0.1 dropped_avg=29.9
+run 3 bm30                     nDCG@10=0.6572 empty=  0
+run 3 hy30                     nDCG@10=0.7045 empty=  0
+run 3 bm30+judge               nDCG@10=0.5966 empty=  0 judge_took_ms_p50=0 kept_avg=30.0 dropped_avg=0.0
+run 3 hy30+judge               nDCG@10=0.5967 empty=  0 judge_took_ms_p50=0 kept_avg=30.0 dropped_avg=0.0
+run 3 hy30+judge min_p=0.5     nDCG@10=0.0767 empty=274 judge_took_ms_p50=0 kept_avg=0.1 dropped_avg=29.9
+
+== per-arm means over runs, spread, and head-to-head vs hy30 ==
+bm30                       runs=0.6572 0.6572 0.6572  mean=0.6572  spread=0.0000
+hy30                       runs=0.7045 0.7045 0.7045  mean=0.7045  spread=0.0000
+bm30+judge                 runs=0.5966 0.5966 0.5966  mean=0.5966  spread=0.0000
+hy30+judge                 runs=0.5967 0.5967 0.5967  mean=0.5967  spread=0.0000
+hy30+judge min_p=0.5       runs=0.0767 0.0767 0.0767  mean=0.0767  spread=0.0000
+hy30+judge vs hy30: W/L/T = 32/99/169  mean per-query delta=-0.1077
+bm30+judge vs bm30: W/L/T = 28/74/198  mean per-query delta=-0.0605

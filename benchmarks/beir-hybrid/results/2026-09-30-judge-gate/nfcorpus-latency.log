@@ -1,0 +1,7 @@
+index=nfcorpus queries=323 mode=latency size=30 url=http://localhost:9642
+docs=3633
+base wall s      p50=    0.9 p95=    1.1
+judged wall s    p50=    1.4 p95=    1.7
+judge took_ms    p50=    0.0 p95=    0.0
+added p50 (judged wall - base wall, per-set p50s) = 0.5 ms
+added p50 (per-query delta distribution)          = 0.5 ms

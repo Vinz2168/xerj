@@ -1,0 +1,22 @@
+index=nfcorpus queries=323 mode=quality size=30 url=http://localhost:9642
+docs=3633
+run 1 bm30                     nDCG@10=0.3016 empty= 25
+run 1 hy30                     nDCG@10=0.3419 empty=  0
+run 1 bm30+judge               nDCG@10=0.2827 empty= 25 judge_took_ms_p50=0 kept_avg=22.2 dropped_avg=0.0
+run 1 hy30+judge               nDCG@10=0.2924 empty=  0 judge_took_ms_p50=0 kept_avg=24.7 dropped_avg=0.0
+run 2 bm30                     nDCG@10=0.3016 empty= 25
+run 2 hy30                     nDCG@10=0.3419 empty=  0
+run 2 bm30+judge               nDCG@10=0.2827 empty= 25 judge_took_ms_p50=0 kept_avg=22.2 dropped_avg=0.0
+run 2 hy30+judge               nDCG@10=0.2924 empty=  0 judge_took_ms_p50=0 kept_avg=24.7 dropped_avg=0.0
+run 3 bm30                     nDCG@10=0.3016 empty= 25
+run 3 hy30                     nDCG@10=0.3419 empty=  0
+run 3 bm30+judge               nDCG@10=0.2827 empty= 25 judge_took_ms_p50=0 kept_avg=22.2 dropped_avg=0.0
+run 3 hy30+judge               nDCG@10=0.2924 empty=  0 judge_took_ms_p50=0 kept_avg=24.7 dropped_avg=0.0
+
+== per-arm means over runs, spread, and head-to-head vs hy30 ==
+bm30                       runs=0.3016 0.3016 0.3016  mean=0.3016  spread=0.0000
+hy30                       runs=0.3419 0.3419 0.3419  mean=0.3419  spread=0.0000
+bm30+judge                 runs=0.2827 0.2827 0.2827  mean=0.2827  spread=0.0000
+hy30+judge                 runs=0.2924 0.2924 0.2924  mean=0.2924  spread=0.0000
+hy30+judge vs hy30: W/L/T = 60/126/137  mean per-query delta=-0.0495
+bm30+judge vs bm30: W/L/T = 65/97/161  mean per-query delta=-0.0189

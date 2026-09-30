@@ -1,0 +1,7 @@
+index=fiqa queries=648 mode=latency size=30 url=http://localhost:9642
+docs=57638
+base wall s      p50=    0.8 p95=    1.2
+judged wall s    p50=    1.4 p95=    1.9
+judge took_ms    p50=    0.0 p95=    0.0
+added p50 (judged wall - base wall, per-set p50s) = 0.6 ms
+added p50 (per-query delta distribution)          = 0.6 ms
