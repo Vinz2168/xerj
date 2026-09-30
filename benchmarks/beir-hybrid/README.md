@@ -71,3 +71,33 @@ curl -LO https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scif
 XERJ_URL=http://localhost:9410 python3 load.py scifact/corpus.jsonl scifact
 XERJ_URL=http://localhost:9410 python3 eval.py 30 scifact
 ```
+
+## Stemming gate (#1059, rc.79) — MEASURED 2026-09-30
+
+Gate, verbatim: *"NFCorpus zero-hit queries 25 -> <=10; BEIR BM25 >= +0.01 over
+0.657 SciFact / 0.302 NFCorpus."* Measured on the release binary (`xerj
+v1.0.0-rc.78` version string, main @ `a179e1ef3`, includes the #1070 merge):
+one node, private port, `--embed-mode lexical`, paired arms on the same node
+that differ only in the create-time `settings.analysis.analyzer.default` PUT
+body — `{"type":"stemmer"}` (the #1070 surface) vs omitted (the rc.74 baseline
+path). Raw output: [`results/2026-09-30-stemming-1059/`](./results/2026-09-30-stemming-1059/)
+([gate summary](./results/2026-09-30-stemming-1059/gate-summary.txt)).
+
+| Sub-gate | Measured | Verdict |
+|---|---|---|
+| NFCorpus zero-hit queries 25 → ≤10 | 25 → **15** (std arm reproduces the committed 25-qid list exactly) | **FAIL** |
+| BEIR BM25 ≥ +0.01 over 0.657 SciFact | 0.6572 → **0.6732** (+0.0160) | **PASS** |
+| BEIR BM25 ≥ +0.01 over 0.302 NFCorpus | 0.3016 → **0.3195** (+0.0179) | **PASS** |
+
+**Why the zero-hit sub-gate fails at 15.** Stemming repairs exactly the
+inflection class — 10 of the 25 (bagels, leeks, pineapples, turnips, whiting,
+deafness, antinutrients, airport scanners, canker sores, Alli). The remaining
+15 (Fosamax, Zoloft, Mevacor, Splenda, eggnog, halibut, mesquite, okra, taro,
+amnesia, myelopathy, Peoria, Tufts, Yale, Czechoslovakia) are single words
+whose *stem* also occurs nowhere in the corpus — no stemmer can bridge a word
+absent in every inflected form. Reaching ≤10 lexically is not possible on this
+dataset; the vector arm remains the only repair for those queries. Measured
+caveat: `GET _settings` does not echo the analysis block and `_analyze` shows
+the standard path even on the stem arm — the declared default is provably
+honoured by search (std "bagels" 0 hits / stem 1 hit; probe in
+[`run-meta.txt`](./results/2026-09-30-stemming-1059/run-meta.txt)).

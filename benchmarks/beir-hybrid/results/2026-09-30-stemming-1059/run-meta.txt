@@ -1,0 +1,40 @@
+# Stemming gate #1059 — run metadata
+date: 2026-09-30T17:55:07Z
+binary: /tmp/xerj-rc80gates-bin/xerj — 'xerj v1.0.0-rc.78' (version string), main @ a179e1ef3 (includes PR #1070 merge 1fa06f944)
+node: single node, port 9620 (private band), --insecure --embed-mode lexical, throwaway data dir, 1 shard per index
+note: embed mode lexical affects only the semantic_text 'body' field, untouched by the BM25 arm; identical in both arms
+
+## dataset sha256
+536e14446a0ba56ed1398ab1055f39fe852686ecad24a6306c80c490fa8e0165  /tmp/stemming1059/beir/scifact.zip
+efe5be03f8c5b86a5870102d0599d227c8c6e2484328e68c6522560385671b0b  /tmp/stemming1059/beir/nfcorpus.zip
+docs: scifact 5183, nfcorpus 3633 (corpus.jsonl line counts)
+
+## arms (create-time PUT bodies differ ONLY in settings.analysis.analyzer.default)
+- std  arm: plain PUT, default standard analyzer (reproduces the rc.74 README baseline load path)
+- stem arm: PUT + {"settings":{"analysis":{"analyzer":{"default":{"type":"stemmer"}}}}} — the #1070 surface
+
+## GET /<idx>/_settings does NOT echo the analysis block back (empty in all four indexes)
+--- nfcorpus-std
+{}
+--- nfcorpus-stem
+{}
+--- scifact-std
+{}
+--- scifact-stem
+{}
+(the analysis settings are not surfaced by GET _settings; the search probes below are the evidence the declared default took effect)
+
+## probe: the declared default analyser is honoured by SEARCH (bagel/bagels on nfcorpus arms)
+--- nfcorpus-std  match text:bagel  total:
+{'value': 1, 'relation': 'eq'}
+--- nfcorpus-std  match text:bagels total:
+{'value': 0, 'relation': 'eq'}
+--- nfcorpus-stem match text:bagel  total:
+{'value': 1, 'relation': 'eq'}
+--- nfcorpus-stem match text:bagels total:
+{'value': 1, 'relation': 'eq'}
+
+## known display gap (caveat, not a search defect): GET _analyze does not use the declared index default analyser
+--- POST /nfcorpus-stem/_analyze {"text":"bagels"} tokens:
+['bagels']
+(search above proves the analyser IS applied at index+query time; _analyze alone shows the standard path)

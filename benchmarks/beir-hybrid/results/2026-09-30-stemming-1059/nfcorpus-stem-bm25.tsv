@@ -1,0 +1,324 @@
+qid	nhits	nDCG@10	query
+PLAIN-2	100	0.742110	Do Cholesterol Statin Drugs Cause Breast Cancer?
+PLAIN-12	100	0.087076	Exploiting Autophagy to Live Longer
+PLAIN-23	100	0.169074	How to Reduce Exposure to Alkylphenols Through Your Diet
+PLAIN-33	100	0.071712	What’s Driving America’s Obesity Problem?
+PLAIN-44	100	0.127417	Who Should be Careful About Curcumin?
+PLAIN-56	100	0.679170	Foods for Glaucoma
+PLAIN-68	100	0.531499	What is Actually in Chicken Nuggets?
+PLAIN-78	100	0.042472	What Do Meat Purge and Cola Have in Common?
+PLAIN-91	100	0.468824	Chronic Headaches and Pork Parasites
+PLAIN-102	100	0.204367	Stopping Heart Disease in Childhood
+PLAIN-112	100	0.402714	Food Dyes and ADHD
+PLAIN-123	100	0.036832	How Citrus Might Help Keep Your Hands Warm
+PLAIN-133	100	0.000000	Starving Tumors of Their Blood Supply
+PLAIN-143	100	0.323913	Are Dental X-Rays Safe?
+PLAIN-153	100	0.400650	How Should I Take Probiotics?
+PLAIN-165	100	0.298471	Breast Cancer & Alcohol: How Much is Safe?
+PLAIN-175	100	0.368640	Diet and Cellulite
+PLAIN-186	100	0.110046	Best Treatment for Constipation
+PLAIN-196	100	0.640591	Should We Avoid Titanium Dioxide?
+PLAIN-207	100	0.564544	Avoiding Cooked Meat Carcinogens
+PLAIN-217	100	0.000000	Plant-Based Diets for Psoriasis
+PLAIN-227	100	0.110046	Increasing Muscle Strength with Fenugreek
+PLAIN-238	100	0.000000	How Chemically Contaminated Are We?
+PLAIN-248	100	0.305235	Treating an Enlarged Prostate With Diet
+PLAIN-259	100	0.358954	Optimal Phytosterol Dose and Source
+PLAIN-270	100	0.094788	Is Caffeinated Tea Really Dehydrating?
+PLAIN-280	100	0.453743	Mercury Testing Recommended Before Pregnancy
+PLAIN-291	100	0.358954	Stool Size and Breast Cancer Risk
+PLAIN-307	100	0.761357	Vitamin D: Shedding some light on the new recommendations
+PLAIN-320	100	0.000000	Breast Cancer and Diet
+PLAIN-332	100	0.613147	Can antioxidant-rich spices counteract the effects of a high-fat meal?
+PLAIN-344	100	0.312779	Dioxins Stored in Our Own Fat May Increase Diabetes Risk
+PLAIN-358	100	0.000000	Didn't another study show carnitine was good for the heart?
+PLAIN-371	100	0.190047	Any update on the scary in vitro avocado data?
+PLAIN-383	100	0.113053	What do you think of Dr. Jenkins' take on paleolithic diets?
+PLAIN-395	100	0.000000	What about pepper plus turmeric in V8 juice?
+PLAIN-407	100	0.638788	Is annatto food coloring safe?
+PLAIN-418	100	0.760622	Fresh fruit versus frozen--which is better?
+PLAIN-430	100	0.584702	Are krill oil supplements better than fish oil capsules?
+PLAIN-441	100	0.855812	Is apple cider vinegar good for you?
+PLAIN-457	100	0.000000	How can you believe in any scientific study?
+PLAIN-468	100	0.254882	Is vitamin D3 (cholecalciferol) preferable to D2 (ergocalciferol)?
+PLAIN-478	12	0.000000	accidents
+PLAIN-488	100	0.914857	adenovirus 36
+PLAIN-499	100	0.300526	African-American
+PLAIN-510	3	0.000000	airport scanners
+PLAIN-520	4	0.000000	Alli
+PLAIN-531	100	0.236807	alternative medicine
+PLAIN-541	100	0.000000	American Dental Association
+PLAIN-551	0	0.000000	amnesia
+PLAIN-561	3	0.358954	aneurysm
+PLAIN-571	5	0.255821	anisakis
+PLAIN-583	1	0.220092	antinutrients
+PLAIN-593	2	0.469279	apnea
+PLAIN-603	3	0.000000	Arkansas
+PLAIN-613	100	0.000000	ascorbic acid
+PLAIN-623	100	0.248908	Atkins diet
+PLAIN-634	11	0.399569	avocados
+PLAIN-645	1	0.000000	bagels
+PLAIN-660	53	1.000000	beans
+PLAIN-671	4	1.000000	benzene
+PLAIN-681	100	1.000000	betel nuts
+PLAIN-691	89	0.000000	bioavailability
+PLAIN-701	100	0.553828	black raspberries
+PLAIN-711	100	0.358954	blood clots
+PLAIN-721	18	1.000000	BMAA
+PLAIN-731	82	0.863015	bone fractures
+PLAIN-741	11	0.848603	BPH
+PLAIN-751	100	0.000000	BRCA genes
+PLAIN-761	100	0.151301	breast pain
+PLAIN-771	3	1.000000	bronchiolitis obliterans
+PLAIN-782	100	0.000000	Bush administration
+PLAIN-792	3	0.644824	cadaverine
+PLAIN-806	100	0.841591	caloric restriction
+PLAIN-817	8	0.000000	canker sores
+PLAIN-827	100	0.665949	carcinogens
+PLAIN-838	7	0.855096	carrageenan
+PLAIN-850	7	0.648932	cauliflower
+PLAIN-872	17	0.000000	chanterelle mushrooms
+PLAIN-882	2	0.358954	Chernobyl
+PLAIN-892	8	0.870125	chickpeas
+PLAIN-902	4	0.636682	chlorophyll
+PLAIN-913	14	0.933746	cinnamon
+PLAIN-924	1	0.220092	cocaine
+PLAIN-934	76	0.823700	coffee
+PLAIN-946	5	0.330138	coma
+PLAIN-956	100	0.458412	cooking methods
+PLAIN-966	13	0.148041	cortisol
+PLAIN-977	100	0.000000	crib death
+PLAIN-987	3	0.234639	cumin
+PLAIN-997	0	0.000000	Czechoslovakia
+PLAIN-1008	1	0.000000	deafness
+PLAIN-1018	25	0.521098	DHA
+PLAIN-1028	100	0.000000	dietary scoring
+PLAIN-1039	100	1.000000	domoic acid
+PLAIN-1050	13	0.066254	Dr. Dean Ornish
+PLAIN-1066	15	0.000000	Dr. Walter Willett
+PLAIN-1088	2	0.553146	ECMO
+PLAIN-1098	0	0.000000	eggnog
+PLAIN-1109	42	0.453743	endocrine disruptors
+PLAIN-1119	100	0.000000	energy drinks
+PLAIN-1130	1	1.000000	ergothioneine
+PLAIN-1141	100	0.220092	Evidence-based medicine
+PLAIN-1151	100	0.571160	factory farming practices
+PLAIN-1161	53	0.000000	fava beans
+PLAIN-1172	1	0.220092	fenugreek
+PLAIN-1183	14	0.289523	Finland
+PLAIN-1193	100	0.066254	flax oil
+PLAIN-1203	100	0.358954	folic acid
+PLAIN-1214	0	0.000000	Fosamax
+PLAIN-1225	24	0.536356	fructose
+PLAIN-1236	1	0.339160	galactosemia
+PLAIN-1249	100	0.000000	genetic manipulation
+PLAIN-1262	100	0.233651	Global Burden of Disease Study
+PLAIN-1275	46	0.547398	goji berries
+PLAIN-1288	29	0.905212	grapes
+PLAIN-1299	100	0.314880	growth promoters
+PLAIN-1309	0	0.000000	halibut
+PLAIN-1320	100	0.610586	Harvard Physicians’ Study II
+PLAIN-1331	3	0.000000	hearing
+PLAIN-1342	62	0.312049	heme iron
+PLAIN-1353	2	0.000000	hernia
+PLAIN-1363	1	0.220092	Hiroshima
+PLAIN-1374	100	0.063621	hormonal dysfunction
+PLAIN-1387	17	0.616830	hyperactivity
+PLAIN-1398	100	1.000000	IGF-1
+PLAIN-1409	100	0.151397	industrial toxins
+PLAIN-1419	8	0.437352	insects
+PLAIN-1429	100	0.000000	Iowa Women’s Health Study
+PLAIN-1441	60	0.388526	Japan
+PLAIN-1453	100	0.440920	junk food
+PLAIN-1463	100	0.399569	kidney beans
+PLAIN-1473	1	1.000000	kohlrabi
+PLAIN-1485	1	0.000000	lard
+PLAIN-1496	2	0.000000	leeks
+PLAIN-1506	7	0.298490	leucine
+PLAIN-1516	2	0.000000	Lindane
+PLAIN-1527	100	0.820069	liver disease
+PLAIN-1537	100	0.110046	low-carb diets
+PLAIN-1547	72	0.000000	lyme disease
+PLAIN-1557	29	0.278198	magnesium
+PLAIN-1568	13	1.000000	maple syrup
+PLAIN-1579	2	0.213986	mastitis
+PLAIN-1590	100	0.138862	medical ethics
+PLAIN-1601	44	0.580602	memory
+PLAIN-1611	0	0.000000	mesquite
+PLAIN-1621	0	0.000000	Mevacor
+PLAIN-1635	100	0.582939	milk
+PLAIN-1645	1	0.302602	molasses
+PLAIN-1656	100	0.138862	mouth cancer
+PLAIN-1667	100	0.781984	muscle health
+PLAIN-1679	0	0.000000	myelopathy
+PLAIN-1690	100	0.000000	National Academy of Sciences
+PLAIN-1700	100	0.000000	Native Americans
+PLAIN-1710	13	1.000000	neurocysticercosis
+PLAIN-1721	100	0.671759	NIH-AARP study
+PLAIN-1731	5	0.765361	norovirus
+PLAIN-1741	100	1.000000	nuts
+PLAIN-1752	0	0.000000	okra
+PLAIN-1762	100	0.412532	oral intraepithelial neoplasia
+PLAIN-1772	2	1.000000	organotins
+PLAIN-1784	100	0.000000	oxen meat
+PLAIN-1794	2	1.000000	Panama
+PLAIN-1805	100	0.835780	Parkinson's disease
+PLAIN-1817	35	0.532621	peanut butter
+PLAIN-1827	0	0.000000	Peoria
+PLAIN-1837	71	1.000000	pesticides
+PLAIN-1847	4	0.248908	philippines
+PLAIN-1857	100	0.627409	phytic acid
+PLAIN-1867	2	0.274876	pineapples
+PLAIN-1877	100	0.000000	plant-based diet
+PLAIN-1887	100	0.000000	poisonous plants
+PLAIN-1897	10	0.000000	polypropylene plastic
+PLAIN-1909	56	0.936379	pork
+PLAIN-1919	100	0.727330	poultry workers
+PLAIN-1929	100	0.000000	prenatal vitamins
+PLAIN-1940	7	0.358954	prolactin
+PLAIN-1950	5	0.248908	prunes
+PLAIN-1962	2	0.000000	pumpkin
+PLAIN-1972	2	0.000000	quinine
+PLAIN-1983	24	1.000000	rapamycin
+PLAIN-1995	100	0.000000	red tea
+PLAIN-2009	5	0.252943	rhabdomyolysis
+PLAIN-2019	1	0.469279	rickets
+PLAIN-2030	2	0.302602	Rutin
+PLAIN-2040	13	0.767027	salmon
+PLAIN-2051	100	0.724153	saturated fat
+PLAIN-2061	42	0.905212	seafood
+PLAIN-2071	21	0.581082	serotonin
+PLAIN-2081	100	1.000000	shelf life
+PLAIN-2092	5	0.648932	sirtuins
+PLAIN-2102	100	1.000000	smoking
+PLAIN-2113	100	0.000000	soil health
+PLAIN-2124	2	0.358954	spearmint
+PLAIN-2134	0	0.000000	Splenda
+PLAIN-2145	49	0.148297	St. John's wort
+PLAIN-2156	3	0.644824	stevia
+PLAIN-2167	2	0.000000	subsidies
+PLAIN-2177	10	0.258810	sulfur
+PLAIN-2187	2	0.383343	suppositories
+PLAIN-2197	34	0.791727	sweeteners
+PLAIN-2209	0	0.000000	taro
+PLAIN-2220	1	0.235046	tempeh
+PLAIN-2230	6	0.106337	thiamine
+PLAIN-2240	9	0.583433	titanium dioxide
+PLAIN-2250	9	0.000000	tongue worm
+PLAIN-2261	100	0.563788	trans fats
+PLAIN-2271	0	0.000000	Tufts
+PLAIN-2281	3	0.000000	turnips
+PLAIN-2291	100	0.339160	ultra-processed foods
+PLAIN-2301	100	0.000000	uterine health
+PLAIN-2311	3	0.000000	veal
+PLAIN-2321	76	0.000000	veggie chicken
+PLAIN-2332	100	0.520618	viral infections
+PLAIN-2343	100	0.000000	vitamin K
+PLAIN-2354	100	0.383566	walnut oil
+PLAIN-2364	100	0.000000	weight gain
+PLAIN-2375	100	0.000000	whiting
+PLAIN-2386	3	0.000000	worms
+PLAIN-2396	0	0.000000	Yale
+PLAIN-2408	0	0.000000	Zoloft
+PLAIN-2430	100	0.413977	Preventing Brain Loss with B Vitamins?
+PLAIN-2440	100	0.000000	More Than an Apple a Day: Combating Common Diseases
+PLAIN-2450	100	0.286346	Are Organic Foods Safer?
+PLAIN-2460	100	0.088984	Diabetes as a Disease of Fat Toxicity
+PLAIN-2470	100	0.469537	Is Milk Good for Our Bones?
+PLAIN-2480	100	0.293034	Preventing Ulcerative Colitis with Diet
+PLAIN-2490	100	0.444918	The Actual Benefit of Diet vs. Drugs
+PLAIN-2500	100	0.000000	The Saturated Fat Studies: Buttering Up the Public
+PLAIN-2510	100	0.690194	Coffee and Artery Function
+PLAIN-2520	100	0.151202	Caloric Restriction vs. Plant-Based Diets
+PLAIN-2530	100	0.920746	Infectobesity: Adenovirus 36 and Childhood Obesity
+PLAIN-2540	100	0.202190	Does Cholesterol Size Matter?
+PLAIN-2550	100	0.040196	Barriers to Heart Disease Prevention
+PLAIN-2560	100	0.716287	Childhood Constipation and Cow’s Milk
+PLAIN-2570	100	0.122226	Diabetics Should Take Their Pulses
+PLAIN-2580	100	0.357608	Academy of Nutrition and Dietetics Conflicts of Interest
+PLAIN-2590	100	0.048951	Do Vegetarians Get Enough Protein?
+PLAIN-2600	100	0.543457	Eggs and Arterial Function
+PLAIN-2610	100	0.213432	Treating Asthma With Plants vs. Supplements?
+PLAIN-2620	100	0.598716	Phytates for the Treatment of Cancer
+PLAIN-2630	100	0.542364	Alkylphenol Endocrine Disruptors and Allergies
+PLAIN-2640	100	0.631730	Chicken Salmonella Thanks to Meat Industry Lawsuit
+PLAIN-2650	100	0.428385	Turmeric Curcumin and Osteoarthritis
+PLAIN-2660	100	0.176300	How Long to Detox From Fish Before Pregnancy?
+PLAIN-2670	100	0.299648	Is Caramel Color Carcinogenic?
+PLAIN-2680	100	0.492003	Counteracting the Effects of Dioxins Through Diet
+PLAIN-2690	100	0.390579	Chronic Headaches and Pork Tapeworms
+PLAIN-2700	100	0.242426	Heart Disease Starts in Childhood
+PLAIN-2710	100	0.519592	Artificial Food Colors and ADHD
+PLAIN-2720	100	0.133421	Keeping Your Hands Warm With Citrus
+PLAIN-2730	100	0.254083	Anti-Angiogenesis: Cutting Off Tumor Supply Lines
+PLAIN-2740	100	0.416872	Cancer Risk From CT Scan Radiation
+PLAIN-2750	100	0.594582	Preventing the Common Cold with Probiotics?
+PLAIN-2760	100	0.000000	Eating Healthy on a Budget
+PLAIN-2770	100	0.550015	Flaxseeds & Breast Cancer Survival: Clinical Evidence
+PLAIN-2780	100	0.397442	Do Fruit & Nut Bars Cause Weight Gain?
+PLAIN-2790	100	0.668963	Titanium Dioxide & Inflammatory Bowel Disease
+PLAIN-2800	100	0.106737	Prolonged Liver Function Enhancement From Broccoli
+PLAIN-2810	100	0.051848	Apple Juice May Be Worse Than Sugar Water
+PLAIN-2820	100	0.000000	Preventing Strokes with Diet
+PLAIN-2830	100	0.319394	Neurobiology of Artificial Sweeteners
+PLAIN-2840	100	0.000000	Benefits of Fenugreek Seeds
+PLAIN-2850	100	0.000000	More Antibiotics In White Meat or Dark Meat?
+PLAIN-2860	100	1.000000	BPA Plastic and Male Sexual Dysfunction
+PLAIN-2870	100	0.000000	Filled Full of Lead
+PLAIN-2880	100	0.000000	The Answer to the Pritikin Puzzle
+PLAIN-2890	100	0.000000	To Snack or Not to Snack?
+PLAIN-2900	100	0.000000	Boosting Good Bacteria in the Colon Without Probiotics
+PLAIN-2910	100	0.204367	Optimal Phytosterol Dose
+PLAIN-2920	100	0.000000	Human Neurotransmitters in Plants
+PLAIN-2930	100	0.360779	Kiwifruit for Irritable Bowel Syndrome
+PLAIN-2940	100	0.000000	Dietary Treatment of Crohn's Disease
+PLAIN-2950	100	0.000000	Unsafe at Any Feed
+PLAIN-2960	100	0.294081	Pharmacists Versus Health Food Store Employees: Who Gives Better Advice?
+PLAIN-2970	100	0.380627	Preventing Cataracts with Diet
+PLAIN-2981	100	0.431220	Cheese Mites and Maggots
+PLAIN-2991	100	0.306574	Cholesterol and Lower Back Pain
+PLAIN-3001	100	0.306574	EPIC Findings on Lymphoma
+PLAIN-3014	100	0.000000	Sometimes the Enzyme Myth Is True
+PLAIN-3026	100	0.333333	Vitamin C-Enriched Bacon
+PLAIN-3037	100	0.000000	Out of the Lab Onto the Track
+PLAIN-3053	100	0.765361	Dragon's Blood
+PLAIN-3063	100	0.000000	Better Than Goji Berries
+PLAIN-3074	100	1.000000	How to Help Prevent Abdominal Aortic Aneurysms
+PLAIN-3085	100	0.184576	The Difficulty of Arriving at a Vitamin D Recommendation
+PLAIN-3097	100	0.477038	Amyloid and Apple Juice
+PLAIN-3116	100	0.000000	Dietary Guidelines: From Dairies to Berries
+PLAIN-3131	100	0.306621	Are Avocados Good for You?
+PLAIN-3141	100	0.000000	Relieving Yourself of Excess Estrogen
+PLAIN-3151	100	0.000000	Too Much Iodine Can Be as Bad as Too Little
+PLAIN-3161	100	0.420909	Is Milk and Mucus a Myth?
+PLAIN-3171	100	0.204008	Convergence of Evidence
+PLAIN-3181	100	0.000000	Is Dragon Fruit Good For You?
+PLAIN-3191	100	0.370284	Is Distilled Fish Oil Toxin-Free?
+PLAIN-3201	100	0.297426	Acne & Cancer Connection
+PLAIN-3211	100	0.000000	Overdosing on Greens
+PLAIN-3221	100	0.000000	Dietary Theory of Alzheimer's
+PLAIN-3231	100	0.000000	Meat & Multiple Myeloma
+PLAIN-3241	54	0.000000	Apthous Ulcer Mystery Solved
+PLAIN-3251	100	0.069784	EPIC Study
+PLAIN-3261	100	0.106737	Update on Herbalife®
+PLAIN-3271	100	0.000000	Saturated Fat & Cancer Progression
+PLAIN-3281	100	0.323913	Aluminum in Vaccines vs. Food
+PLAIN-3292	100	0.223297	Are Multivitamins Good For You?
+PLAIN-3302	100	0.294203	Fish Fog
+PLAIN-3312	100	0.131563	Sexually Transmitted Fish Toxin
+PLAIN-3322	100	0.066254	Veggies vs. Cancer
+PLAIN-3332	100	0.424117	Alcohol Risks vs. Benefits
+PLAIN-3342	100	0.671386	Is Coconut Milk Good For You?
+PLAIN-3352	100	0.000000	Boosting Heart Nerve Control
+PLAIN-3362	100	0.588053	Kuna Indian Secret
+PLAIN-3372	100	0.120260	The Healthiest Sweetener
+PLAIN-3382	100	0.150937	Are Artificial Colors Bad for You?
+PLAIN-3392	100	0.000000	Healthiest Airplane Beverage
+PLAIN-3402	100	0.000000	Antioxidant Content of 300 Foods
+PLAIN-3412	100	0.280462	Plant vs. Cow Calcium
+PLAIN-3422	100	0.160366	Vitamin Supplements Worth Taking
+PLAIN-3432	100	0.257875	Healthy Chocolate Milkshakes
+PLAIN-3442	100	0.000000	The Healthiest Vegetables
+PLAIN-3452	100	0.576826	Bowel Movement Frequency
+PLAIN-3462	100	0.696918	Olive Oil and Artery Function
+PLAIN-3472	100	0.000000	How Doctors Responded to Being Named a Leading Killer
