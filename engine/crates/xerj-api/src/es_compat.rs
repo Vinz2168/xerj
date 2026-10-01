@@ -12224,7 +12224,17 @@ async fn search_impl(
         principal.label(),
         index.as_str(),
         "ok",
-        &format!("took={}ms hits={}", took_ms, merged_hits.len()),
+        // `size=` is the requested page size. A `size:0` search asks for no
+        // hits — it is a counting probe (autoindex's verification reads back
+        // exact group counts that way), not someone looking for documents,
+        // and `xerj gain` needs exactly that distinction to report a hit
+        // rate that is about people (#1105).
+        &format!(
+            "took={}ms hits={} size={}",
+            took_ms,
+            merged_hits.len(),
+            body.size
+        ),
     );
 
     // ES semantics: when the sort has any non-score key, `max_score` is null

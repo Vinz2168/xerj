@@ -125,6 +125,25 @@ pub fn next_hint(
     )
 }
 
+/// The code-aware search hint that follows `next_hint` whenever source code
+/// was indexed. One copy, shared by BOTH success printers — the interactive
+/// run summary and the generated-run (`--no-graph`/brain) summary — because
+/// #1103 was exactly this text existing in one printer and not the other:
+/// a `--no-graph` run taught the user nothing while a graph run taught the
+/// `_passage` projection. The blind-usability rationale is in the comment
+/// at the interactive call site.
+pub(crate) fn code_search_hint(prefix: &str) -> String {
+    format!(
+        "      code was indexed — for a function/class instead of a whole file:\n\
+         \x20       curl -s $URL/{prefix}-*/_search -H 'Content-Type: application/json' \\\n\
+         \x20         -d '{{\"query\":{{\"bool\":{{\"should\":[{{\"multi_match\":{{\"query\":\"<symbol or phrase>\",\
+         \"fields\":[\"body\",\"defs\"],\"type\":\"most_fields\"}}}},{{\"match_phrase\":{{\"defs\":{{\"query\":\"<symbol or phrase>\",\"boost\":4}}}}}}]}}}},\
+         \"_source\":[\"ax_path\",\"title\"],\"fields\":[\"_passage\"]}}'\n\
+         \x20       (the `match_phrase` clause ranks the file that DEFINES a symbol above files that merely call it; `_passage` returns \
+         the enclosing block, not the file)",
+    )
+}
+
 fn prepared_records_identity(cfg: &IndexCfg) -> Result<String> {
     let value = json!({
         "contract": PREPARED_RECORDS_IDENTITY,
@@ -4247,6 +4266,30 @@ fn finish_generated_run(es: &Es, journal: &mut state::Journal, cfg: &IndexCfg) -
                 println!("  {line}");
             }
         }
+        // #1103: this printer used to stop at the commit line, so a
+        // `--no-graph` run taught the user nothing — no data map, no search
+        // shape — while the interactive summary taught both. The guidance is
+        // the same text from the same functions; `code_files_indexed` on the
+        // committed run document is the code-corpus gate (the plan that the
+        // interactive site reads is not in scope on this resume/watch path).
+        println!(
+            "{}",
+            next_hint(
+                &cfg.url,
+                &cfg.prefix,
+                cfg.api_key.as_deref(),
+                std::env::var("XERJ_API_KEY").ok().as_deref(),
+                cfg.api_key_file.as_deref(),
+            )
+        );
+        if summary
+            .get("code_files_indexed")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+        {
+            println!("{}", code_search_hint(&cfg.prefix));
+        }
     }
     Ok(summary)
 }
@@ -5069,7 +5112,19 @@ fn run_index_report_inner(
     // enabled, not merely when `--quiet` is absent.
     let es = Es::with_bulk_timeout(&cfg.url, cfg.api_key.clone(), cfg.bulk_timeout_secs)?
         .with_bulk_concurrency(cfg.workers, pr.enabled());
-    es.ping()?;
+    // #1102: ping's raw context is honest but teaches a first-time user
+    // nothing — autoindex is the onboarding verb, so the no-node case here
+    // gets the same recipe `xerj def` already prints: start one, or aim at
+    // an existing node.
+    if let Err(e) = es.ping() {
+        anyhow::bail!(
+            "no XERJ node reachable at {url} ({e:#})\n\n\
+             Start one, then re-run this command:\n  \
+             xerj --insecure --data-dir ./.xerj-data &\n\n\
+             (or point at an existing node with --url / $XERJ_URL)",
+            url = cfg.url
+        );
+    }
 
     // `--label <question-set>` (#1062): every record's payload goes through
     // the node's /_decide at ingest and the answers are stamped on as
@@ -8419,19 +8474,11 @@ fn run_index_report_inner(
         // files back, and reinvented client-side slicing rather than
         // discovering `_passage` — which it never saw mentioned anywhere.
         // Only printed when source code was actually indexed; for a PDF or log
-        // corpus it would be noise.
+        // corpus it would be noise. The text itself is shared with the
+        // generated-run printer via `code_search_hint` (#1103).
         let indexed_code = plan.files.values().any(|fa| fa.family == "code");
         if indexed_code {
-            println!(
-                "      code was indexed — for a function/class instead of a whole file:\n\
-                 \x20       curl -s $URL/{}-*/_search -H 'Content-Type: application/json' \\\n\
-                 \x20         -d '{{\"query\":{{\"bool\":{{\"should\":[{{\"multi_match\":{{\"query\":\"<symbol or phrase>\",\
-                 \"fields\":[\"body\",\"defs\"],\"type\":\"most_fields\"}}}},{{\"match_phrase\":{{\"defs\":{{\"query\":\"<symbol or phrase>\",\"boost\":4}}}}}}]}}}},\
-                 \"_source\":[\"ax_path\",\"title\"],\"fields\":[\"_passage\"]}}'\n\
-                 \x20       (the `match_phrase` clause ranks the file that DEFINES a symbol above files that merely call it; `_passage` returns \
-                 the enclosing block, not the file)",
-                cfg.prefix
-            );
+            println!("{}", code_search_hint(&cfg.prefix));
         }
         // A mixed corpus needs one more thing said out loud. Code volume
         // swamps prose on shared vocabulary: in a blind run, a question about
