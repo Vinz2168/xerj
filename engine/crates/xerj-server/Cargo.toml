@@ -66,15 +66,20 @@ prost.workspace = true
 # use — no special build, no separate binary. Build with
 # `--no-default-features` for a slimmer binary without the neural backend
 # (the lexical + proxy backends still work).
-default = ["neural"]
+default = ["neural", "decide-local"]
 neural = ["xerj-engine/neural"]
 onnx-experimental = ["xerj-engine/onnx-experimental"]
-# Tier-2 local decide head (issue #1057): off by default, matching how
-# xerj-api gates it — the shipped default keeps today's history-vote-only
-# decide contract and adds nothing to the build. Arming the tier at runtime
-# needs this feature AND `--decide-mode local --decide-model-dir <path>`
-# (or XERJ_DECIDE_MODE/XERJ_DECIDE_MODEL_DIR); a default build asked for
-# `--decide-mode local` boots on the history vote and says exactly that.
+# Tier-2 local decide head (issue #1057), ON by default since rc.80: the
+# rc.80 gate measurement (PR #1088) caught the stock release binary arming
+# nothing for `--decide-mode local` — release.yml builds default features,
+# and this feature was off, so tier 2 existed only in from-source builds.
+# Default-on matches the batteries-included rule one comment up, costs no
+# new dependency (the candle/tokenizers crates it names are already in the
+# default build via `neural`) and adds no egress path (no hf-hub; the
+# published inventory is unchanged). The tier stays OPT-IN at runtime:
+# `--decide-mode local --decide-model-dir <path>` (or
+# XERJ_DECIDE_MODE/XERJ_DECIDE_MODEL_DIR); without it a node boots on the
+# history vote exactly as before. `--no-default-features` still drops it.
 decide-local = ["xerj-api/decide-local"]
 # Diagnostic-only profiling. It is excluded from all shipped feature sets:
 # jemalloc profiling changes allocator fast paths and pprof installs SIGPROF.
