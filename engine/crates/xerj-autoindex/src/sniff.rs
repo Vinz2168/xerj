@@ -219,23 +219,21 @@ fn sniff_bytes(
         return Ok(mk(Family::Sqlite));
     }
     if prefix.starts_with(b"PK\x03\x04") {
-        // zip container: DOCX iff it holds word/document.xml
+        // zip container: DOCX iff it holds word/document.xml; another known
+        // document container is named for what it is, not as an archive
+        let mut kind = "zip";
         if !gzip {
             if let Ok(f) = std::fs::File::open(content_path) {
                 if let Ok(mut z) = zip::ZipArchive::new(f) {
-                    let is_docx = (0..z.len()).any(|i| {
-                        z.by_index_raw(i)
-                            .map(|e| e.name() == "word/document.xml")
-                            .unwrap_or(false)
-                    });
-                    if is_docx {
+                    kind = zip_container_kind(&mut z);
+                    if kind == "docx" {
                         return Ok(mk(Family::Docx));
                     }
                 }
             }
         }
         let mut s = mk(Family::Binary);
-        s.binary_kind = Some("zip".into());
+        s.binary_kind = Some(kind.into());
         return Ok(s);
     }
     // Compressed image/audio/model payloads routinely pass the NUL and
@@ -1070,6 +1068,63 @@ fn looks_like_tar_header(prefix: &[u8]) -> bool {
         })
         .sum();
     stored == computed
+}
+
+/// Name a zip container by its members: `"docx"`, another document format
+/// autoindex has no extractor for (`"xlsx"`, `"pptx"`, `"odt"`, …), or
+/// `"zip"` for anything else.
+///
+/// Office Open XML, OpenDocument and EPUB are all zips, so the `PK` magic alone
+/// cannot tell a spreadsheet from a Takeout download — and calling a workbook
+/// an "unextracted zip archive" tells its owner to unzip it, which yields a
+/// folder of XML parts that is no more searchable than the file was. OOXML is
+/// identified by its main part; OpenDocument and EPUB by the `mimetype` member
+/// their container specs require, read through a bounded reader.
+fn zip_container_kind<R: Read + std::io::Seek>(z: &mut zip::ZipArchive<R>) -> &'static str {
+    const PARTS: &[(&str, &str)] = &[
+        ("word/document.xml", "docx"),
+        ("xl/workbook.xml", "xlsx"),
+        ("xl/workbook.bin", "xlsb"),
+        ("ppt/presentation.xml", "pptx"),
+    ];
+    for (part, kind) in PARTS {
+        if z.index_for_name(part).is_some() {
+            return kind;
+        }
+    }
+    let mut mime = Vec::with_capacity(64);
+    if let Ok(e) = z.by_name("mimetype") {
+        e.take(64).read_to_end(&mut mime).ok();
+    }
+    match mime.trim_ascii() {
+        b"application/vnd.oasis.opendocument.text" => "odt",
+        b"application/vnd.oasis.opendocument.spreadsheet" => "ods",
+        b"application/vnd.oasis.opendocument.presentation" => "odp",
+        b"application/epub+zip" => "epub",
+        _ => "zip",
+    }
+}
+
+/// What to tell the user about a document container autoindex recognizes but
+/// cannot extract yet, or `None` for any other binary kind.
+///
+/// Like `archive_advice`, the reason names an action: the export that turns the
+/// file into a format autoindex does index today.
+pub fn unsupported_document_advice(binary_kind: &str) -> Option<String> {
+    let (what, how) = match binary_kind {
+        "xlsx" => ("Excel workbook", "export each sheet as CSV"),
+        "xlsb" => ("Excel binary workbook", "export each sheet as CSV"),
+        "pptx" => ("PowerPoint presentation", "export it as PDF"),
+        "odt" => ("OpenDocument text", "export it as DOCX or PDF"),
+        "ods" => ("OpenDocument spreadsheet", "export each sheet as CSV"),
+        "odp" => ("OpenDocument presentation", "export it as PDF"),
+        "epub" => ("EPUB e-book", "convert it to PDF"),
+        _ => return None,
+    };
+    Some(format!(
+        "unsupported document format ({what}): autoindex has no extractor for it yet — \
+         {how} to index it now"
+    ))
 }
 
 /// What to tell the user about a file that is an ARCHIVE, or `None` for any
@@ -3927,6 +3982,133 @@ mod mail_and_archive_sniff_tests {
         // Not an archive: no advice, the ordinary "binary content (…)" stands.
         for kind in ["png", "pdf", "unknown", "", "設計"] {
             assert_eq!(archive_advice(kind, false), None, "{kind}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod zip_container_sniff_tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Write a zip with the named members to a temp dir and sniff it through
+    /// the real read path. ODF and EPUB store `mimetype` uncompressed and first;
+    /// fixtures do the same so the bounded read sees what a real file holds.
+    fn sniff_zip(members: &[(&str, &str)]) -> Sniffed {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob");
+        let mut z = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        for (name, content) in members {
+            let method = if *name == "mimetype" {
+                zip::CompressionMethod::Stored
+            } else {
+                zip::CompressionMethod::Deflated
+            };
+            let opts = zip::write::SimpleFileOptions::default().compression_method(method);
+            z.start_file(*name, opts).unwrap();
+            z.write_all(content.as_bytes()).unwrap();
+        }
+        z.finish().unwrap();
+        sniff(&path).unwrap()
+    }
+
+    fn kind(members: &[(&str, &str)]) -> (Family, Option<String>) {
+        let sn = sniff_zip(members);
+        (sn.family, sn.binary_kind)
+    }
+
+    fn binary(k: &str) -> (Family, Option<String>) {
+        (Family::Binary, Some(k.into()))
+    }
+
+    /// An Office or OpenDocument file is a zip, but it is not an archive to
+    /// unzip: before this, every container below except DOCX sniffed as
+    /// `zip` and was junked with "extract it first (unzip <file>)".
+    #[test]
+    fn office_containers_are_named_by_their_main_part() {
+        let ct = ("[Content_Types].xml", "<Types/>");
+        assert_eq!(
+            kind(&[ct, ("word/document.xml", "<w:document/>")]),
+            (Family::Docx, None)
+        );
+        assert_eq!(
+            kind(&[ct, ("xl/workbook.xml", "<workbook/>")]),
+            binary("xlsx")
+        );
+        assert_eq!(kind(&[ct, ("xl/workbook.bin", "\u{1}")]), binary("xlsb"));
+        assert_eq!(
+            kind(&[ct, ("ppt/presentation.xml", "<p:presentation/>")]),
+            binary("pptx")
+        );
+    }
+
+    #[test]
+    fn opendocument_and_epub_are_named_by_their_mimetype_member() {
+        let odf = |mime: &'static str| {
+            kind(&[
+                ("mimetype", mime),
+                ("content.xml", "<office:document-content/>"),
+                ("META-INF/manifest.xml", "<manifest:manifest/>"),
+            ])
+        };
+        assert_eq!(
+            odf("application/vnd.oasis.opendocument.text"),
+            binary("odt")
+        );
+        assert_eq!(
+            odf("application/vnd.oasis.opendocument.spreadsheet"),
+            binary("ods")
+        );
+        assert_eq!(
+            odf("application/vnd.oasis.opendocument.presentation"),
+            binary("odp")
+        );
+        assert_eq!(
+            kind(&[
+                ("mimetype", "application/epub+zip"),
+                ("META-INF/container.xml", "<container/>"),
+            ]),
+            binary("epub")
+        );
+    }
+
+    /// Everything else stays an archive, so the Takeout advice is unchanged:
+    /// a zip of ordinary files, an unknown `mimetype`, and a `mimetype` member
+    /// longer than the bounded read (which must not be mistaken for a match).
+    #[test]
+    fn other_zips_are_still_archives() {
+        assert_eq!(
+            kind(&[
+                ("Takeout/Mail/All mail.mbox", "From x\n"),
+                ("notes.txt", "hi")
+            ]),
+            binary("zip")
+        );
+        assert_eq!(
+            kind(&[("mimetype", "application/vnd.oasis.opendocument.graphics")]),
+            binary("zip")
+        );
+        let long = format!("application/epub+zip{}", " x".repeat(64));
+        assert_eq!(kind(&[("mimetype", long.as_str())]), binary("zip"));
+    }
+
+    #[test]
+    fn unsupported_documents_get_an_export_hint_not_archive_advice() {
+        for k in ["xlsx", "xlsb", "pptx", "odt", "ods", "odp", "epub"] {
+            assert_eq!(archive_advice(k, false), None, "{k}");
+            let advice = unsupported_document_advice(k).unwrap();
+            assert!(
+                advice.starts_with("unsupported document format (")
+                    && advice.contains("to index it now"),
+                "{k}: {advice}"
+            );
+            assert!(!advice.contains("unzip"), "{k}: {advice}");
+        }
+        assert!(unsupported_document_advice("xlsx")
+            .unwrap()
+            .contains("Excel workbook"));
+        for k in ["zip", "tar", "png", "docx", "unknown", ""] {
+            assert_eq!(unsupported_document_advice(k), None, "{k}");
         }
     }
 }
