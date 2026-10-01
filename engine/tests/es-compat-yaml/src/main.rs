@@ -784,13 +784,13 @@ fn execute_do(
             // 404 on delete = idempotent cleanup (OK)
             // 409 on create = index exists from prior test (OK after cleanup)
             if !action_name.contains("delete") && !action_name.contains("create") {
-                return Err(format!(
-                    "{} {} → {} {}",
-                    method,
-                    path,
-                    status,
-                    &resp_text[..resp_text.len().min(200)]
-                ));
+                // Truncate on a char boundary: a multibyte error reason at
+                // the 200-byte mark would panic the whole runner here.
+                let mut cut = resp_text.len().min(200);
+                while !resp_text.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                return Err(format!("{} {} → {} {}", method, path, status, &resp_text[..cut]));
             }
         }
 
