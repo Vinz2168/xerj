@@ -212,6 +212,25 @@ match against flat documents and return silently wrong hits. It refuses at
 parse time instead, with a message that names the alternative (denormalize the
 relationship). Any other query type answers `unknown query type`.
 
+**Unknown fields in lookup clauses: strict by choice, not by default.**
+ES answers a lookup (`term`, `terms`, `match`, `match_phrase`,
+`match_phrase_prefix`, `prefix`, `wildcard`, `regexp`, `fuzzy`, `range`) naming
+a field the index does not map with a silent 0-hit — which a caller cannot
+distinguish from an empty corpus; the map-gate measurement counted 5 silent
+wrong-field misses in 30 agent intents. XERJ keeps that default on the wire
+(the ES-YAML suite has legitimate cases querying an unmapped `missing_field`)
+but answers it with the `_xerj.hints` `unknown_field` diagnostic, and refuses
+with a **400 naming the field** and the searchable fields where strictness is
+asked for: `?strict_unknown_fields=true` per request,
+`index.query.strict_unknown_fields=true` per index (one strict target covers
+the whole request), and — because `xerj autoindex` PUTs an explicit full
+schema, where a wrong field name is a mistake and not a dynamic-mapping
+probe — every index autoindex creates. `?strict_unknown_fields=false` opts
+one request back out. Two exemptions hold either way: `exists` on an unmapped
+field stays a truthful 0-hit, and a just-created index with no mappings yet
+is never validated. `_msearch` applies the same rule per item (setting only
+— NDJSON items carry no URL params).
+
 ## Aggregation Types Supported
 
 Complete and machine-checked the same way, from

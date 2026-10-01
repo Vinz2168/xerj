@@ -400,6 +400,22 @@ fn dataset_create_body(dataset: &PlanDataset) -> Value {
             "default": {"type": analyzer}
         }}});
     }
+    // #1093: autoindex PUTs an explicit full schema, so a lookup naming a
+    // field outside it is a mistake, not a dynamic-mapping probe — the exact
+    // case the refusal exists for (5 of 30 agent intents silently searched a
+    // wrong field name). Strict rides HERE, in the create body, not in
+    // `build_mapping`: this value is not hashed into the generation contract
+    // identities, so existing state dirs keep their digests; and
+    // `ensure_index` tolerates `resource_already_exists` without re-sending,
+    // so indices an older build created stay lenient (opt in via the setting).
+    if let Some(settings) = create_body
+        .get_mut("settings")
+        .and_then(Value::as_object_mut)
+    {
+        settings.insert("index.query.strict_unknown_fields".to_string(), json!(true));
+    } else {
+        create_body["settings"] = json!({"index.query.strict_unknown_fields": true});
+    }
     create_body
 }
 
@@ -6405,9 +6421,10 @@ fn run_index_report_inner(
     let mut refused: Vec<MappingRefusal> = Vec::new();
     for d in &plan.datasets {
         // The same create body the generated route installs
-        // (`dataset_create_body`): frozen mapping, `ax_paths`, and — when the
-        // profiler marked this dataset's prose semantic — the #1059 stemming
-        // analyzer declaration in `settings.analysis.analyzer.default`.
+        // (`dataset_create_body`): frozen mapping, `ax_paths`, the #1093
+        // strict-unknown-fields mark, and — when the profiler marked this
+        // dataset's prose semantic — the #1059 stemming analyzer declaration
+        // in `settings.analysis.analyzer.default`.
         let installed = es
             .ensure_index(&d.index, &dataset_create_body(d))
             .with_context(|| format!("create index {}", d.index))
@@ -10196,16 +10213,45 @@ mod stem_default_tests {
         assert!(body.pointer("/mappings/properties/body/analyzer").is_none());
     }
 
-    /// A dataset with no profiler-marked prose sends NO settings at all — the
-    /// create body is exactly the frozen mapping plus `ax_paths`, so the
-    /// server keeps `standard`'s exact term space for identifier/enum data.
+    /// A dataset with no profiler-marked prose sends no ANALYZER settings —
+    /// the create body's analysis side is empty, so the server keeps
+    /// `standard`'s exact term space for identifier/enum data. The #1093
+    /// strict-mark is the one setting every create body carries (see
+    /// `every_create_body_marks_the_index_strict_on_unknown_fields`).
     #[test]
     fn a_non_semantic_dataset_sends_no_analyzer_settings() {
         let body = dataset_create_body(&dataset("events", None));
-        assert!(body.get("settings").is_none(), "{body}");
+        assert!(body.pointer("/settings/analysis").is_none(), "{body}");
         assert_eq!(
             body.pointer("/mappings/properties/ax_paths"),
             Some(&json!({"type": "keyword"}))
+        );
+    }
+
+    /// #1093: every dataset index THIS build creates is strict on unknown
+    /// lookup fields, either spelling of the settings object — the explicit
+    /// full schema makes a wrong field name a mistake, not a probe. It rides
+    /// the create body only (never `build_mapping`), so the frozen identity
+    /// digests do not move.
+    #[test]
+    fn every_create_body_marks_the_index_strict_on_unknown_fields() {
+        let semantic = dataset_create_body(&dataset("prose", Some(infer::STEMMING_TEXT_ANALYZER)));
+        assert_eq!(
+            semantic.pointer("/settings/index.query.strict_unknown_fields"),
+            Some(&json!(true)),
+            "{semantic}"
+        );
+        let plain = dataset_create_body(&dataset("events", None));
+        assert_eq!(
+            plain.pointer("/settings/index.query.strict_unknown_fields"),
+            Some(&json!(true)),
+            "{plain}"
+        );
+        // The analyzer declaration survives beside it.
+        assert_eq!(
+            semantic.pointer("/settings/analysis/analyzer/default/type"),
+            Some(&json!("stemmer")),
+            "{semantic}"
         );
     }
 
@@ -10232,7 +10278,9 @@ mod stem_default_tests {
         });
         let legacy: PlanDataset = serde_json::from_value(legacy).unwrap();
         assert_eq!(legacy.text_analyzer, None);
-        assert!(dataset_create_body(&legacy).get("settings").is_none());
+        assert!(dataset_create_body(&legacy)
+            .pointer("/settings/analysis")
+            .is_none());
     }
 }
 
