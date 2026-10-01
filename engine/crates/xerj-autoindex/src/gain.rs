@@ -346,14 +346,20 @@ mod tests {
         // and probed before the ES-port+1 guess.
         assert_eq!(
             native_candidates("http://localhost:9200"),
-            vec!["http://localhost:8080".to_string(), "http://localhost:9201".to_string()]
+            vec![
+                "http://localhost:8080".to_string(),
+                "http://localhost:9201".to_string()
+            ]
         );
         // A node whose ES listener is itself on 8080 still gets both the
         // default native port and its +1 guess — only an exact duplicate
         // (ES port+1 == 8080) is deduplicated.
         assert_eq!(
             native_candidates("http://localhost:8080"),
-            vec!["http://localhost:8080".to_string(), "http://localhost:8081".to_string()]
+            vec![
+                "http://localhost:8080".to_string(),
+                "http://localhost:8081".to_string()
+            ]
         );
         assert_eq!(
             native_candidates("http://10.0.0.5:8079"),
