@@ -87,6 +87,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as the rc.80 final form. `confidence` keeps its raw meaning and the
   abstain gate keeps applying to it.
 
+- **The #1063 gate in its rc.80 final form: pair-level, measured, PASS
+  ([#1063](https://github.com/xerj-org/xerj/issues/1063), PR
+  [#1087](https://github.com/xerj-org/xerj/pull/1087)).** FiQA re-scored at
+  pair level — 19,440 raw (query, doc, `p_raw`, gold) rows, committed —
+  instead of the binned reconstruction. Method: BM25 top-30 shortlists
+  regenerated on the release binary (`xerj v1.0.0-rc.78`, lexical embedder,
+  private port, throwaway data dir) with the harness validating nDCG@10 =
+  0.2382 bit-for-bit against the 2026-09-20 baseline before any paid call;
+  then the baseline's fixed request shape verbatim (`jev-1.13.0`), 648 paid
+  calls (cap 50,000 enforced), 5.06 M input tokens, $0.2125, zero fails.
+  Deterministic query-level 80/20 split (`sha256(qid) % 5`, no RNG, no
+  clock — #940), deployment-faithful (fit on past queries, apply to new
+  ones); pair-level hash split reported as the secondary row. Measured
+  (`benchmarks/decisions-calibration/results/2026-09-30-pairlevel-fiqa/`):
+  raw all-pairs ECE **0.3109** — the published baseline number reproduced
+  exactly on a fresh paid run; held-out raw 0.2872 (Brier 0.1625);
+  **isotonic held-out 0.0088 (Brier 0.0256) — gate ≤ 0.10 MET**;
+  temperature 0.3163 (T = 1.4589), failing as before. Honest scope, stated
+  in the README: ECE flatters on a 96.9 %-negative dataset (92 % of
+  held-out pairs calibrate below 0.1); the substance is the Brier halving
+  and the top-bin remap — raw 0.90–0.98 becomes 0.24–0.53 against an actual
+  held-out relevance rate of 0.4208. The binned-smoothing caveat closes in
+  the gate's favour: pair-level (0.0088) beats binned (0.0330), because
+  15,840 real pairs give the fit ~98 knots where the binned form gave it 5.
+
 - **`POST /_ask` + `xerj_plan` MCP tool: prompt in, validated query DSL out
   ([#1056](https://github.com/xerj-org/xerj/issues/1056), PR
   [#1076](https://github.com/xerj-org/xerj/pull/1076)).** `POST /_ask`
@@ -312,6 +337,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [#1082](https://github.com/xerj-org/xerj/pull/1082).)
 ### Fixed
 
+- **PAVA knot-index bug in the calibration benchmark's Python mirror
+  (PR [#1087](https://github.com/xerj-org/xerj/pull/1087)).**
+  `benchmarks/decisions-calibration/fiqa_gate.py` recorded each pooled
+  block's first-x as `len(blocks)` at append time, which stops equaling the
+  pooled-point index after the first backward pool — every knot created
+  after a violation got its x shifted down and `apply()` mapped
+  probabilities through a compressed curve. Invisible on the bin-level gate
+  data (its even-bin fit points are strictly increasing, so no pooling
+  occurs and buggy and correct code coincide — both reproduce 0.0330, which
+  is why the Rust pinning test stayed green); it corrupted any fit on data
+  with local violations, i.e. the pair-level rerun, where the first pass
+  produced a nonsense isotonic 0.2372. The shipped Rust module
+  (`xerj_common::calibration`) was audited and is correct — blocks carry the
+  `enumerate()` pooled index and expand means to every pooled point — so
+  only the mirror diverged and no engine change was needed. The fixed
+  mirror matches the Rust representation exactly, agrees with an
+  independent naive run-pooling PAVA to 8.7e-19 at all 98 pooled points,
+  and still reproduces the bin-level 0.0330 to the digit. Lesson recorded:
+  the pinning test asserted ≤ 0.10, which the wrong number also satisfied —
+  an exact-value pin on a pooling input would have caught the divergence.
 - **Release notes now compare against the previous engine release instead of
   the latest corpus pack.** GitHub anchors auto-generated notes ("Full
   Changelog") on the most recently published release, so since the daily

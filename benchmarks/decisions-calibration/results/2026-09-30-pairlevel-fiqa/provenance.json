@@ -1,0 +1,51 @@
+{
+ "run": "2026-09-30-pairlevel-fiqa",
+ "purpose": "#1063 rc.80 final form: pair-level (query, doc, p_raw, gold) rows for the FiQA Jev rerank calibration gate",
+ "engine": {
+  "binary": "/tmp/xerj-rc80gates-bin/xerj",
+  "version": "xerj v1.0.0-rc.78",
+  "source": "main @ a179e1ef3 (release gate build, not rebuilt here)",
+  "role": "BM25 shortlists only (multi_match title+text, top-30) — deterministic arm, no embeddings exercised",
+  "flags": "--insecure --embed-mode lexical --port 9680 (private band 9680-9699; claims 9680/9681/9682)",
+  "data_dir": "mktemp -d under /tmp, discarded after the run"
+ },
+ "dataset": {
+  "name": "FiQA-2018, BEIR test split",
+  "origin": "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/fiqa.zip",
+  "zip_sha256": "32c7df99ed21252fdfb2cf3f5673502a8d245ee0c44c4a133570d92ce2b3ad02",
+  "files": {"corpus.jsonl": 57638, "queries.jsonl": 6648, "qrels/test.tsv": 1706},
+  "indexed_docs": 57638,
+  "judged_test_queries": 648
+ },
+ "harness_validation_before_paid_calls": {
+  "check": "BM25 nDCG@10 over the regenerated top-30 shortlists, all 648 queries",
+  "measured": 0.2382,
+  "baseline": 0.2382,
+  "note": "bit-for-bit the 2026-09-20 baseline figure, which itself matched BEIR's published 0.236 for FiQA"
+ },
+ "provider": {
+  "endpoint": "https://api.typesafe.ai/v1/systemone",
+  "model": "jev-1.13.0",
+  "request_shape": "identical to benchmarks/beir-hybrid/results/2026-09-20-rerank-full/raw_bench_full.py (one noul per shortlist doc, same instruction string, document = title + '. ' + text truncated to 1400 chars)",
+  "paid_calls": 648,
+  "hard_cap_enforced": 50000,
+  "fails": 0,
+  "input_tokens": 5059586,
+  "output_tokens": 346032,
+  "cost_usd_input_only_at_0.042_per_Mtok": 0.2125,
+  "wall_min": 4.3,
+  "key": "TYPESAFE_API_KEY from the environment (never printed, never written)"
+ },
+ "files": {
+  "pairs.jsonl": "19,440 raw rows: qid, docid, shortlist rank, p_raw (noul), gold (1 iff qrels score >= 1), graded qrels score",
+  "shortlists.json": "qid -> ordered BM25 top-30 docids, the candidate set every probability is defined against",
+  "provider-calls.log": "one line per paid call: qid, in/out tokens, wall seconds, answers count",
+  "stage1-summary.json": "machine summary of the paid stage",
+  "gate.json": "stage 2: split, fits, held-out ECE/Brier per arm, reliability curves, knots"
+ },
+ "determinism": {
+  "engine_arm": "BM25 shortlists deterministic (reproduced 0.2382 twice in this session, and identical to the 2026-09-20 run)",
+  "provider_arm": "one repeat; the baseline measured per-doc probability drift mean |delta| 0.0148 / max 0.1 across its 3 repeats — a rerun of the paid stage will wobble within that band (this run's all-pairs raw ECE still landed on the published 0.3109)",
+  "gate_stage": "pure computation on pairs.jsonl: sha256 split rule, no RNG, no clock (#940); reruns are bit-identical"
+ }
+}
