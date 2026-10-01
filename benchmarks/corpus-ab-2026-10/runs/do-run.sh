@@ -17,8 +17,9 @@ cd "$BASE/repo"
 if [ "$ARM" = X ]; then export XERJ_URL=http://localhost:9831; else unset XERJ_URL || true; fi
 START=$(date +%s)
 set +e
-claude -p "$(cat "$BASE/TASK.md")" \
+claude -p \
   --dangerously-skip-permissions --max-turns 80 --output-format json \
+  < "$BASE/TASK.md" \
   > "$BASE/usage.raw.json" 2> "$BASE/claude.stderr"
 RC=$?
 set -e
