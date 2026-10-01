@@ -7,35 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [1.0.0-rc.80] - 2026-09-30
 
-- **rc.80 decide-gate measurements: tier-2 quality, serving latency, and the
-  flywheel replay, all through live nodes
-  (PR [#1088](https://github.com/xerj-org/xerj/pull/1088)).** The rc.79/rc.80
-  gates on the System One decide ladder, measured on commit `a179e1ef3`
-  (`xerj v1.0.0-rc.78`) in `benchmarks/decisions-as-retrieval/results/2026-09-30-rc80gates/`.
-  #1057 quality **FAIL** (bars: SMS acc ≥0.95 / ECE ≤0.05, AG News ≥0.85):
-  SMS 0.9193 / ECE 0.287 on the 1,574-row seed-7 held-out split; AG News
-  0.2599 on the full 7,600-row test set (chance 0.25 — the artifact was never
-  trained on it); Banking77 reported, not gated: 0.1185 / ECE 0.0717, which
-  reproduces the eval card exactly through the node's choice path. #1057
-  latency **PASS**: p50 8.4 ms for 30 `/_decide` noul questions with the node
-  pinned to 8 cores (5-way choice 20.0 ms; the full 77-way vocabulary 282.6
-  ms); the tier downloads 0 MB — there is no download path — and the artifact
-  is 28.5 MiB of F32 (not quantized; candle 0.9 has no quantized safetensors
-  loader). #1061 flywheel replay **FAIL**: as shipped, the write-back caches
-  only 12 answers in 2,000 requests (once any cached doc gives BM25 support
-  the history vote answers everything, and history answers are never cached),
-  then answers 99.7% of later traffic from that frozen cache at 0.033
-  accuracy — 4.91% of later traffic at ≥0.8 confidence (bar 80%) at 0.0377
-  accuracy (bar 0.97); with the gate's premise instantiated (2,000 gold
-  answers cached), 19.72% of later traffic clears 0.8 confidence at 0.9953
-  accuracy — the accuracy bar holds, the 80% share bar fails 4× under at
-  k=10. Release-cut fact recorded beside the numbers: **the stock release
-  binary is built without the `decide-local` cargo feature** —
-  `--decide-mode local` on it logs a warning and tier 2 stays off, so the
-  tier ships absent, not merely flagged off, until release.yml enables the
-  feature.
+The measured-gates release — the ten-item program to the first official
+release ([discussion #1054](https://github.com/xerj-org/xerj/discussions/1054),
+issues #1055–#1064) executed the way it was filed: every item landed with its
+acceptance criterion measured on the release binary, and **the failures ship in
+these notes as failures**. Three gates passed outright (`/_ask` 0.9975 macro-F1
+at 1.129 ms p50; `xerj_map` unknown-field 400s 100% reduction; calibration
+ECE 0.3109 → 0.0088 held-out), three failed and stay opt-in or behind a flag
+with the numbers published (the lexical judge, the flywheel cache share, the
+tier-2 decide head's SMS/AG News bars), one split (stemming: +0.0160/+0.0179
+BM25 nDCG@10, zero-hits 25 → 15 against ≤ 10). The decide ladder is the
+release's spine — tier-2 local head ([#1072](https://github.com/xerj-org/xerj/pull/1072)),
+CLI arming + default-feature fix ([#1073](https://github.com/xerj-org/xerj/pull/1073),
+[#1097](https://github.com/xerj-org/xerj/pull/1097)), calibration `p_cal` beside
+every `p_raw` ([#1080](https://github.com/xerj-org/xerj/pull/1080),
+[#1087](https://github.com/xerj-org/xerj/pull/1087)), the answer flywheel
+([#1075](https://github.com/xerj-org/xerj/pull/1075)) and `_watcher` evaluating
+one real watch shape ([#1082](https://github.com/xerj-org/xerj/pull/1082)) — and
+the agent surface grew the twelfth and thirteenth MCP tools (`xerj_map`,
+`xerj_plan` behind the new `POST /_ask`) plus token-budgeted MCP responses.
+The console closes the user gate the UX reviews kept failing: a knowledge
+surface that shows what is indexed using only the engine's own numbers
+(PR [#1095](https://github.com/xerj-org/xerj/pull/1095), carrying the
+#1098/#1099 honest-claims fixes from its own screenshot review). rc.79 was folded into
+this cut by direction — no rc.79 tag exists.
+
+### Added
 
 - **Console: one knowledge surface — size, structure, relations and
   capabilities after indexing (PR
@@ -76,6 +75,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — with NO vector count, because the engine exposes none on any stats
   surface; an index whose elected semantic field carries no embedding says
   so in as many words.
+- **rc.80 decide-gate measurements: tier-2 quality, serving latency, and the
+  flywheel replay, all through live nodes
+  (PR [#1088](https://github.com/xerj-org/xerj/pull/1088)).** The rc.79/rc.80
+  gates on the System One decide ladder, measured on commit `a179e1ef3`
+  (`xerj v1.0.0-rc.78`) in `benchmarks/decisions-as-retrieval/results/2026-09-30-rc80gates/`.
+  #1057 quality **FAIL** (bars: SMS acc ≥0.95 / ECE ≤0.05, AG News ≥0.85):
+  SMS 0.9193 / ECE 0.287 on the 1,574-row seed-7 held-out split; AG News
+  0.2599 on the full 7,600-row test set (chance 0.25 — the artifact was never
+  trained on it); Banking77 reported, not gated: 0.1185 / ECE 0.0717, which
+  reproduces the eval card exactly through the node's choice path. #1057
+  latency **PASS**: p50 8.4 ms for 30 `/_decide` noul questions with the node
+  pinned to 8 cores (5-way choice 20.0 ms; the full 77-way vocabulary 282.6
+  ms); the tier downloads 0 MB — there is no download path — and the artifact
+  is 28.5 MiB of F32 (not quantized; candle 0.9 has no quantized safetensors
+  loader). #1061 flywheel replay **FAIL**: as shipped, the write-back caches
+  only 12 answers in 2,000 requests (once any cached doc gives BM25 support
+  the history vote answers everything, and history answers are never cached),
+  then answers 99.7% of later traffic from that frozen cache at 0.033
+  accuracy — 4.91% of later traffic at ≥0.8 confidence (bar 80%) at 0.0377
+  accuracy (bar 0.97); with the gate's premise instantiated (2,000 gold
+  answers cached), 19.72% of later traffic clears 0.8 confidence at 0.9953
+  accuracy — the accuracy bar holds, the 80% share bar fails 4× under at
+  k=10. Release-cut fact recorded beside the numbers: **the stock release
+  binary is built without the `decide-local` cargo feature** —
+  `--decide-mode local` on it logs a warning and tier 2 stays off, so the
+  tier ships absent, not merely flagged off, until release.yml enables the
+  feature.
+
 - **`xerj-decide-v1`: the open tier-2 decide model — training/export harness,
   measured eval card, upload-ready bundle
   ([#1064](https://github.com/xerj-org/xerj/issues/1064), PR
@@ -226,6 +253,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sub-1.0 pairs are the "from A through B" date pairs, where this PR reads
   "through" as inclusive by design. ES-YAML on this tree: 1380/0/3. The
   p50 ≤ 300 ms CPU budget is a release-time gate and is not claimed here.
+- **The #1056 latency gate measured: `POST /_ask` wall-clock p50 1.129 ms
+  against the 300 ms bar (PR
+  [#1079](https://github.com/xerj-org/xerj/pull/1079)).** The ask-plan
+  harness scored F1 but never recorded milliseconds; `scripts/latency_arm.py`
+  is the missing arm (one warmup pass + N measured passes over the same 230
+  `pairs.jsonl` prompts on one booted node, per-request wall-clock raw,
+  nearest-rank quantiles, stdlib-only, honest stop on endpoint-absence) and
+  `run.sh` step 5 now captures it. Measured on the release build of `f0b96d634`
+  (private port, throwaway data dir): 690 requests, all HTTP 200, p50
+  **1.129 ms**, p90 1.883, p99 2.852, max 155.7 ms — the deterministic
+  rule-based planner costs microseconds of CPU, as designed, and the 300 ms
+  release bar is met at 266× margin. Results committed verbatim in
+  `benchmarks/ask-plan/results/2026-09-30-latency-gate/`; the token arm of
+  the same gate remains designed-not-run (live-model cost not approved).
 - **Decision cache flywheel: every tier-2+ answer written back, `source` per
   answer, human corrections weighted ≥ 2x
   ([#1061](https://github.com/xerj-org/xerj/issues/1061), PR
@@ -426,6 +467,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [#1082](https://github.com/xerj-org/xerj/pull/1082).)
 ### Fixed
 
+- **Main's `Build + Test` un-reds: #1062's label test stubs are classified
+  in the egress inventory (PR
+  [#1083](https://github.com/xerj-org/xerj/pull/1083)).** The merge of #1082
+  added two unclassified outbound-client files
+  (`xerj-autoindex/src/label.rs`, `label_http_tests.rs`) that the author's
+  test scope never exercised — the xerj-rerank guard
+  `every_outbound_client_in_the_engine_is_on_the_published_list` runs in a
+  different crate's suite and only CI saw it. Both are `Role::TestOnly`,
+  verified rather than asserted: `label.rs`'s only marker (`TcpStream::connect`,
+  the DecideStub drop-wakeup) sits after its `#[cfg(test)]`, and the
+  production Labeler decides through the shared `Es` client already on the
+  published list — no new egress path exists, so `docs/RERANK.md`,
+  `xerj_rerank::DATA_EGRESS` and the air-gapped recipe are unchanged.
 - **PAVA knot-index bug in the calibration benchmark's Python mirror
   (PR [#1087](https://github.com/xerj-org/xerj/pull/1087)).**
   `benchmarks/decisions-calibration/fiqa_gate.py` recorded each pooled
@@ -490,6 +544,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [#1071](https://github.com/xerj-org/xerj/pull/1071)).
 ### Changed
 
+- **The shipped release binary is built WITH the `decide-local` cargo
+  feature — tier 2 arms on the stock binary (PR
+  [#1097](https://github.com/xerj-org/xerj/pull/1097)).** The rc.80 gate
+  runs caught that `--decide-mode local` on the rc.78 release binary logged
+  a rebuild warning and stayed off: xerj-api's `decide-local` feature was
+  never enabled in xerj-server's release build, so the tier shipped absent,
+  not merely flagged off. `decide-local` is now a DEFAULT feature of
+  xerj-server (default-on, deny-by-default at RUNTIME: the tier activates
+  only on the explicit `--decide-mode local` / `XERJ_DECIDE_MODE=local`, so
+  every default boot keeps the exact previous behaviour), release.yml builds
+  it into the published assets, and the artifact loader is exercised by the
+  release smoke path. The catch and its queue-ahead status are stated in the
+  blog post; this is the fix it pointed at.
 - **`xerj autoindex` now creates prose indexes with a stemming analyzer
   ([#1059](https://github.com/xerj-org/xerj/issues/1059)).** When the
   profiler marks a dataset's prose semantic — the same measured predicate
@@ -607,6 +674,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   *In flight* and GA-program sections to match and pointed the two zero-token
   items it subsumes at their new trackers (PR
   [#1066](https://github.com/xerj-org/xerj/pull/1066)).
+- **llms.txt / llms-full.txt tool inventory now matches the released
+  thirteen-tool MCP registry (PR
+  [#1078](https://github.com/xerj-org/xerj/pull/1078)).** Both files said
+  `mcp-tools.json` holds "ten tools" and llms-full's own verify example
+  printed `jq '.tools | length'` → 10 while the real registry is thirteen
+  (`xerj_map` and `xerj_plan` landed without the agent-facing docs
+  noticing) — the llms-txt study's §8 lesson repeating verbatim. Hand-written
+  regions only: the mcp line names all seven additions over the HTTP-core
+  six, the anthropic/openai lines state the composition by design,
+  `POST /_ask` enters the endpoint map (it was undocumented in either file),
+  and llms-full §3 is retitled THE CORE AGENT OPERATIONS with the jq example
+  pinned to 13. Checked, not asserted: all 13 names from the published
+  `mcp-tools.json` (pinned to `tool_specs()` by `published_schema_drift`)
+  appear by name across the two files.
+- **Console UX review: the post-indexing surface against the user gate, in
+  the open (PR [#1089](https://github.com/xerj-org/xerj/pull/1089)).**
+  Method stated first because the sandbox has no browser: the served SPA
+  fetched from a running node, its API calls curled verbatim under a REAL
+  operator session (first-launch bootstrap completed — magic link from
+  stderr, passkey enrolment with a software P-256 authenticator), and the
+  repo's own pure renderers executed under node against the live payloads,
+  so quoted screens are the SPA's output, not a paraphrase. Corpus: 72 mixed
+  files (mbox, .eml, CSV, NDJSON, wikilinked notes, source) → 8 datasets,
+  512 records, 290 edges in 2.2 s on rc.78. The three gate questions — does
+  the console show how large the corpus is, what data is there, what XERJ
+  can do — answered per screen with the defects named, and its verdict
+  (the console answered volume but guessed structure) is what the
+  knowledge-surface change in this release (#1095) was cut against. No
+  engine code changed.
 - Rolled the corpus-pack status in the agent-facing index files
   `landing/llms.txt` and `landing/llms-full.txt`, which still said
   "planned, no code": the records half shipped in rc.78 — `xerj corpus

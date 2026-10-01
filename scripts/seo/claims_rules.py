@@ -776,13 +776,32 @@ RULES = [
         "pattern": r"(?:\balert(?:s|ing)\b|\b_watcher\b|\bwatches\b|\bnotif(?:y|ication)\w*\b\s*(?:rule|when|on)|"
                    r"\bpage(?:s|rduty)?\b[^.\n]{0,20}when|trigger\w*[^.\n]{0,25}(?:alert|notification))",
         "exempt": [_neg_near(r"alert\w*|_watcher|watches|notification\w*", 140),
-                   r"no scheduler|0/7|stores watches"],
-        "reason": "`_watcher` stores watches but NO SCHEDULER executes them. There is no rule "
-                  "engine and no notification path. Kibana alerting scores 0/7 DELIVERED.",
-        "evidence": [LC + ":264", LC + ":635", RJ + ":27"],
-        "rewrite": "'`_watcher` accepts and stores watch definitions for client compatibility, but "
-                   "nothing executes them - there is no scheduler and no notification path. Run "
-                   "alerting outside XERJ.'",
+                   r"no scheduler|0/7|stores watches",
+                   # Since v1.0.0-rc.80 (#1082) exactly ONE watch shape evaluates
+                   # (interval trigger, one-index search input, condition.xerj_decide,
+                   # index_alert action -> .xerj_alert_fires) and every other shape is
+                   # refused with a 501 naming what is not evaluated. Mentions qualified
+                   # by that partial status are the honest framings; an UNQUALIFIED
+                   # "alerting rules fire exactly as on Elasticsearch" still fails.
+                   r"one [a-z ]{0,14}watch shape",
+                   r"not evaluated|never evaluated|refus\w+[^.\n]{0,60}501|501[^.\n]{0,60}refus",
+                   r"\bxerj_decide\b",
+                   r"re-verified[^.\n]{0,80}v1\.0\.0-rc\.80",
+                   r"PARTIAL"],
+        "reason": "Since v1.0.0-rc.80 (#1082) `_watcher` evaluates exactly ONE watch shape "
+                  "(interval trigger, one-index `input.search`, `condition.xerj_decide`, "
+                  "`index_alert`) and writes fires to `.xerj_alert_fires`; every other shape "
+                  "is refused with a 501 naming what is not evaluated. There is still no "
+                  "notification delivery, no cron, no transforms, no console authoring, and "
+                  "a restart does not resume watches.",
+        "evidence": [LC + ":264", LC + ":635", RJ + ":27",
+                     "ROADMAP.md:117",
+                     "CHANGELOG.md:440"],
+        "rewrite": "'Alerting is PARTIAL since v1.0.0-rc.80: one watch shape evaluates (interval "
+                   "trigger + one-index search input + `condition.xerj_decide` + `index_alert`) "
+                   "and writes fire records; every other shape is a 501 naming what is not "
+                   "evaluated, and there is no notification delivery. Run delivery outside "
+                   "XERJ.'",
     },
     {
         "id": "FC-ML",

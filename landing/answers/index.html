@@ -63,7 +63,7 @@
   "url": "https://xerj.org/answers/",
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
-  "dateModified": "2026-09-26",
+  "dateModified": "2026-09-30",
   "isPartOf": {
     "@id": "https://xerj.org/#website"
   },
@@ -261,7 +261,7 @@
   </ul>
   <h2>Capabilities and limits</h2>
   <ul>
-    <li><a href="/answers/does-xerj-support-s3-alerting-plugins">Does XERJ support S3 storage, alerting or custom plugins yet?</a> — Since v1.0.0-rc.77 the index CAN live in an S3-compatible bucket (storage.backend = "s3": one immutable bundle object per segment family plus snapshot.json). _watcher never runs a watch; plugins are built-in.</li>
+    <li><a href="/answers/does-xerj-support-s3-alerting-plugins">Does XERJ support S3 storage, alerting or custom plugins yet?</a> — Since v1.0.0-rc.77 the index CAN live in an S3-compatible bucket; since rc.78 record packs are real; since rc.80 _watcher evaluates exactly one watch shape and refuses every other with 501. Plugins stay built-in.</li>
   </ul>
   <h2>Code security</h2>
   <ul>

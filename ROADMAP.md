@@ -2,7 +2,7 @@
 
 This roadmap tracks capabilities that are **planned but not yet fully implemented**, so the project's public claims stay honest about what ships today versus what is coming. Status is verified against the actual code and by real API requests to the release binary, not aspirational.
 
-Last reviewed: 2026-09-29 (against `v1.0.0-rc.78` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.78 release-cut roll: *Next release* points at rc.79, the riding-to list folded into the rc.78 cut record below, and the open-defects shortlist was re-verified against the live tracker at cut time (#1031 and #1032 open; #1030 rides with them on the milestone) — the lesson of 2026-09-21, when several entries went stale within hours of that review, is why the shortlist is checked live at the cut rather than desk-carried. Later the same day the tracker was emptied: everything open after the cut — #1038, #1030, #1031, #1032 — was closed (the two shipped-half epics are in the rc.78 record below, the two defects are recorded below as deferred, not fixed), leaving zero open issues. The 2026-09-26 desk review (PR [#1036](https://github.com/xerj-org/xerj/pull/1036)) stands as recorded: it closed the CHANGELOG-gap GA item (the rc.19–rc.70 backfill, PR [#1035](https://github.com/xerj-org/xerj/pull/1035)), marked the stage-2 object-storage item done ([#965](https://github.com/xerj-org/xerj/issues/965) wired in rc.77), and corrected the mail-ingest memory line to the post-[#1002](https://github.com/xerj-org/xerj/pull/1002) reality. The *Shipping today* claims were last live-verified against rc.76 (unchanged by this pass), and *The zero-token direction* below was verified separately on 2026-09-18, against `main` @ `4d8dadbf`.
+Last reviewed: 2026-09-30 (against `v1.0.0-rc.80` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.80 release-cut roll: the rc.79 milestone was folded into rc.80 by direction (no rc.79 tag exists), the ten-item program below is executed whole with its gate verdicts — wins and losses — folded into the rc.80 cut record, and the open-defects shortlist was re-verified against the live tracker at cut time (five open: #1091–#1094 from the gate runs, #1100 from the release's own console review) — the lesson of 2026-09-21, when several entries went stale within hours of that review, is why the shortlist is checked live at the cut rather than desk-carried. Later the same day the tracker was emptied: everything open after the cut — #1038, #1030, #1031, #1032 — was closed (the two shipped-half epics are in the rc.78 record below, the two defects are recorded below as deferred, not fixed), leaving zero open issues. The 2026-09-26 desk review (PR [#1036](https://github.com/xerj-org/xerj/pull/1036)) stands as recorded: it closed the CHANGELOG-gap GA item (the rc.19–rc.70 backfill, PR [#1035](https://github.com/xerj-org/xerj/pull/1035)), marked the stage-2 object-storage item done ([#965](https://github.com/xerj-org/xerj/issues/965) wired in rc.77), and corrected the mail-ingest memory line to the post-[#1002](https://github.com/xerj-org/xerj/pull/1002) reality. The *Shipping today* claims were last live-verified against rc.76 (unchanged by this pass), and *The zero-token direction* below was verified separately on 2026-09-18, against `main` @ `4d8dadbf`.
 
 ## Follow the roadmap
 
@@ -31,104 +31,63 @@ These are implemented and exercised by real API requests / the test suite / benc
 
 The release-by-release record of how all of this landed is [CHANGELOG.md](./CHANGELOG.md) — this file no longer duplicates it. The record is now complete rc.1 → rc.78: the rc.19–rc.70 gap was backfilled on 2026-09-26 from `git log` (merge subjects and commit bodies) and the GitHub release records, with a provenance banner in the file — the reconstructed entries are drier than ship-time ones, and every issue/PR link they carry was checked to sit inside its release window (PR [#1035](https://github.com/xerj-org/xerj/pull/1035)).
 
-## Next release — [v1.0.0-rc.79](https://github.com/xerj-org/xerj/milestones)
+## Next release — [v1.0.0](https://github.com/xerj-org/xerj/milestone/2)
 
-**rc.78 was cut on 2026-09-29** — its full contents are the
-[CHANGELOG.md](./CHANGELOG.md) entry, not this file. It is **the index-size
-stage-1 and corpus-packs release**: the durable-bytes epic
-[#1038](https://github.com/xerj-org/xerj/issues/1038) landed its first four
-format changes, each gated by the size harness — `.dv` bit-packing with a
-per-column chooser (ZNV2, PR
-[#1040](https://github.com/xerj-org/xerj/pull/1040)), `.post` block framing
-(ZPS2, PR [#1041](https://github.com/xerj-org/xerj/pull/1041)), typed-int /
-copy-of stored columns with a merge-path zstd chooser (ZBS4, PR
-[#1042](https://github.com/xerj-org/xerj/pull/1042)), and columnar-varint
-`.meta` records (ZFM5, PR
-[#1043](https://github.com/xerj-org/xerj/pull/1043)) — with the committed
-same-day pair at **5,398,478 → 3,989,254 B durable (−26.1 %)** on the 100k
-harness and a blog write-up (PR
-[#1044](https://github.com/xerj-org/xerj/pull/1044)); and `xerj corpus build`
-shipped portable, signed corpus packs (PRs
-[#1046](https://github.com/xerj-org/xerj/pull/1046)–[#1048](https://github.com/xerj-org/xerj/pull/1048),
-publish hardening
-[#1049](https://github.com/xerj-org/xerj/pull/1049)–[#1051](https://github.com/xerj-org/xerj/pull/1051))
-— the records half of
-[#1030](https://github.com/xerj-org/xerj/issues/1030) — with the first
-showcase pack `rust-vulns` published daily from a scheduled workflow.
+The GA window. **rc.80 was cut on 2026-09-30** — its full contents are the
+[CHANGELOG.md](./CHANGELOG.md) entry, not this file. It is **the
+measured-gates release**: the ten-item program to the first official release
+([discussion #1054](https://github.com/xerj-org/xerj/discussions/1054),
+#1055–#1064) executed whole with every acceptance criterion measured on the
+release binary — three gates passed outright, three failed and ship opt-in or
+behind a flag with the numbers published, one split; the blog post
+([the rc.80 gates](https://xerj.org/blog/the-rc80-gates)) carries each verdict.
+The decide ladder is the release's spine — tier-2 local head behind
+`--decide-mode local` (arming on the stock binary since PR
+[#1097](https://github.com/xerj-org/xerj/pull/1097)), `p_cal` beside every
+`p_raw` ([#1080](https://github.com/xerj-org/xerj/pull/1080),
+[#1087](https://github.com/xerj-org/xerj/pull/1087)), the answer flywheel
+([#1075](https://github.com/xerj-org/xerj/pull/1075)) and a `_watcher` that
+evaluates one real watch shape ([#1082](https://github.com/xerj-org/xerj/pull/1082)) —
+and the agent surface grew `POST /_ask` + `xerj_plan`
+([#1076](https://github.com/xerj-org/xerj/pull/1076)), `xerj_map`
+([#1074](https://github.com/xerj-org/xerj/pull/1074)), `max_tokens` on the
+MCP search tools ([#1067](https://github.com/xerj-org/xerj/pull/1067)) and
+stemming by default on profiler-marked prose
+([#1070](https://github.com/xerj-org/xerj/pull/1070)). The console closes its
+user gate with a knowledge surface that answers "what is indexed here" from
+the engine's own numbers (PR
+[#1095](https://github.com/xerj-org/xerj/pull/1095)). **rc.79 was folded into
+this cut by direction — no rc.79 tag exists**, and both milestones are closed
+empty. The plan tracker
+[#1065](https://github.com/xerj-org/xerj/issues/1065) is complete and closed.
 
-The same release closed the idle-cost arc —
-[#874](https://github.com/xerj-org/xerj/issues/874) met at ~3× margin behind
-the at-rest fixture and its CI gate (the gauge-loop deletion PR
-[#1020](https://github.com/xerj-org/xerj/pull/1020), the lazy seen-set PRs
-[#1025](https://github.com/xerj-org/xerj/pull/1025)/[#1034](https://github.com/xerj-org/xerj/pull/1034),
-idle 206 → 64 kB per index) — the flush publication bracket
-([#1015](https://github.com/xerj-org/xerj/issues/1015), PR
-[#1018](https://github.com/xerj-org/xerj/pull/1018)), the ingest-RSS
-investigation ([#950](https://github.com/xerj-org/xerj/issues/950), PR
-[#1017](https://github.com/xerj-org/xerj/pull/1017), plus
-`POST /{index}/_cache/clear` in PR
-[#1009](https://github.com/xerj-org/xerj/pull/1009)), and the by-query
-truncation class whole (`_delete_by_query`
-[#1019](https://github.com/xerj-org/xerj/issues/1019)/PR
-[#1021](https://github.com/xerj-org/xerj/pull/1021), `_update_by_query`
-[#1022](https://github.com/xerj-org/xerj/issues/1022)/PR
-[#1023](https://github.com/xerj-org/xerj/pull/1023)). It also carries the
-email-labelling measurement and field report for
-[discussion #1012](https://github.com/xerj-org/xerj/discussions/1012) (PRs
-[#1026](https://github.com/xerj-org/xerj/pull/1026)/[#1027](https://github.com/xerj-org/xerj/pull/1027)),
-the README's plain-words Jev explanation (PR
-[#1010](https://github.com/xerj-org/xerj/pull/1010)), the `llms.txt` and
-whole-surface status corrections (PRs
-[#1033](https://github.com/xerj-org/xerj/pull/1033)/[#1037](https://github.com/xerj-org/xerj/pull/1037)),
-the CHANGELOG rc.19–rc.70 backfill (PR
-[#1035](https://github.com/xerj-org/xerj/pull/1035)), the 2026-09-26 review
-of this file (PR [#1036](https://github.com/xerj-org/xerj/pull/1036)), and
-the site work — corner brand and blog endings (PR
-[#1045](https://github.com/xerj-org/xerj/pull/1045)).
+**What rides it:** the open defects below (the gate-run findings
+and the console review's), the #1062 wrong-and-confident detection gate, the
+`/_ask` token arm (designed, live-model cost not approved), the
+`xerj-decide-v1` Hugging Face publication (operator credentials), and the GA
+bar itself — *The road to v1.0.0 GA* below.
 
-**In flight for rc.79:** the first five items of the ten-item program to 1.0
-posted in [discussion #1054](https://github.com/xerj-org/xerj/discussions/1054)
-("Improvement plan till first official release", 2026-09-30) and indexed in the
-pinned [plan tracker #1065](https://github.com/xerj-org/xerj/issues/1065):
-[#1055](https://github.com/xerj-org/xerj/issues/1055) (`xerj_map` — the
-catalog as an MCP tool), [#1056](https://github.com/xerj-org/xerj/issues/1056)
-(`POST /_ask` + `xerj_plan` — prompt in, validated DSL out),
-[#1057](https://github.com/xerj-org/xerj/issues/1057) (local zero-shot
-decision head, tier 2 of System One), [#1058](https://github.com/xerj-org/xerj/issues/1058)
-(`max_tokens` on every MCP search tool), and
-[#1059](https://github.com/xerj-org/xerj/issues/1059) (stemming by default
-for profiler-marked semantic fields). The plan targeted the first and last of
-those at rc.78 — which was cut and published eight minutes before the
-discussion posted — so they slide to rc.79. The rc.78-milestone riders those
-replaced were closed the same day as the cut (2026-09-29), so this program is
-the whole of what is open.
-
-**Open defects.** None — the tracker was emptied the same day as the rc.78
-cut. The last two defects with code consequences, #1031 (a source file that
-grows during an autoindex run — an append-only log's normal behaviour —
-aborts the run, is misclassified as a bulk/backend failure, and the retry
-advice points at the wrong fix) and #1032 (three per-segment caches —
-`stored_value_cache`, `dv_cache`, `id_pos_cache` — stay unbounded until a
-merge retires their segment; the residual heap-per-doc retention after
-#1002), were closed 2026-09-29 as **deferred, not fixed**: both stand
-exactly as filed, neither is scheduled, and the repros live in the closed
-issues. They appear here as plain text rather than links because this is the
-section the release-notes gate checks against the live tracker at every cut.
-The tracker that established this file's review cadence (issue #298) was
-closed as abandoned the same day — the cadence is machine-enforced by
-`docs_capability_lists` and the review history lives in this file and the
-CHANGELOG, so the issue had nothing left to track. Two former trackers, #941
-(zero-token direction) and #874 (idle cost), closed with fixes back in the
-rc.77 window; the two shipped-half epics above, #1038 and #1030, closed with
-the cut. Everything else the rc.78 window closed is recorded in the
-CHANGELOG, not here — a new defect gets a fresh issue and a milestone, and
-that is the tracking cadence now.
+**Open defects.** Five, all live on the tracker at cut time — the shortlist
+the release-notes gate checks. From the rc.80 gate runs:
+[#1091](https://github.com/xerj-org/xerj/issues/1091) (hybrid first stage
+13–26 s/query on the 57,638-doc FiQA index),
+[#1092](https://github.com/xerj-org/xerj/issues/1092) (`_settings` does not
+echo the analysis block; `_analyze` shows the standard path under a declared
+stemmer), [#1093](https://github.com/xerj-org/xerj/issues/1093) (unknown
+field in `term`/`match`/`range`/`exists` is a silent 0-hit 200, not a 4xx)
+and [#1094](https://github.com/xerj-org/xerj/issues/1094) (decision flywheel
+write-back freezes once the history index has BM25 support). From the
+release's own console knowledge-surface review:
+[#1100](https://github.com/xerj-org/xerj/issues/1100) (second-brain
+belief-time frame rendered on non-note corpora). Two siblings it filed,
+#1098 and #1099, were fixed and closed by the same PR (#1095) inside this
+release and are recorded in the CHANGELOG, not carried here.
 
 ## The road to [v1.0.0 GA](https://github.com/xerj-org/xerj/milestone/2)
 
 The 1.0 bar: **every public claim verified against the release binary, and every input either honoured or refused loudly.** The gate list, each item an issue:
 
-**The program to the first official release** ([discussion #1054](https://github.com/xerj-org/xerj/discussions/1054), 2026-09-30; filed 2026-09-30 as ten issues indexed in [tracker #1065](https://github.com/xerj-org/xerj/issues/1065)): **rc.79** — `xerj_map` ([#1055](https://github.com/xerj-org/xerj/issues/1055)), `/_ask` + `xerj_plan` ([#1056](https://github.com/xerj-org/xerj/issues/1056)), the local zero-shot decision head ([#1057](https://github.com/xerj-org/xerj/issues/1057)), MCP `max_tokens` ([#1058](https://github.com/xerj-org/xerj/issues/1058)), stemming by default ([#1059](https://github.com/xerj-org/xerj/issues/1059)); **rc.80** — self-judged hits ([#1060](https://github.com/xerj-org/xerj/issues/1060)), the decision cache flywheel ([#1061](https://github.com/xerj-org/xerj/issues/1061)), real `_watcher` detections ([#1062](https://github.com/xerj-org/xerj/issues/1062)), the calibration layer ([#1063](https://github.com/xerj-org/xerj/issues/1063)); **v1.1.0** — the open `xerj-decide` model ([#1064](https://github.com/xerj-org/xerj/issues/1064)). Every item carries a measured gate that binds at ship time (e.g. #1056's ≥ 200-pair result-set F1 ≥ 0.9; #1060 must beat hybrid 0.699 SciFact / 0.345 NFCorpus beyond the run spread or it does not ship; #1062's wrong-and-confident rate ≤ 5 % at p ≥ 0.8), and the packaging rule for all ten is a `benchmarks/<name>` directory with raw results plus a blog post with the losses left in.
+**The program to the first official release** ([discussion #1054](https://github.com/xerj-org/xerj/discussions/1054); filed as ten issues indexed in [tracker #1065](https://github.com/xerj-org/xerj/issues/1065)) — **executed whole in rc.80** (rc.79 folded into the cut by direction), every item measured on the release binary and every gate verdict published whether it passed or not. Passed: `xerj_map` ([#1055](https://github.com/xerj-org/xerj/issues/1055), unknown-field 400s 20/30 → 0/30), `/_ask` + `xerj_plan` ([#1056](https://github.com/xerj-org/xerj/issues/1056), macro-F1 0.9975 / p50 1.129 ms), MCP `max_tokens` ([#1058](https://github.com/xerj-org/xerj/issues/1058)), the calibration layer ([#1063](https://github.com/xerj-org/xerj/issues/1063), FiQA pair-level ECE 0.3109 → 0.0088 held-out), and the `xerj-decide` training harness with its measured eval card ([#1064](https://github.com/xerj-org/xerj/issues/1064) — the artifact's Hugging Face publication still PENDING operator credentials; no URL is claimed). Failed, shipped under its own loses-does-not-ship rule with the numbers public: the local judge ([#1060](https://github.com/xerj-org/xerj/issues/1060), −0.1077 SciFact vs hybrid — opt-in, no quality claim) and the flywheel's cache-share bar ([#1061](https://github.com/xerj-org/xerj/issues/1061), the write-back freeze is now defect #1094). Split: stemming ([#1059](https://github.com/xerj-org/xerj/issues/1059), +0.0160/+0.0179 BM25 nDCG@10, zero-hits 25 → 15 against ≤ 10). Real and unmeasured against #1062's wrong-and-confident ≤ 5 % bar: `_watcher` detections ([#1062](https://github.com/xerj-org/xerj/issues/1062) — the evaluate-or-501 half shipped; the detection gate is not yet run). The tier-2 decide head ([#1057](https://github.com/xerj-org/xerj/issues/1057)) missed its SMS/AG News bars and ships behind `--decide-mode local` with the numbers published, arming on the stock binary since #1097. The packaging rule held for all ten: a `benchmarks/<name>` directory with raw results plus [the blog post](https://xerj.org/blog/the-rc80-gates) with the losses left in.
 
 - **Close the accepted-and-ignored class** (the [#204](https://github.com/xerj-org/xerj/issues/204) umbrella closed once its members carried their own tracking; PR [#258](https://github.com/xerj-org/xerj/pull/258) carried one pass of the sweep and is merged). Known members still open: `nested` `inner_hits` unparsed; `random_sampler`'s ignored `probability`; `weighted_avg` returning HTTP 200 with an error buried in the aggregations body instead of a 400 (the 400 is part of #258). **Retired from this list:** `nested` `score_mode`, which was parsed-then-ignored until [#862](https://github.com/xerj-org/xerj/pull/862) made a nested query roll its matching children's scores into the parent per `score_mode` (rc.71).
 - **Security hardening backlog** — cargo-audit and fuzzing landed in CI with rc.16 ([#207](https://github.com/xerj-org/xerj/issues/207) closed); the deferred TLS/auth/symlink hardening items from the Phase-2 security backlog remain.
@@ -155,7 +114,7 @@ The 1.0 bar: **every public claim verified against the release binary, and every
 
 **Stage 2 — planned; the status lines say what exists today, which in most cases is less than the API surface suggests:**
 
-- **Semantic detections.** A standing question over incoming documents: a cheap `percolate` prefilter selects candidates, a typed judgment decides (a small closed set of outcomes, not free text), and an alert carries a **calibrated probability** — calibrated meaning measured on held-out labelled data and published with its reliability curve, or not shipped. *Today:* the `percolate` query is real — stored queries are matched against a supplied document. There is **no alerting**: `PUT /_watcher/watch/{id}` stores the body in memory, answers `"condition":{"met":true}`, and no scheduler ever evaluates a watch (`es_compat.rs`, `put_watch`); the console's `.xerj_alert_rules` and `.xerj_alert_fires` indices have schemas and are created at bootstrap, and no evaluator reads them (`xerj-console-api/src/indices.rs`). Before anything new is built, `_watcher` must either run watches or refuse them — it is an accepted-and-ignored surface today. *Now tracked as [#1062](https://github.com/xerj-org/xerj/issues/1062) (rc.80, plan item 7 of [discussion #1054](https://github.com/xerj-org/xerj/discussions/1054)): evaluate or 501, percolate → decide → fire, ingest-time labels via `/_decide`, with the calibration layer of [#1063](https://github.com/xerj-org/xerj/issues/1063) behind the published p.*
+- **Semantic detections.** A standing question over incoming documents: a cheap `percolate` prefilter selects candidates, a typed judgment decides (a small closed set of outcomes, not free text), and an alert carries a **calibrated probability** — calibrated meaning measured on held-out labelled data and published with its reliability curve, or not shipped. *Since rc.80 ([#1062](https://github.com/xerj-org/xerj/issues/1062), PR [#1082](https://github.com/xerj-org/xerj/pull/1082)): the first real slice.* `PUT /_watcher/watch/{id}` either evaluates a watch on schedule or refuses it with a 501 naming what is not evaluated — the accepted-and-ignored surface this row used to carry is closed. One watch shape runs: an interval trigger, `input.search` over one index, a `condition.xerj_decide` question and an `index_alert` action, with a per-watch background task prefiltering via the watch's own query (keyset paging) and running each rendered question through the real `/_decide`; a fire lands in `.xerj_alert_fires` when the positive label wins non-abstaining at or above `p_min`, carrying the RAW confidence plus `p_cal` when a calibration is fitted ([#1063](https://github.com/xerj-org/xerj/issues/1063)). Ingest-time labels ship in the same release (`xerj autoindex --label <question-set.json>`). Still open on this row: #1062's wrong-and-confident ≤ 5 % detection gate is **not yet measured**; a restart does not resume watches; the console's `.xerj_alert_rules` still has no writer.
 - **A real object-storage backend.** *Done in rc.77:* [#965](https://github.com/xerj-org/xerj/issues/965) wired the segment path to object storage — `storage.backend = "s3"` packs each segment family into one immutable ZBM1 bundle object with `snapshot.json` as the publication point, merges publish before retiring inputs, and a fresh node adopts the bucket (see *Shipping today* for the full statement). The client (`s3.rs`, real S3-compatible: Cloudflare R2, MinIO, AWS S3), the read-through segment cache, per-request cost accounting by billing class and the stop-don't-warn budget had landed in rc.75. Separately, `xerj autoindex s3://bucket/prefix` reads documents OUT of a bucket, which is a source, not a home.
 - **A block index mode for logs.** An index mode for log-shaped data that stores rows in time-partitioned columnar blocks and skips whole blocks by their min/max metadata, instead of building a per-term inverted index over every field. *Today:* the `xerj-logs` crate implements that design (columnar encoding, log-template extraction, time-range queries with block skipping, retention), is compiled into `xerj-engine` and `xerj-server` as a dependency, and is **called from no non-test code**. Log-shaped analytics run through the general columnar segment format and the aggregation suite. Wire it behind an explicit index setting and measure it against the general path on the same data, or remove it — the *Log-analytics data path* theme below is this same item.
 - **User-code ingest plugins.** *Today:* the ingest pipeline's transforms are built-in native Rust plugins — rename, drop, add, JSON parse, timestamp parse, PII redaction, grok, route — and they do run on `_bulk`. The crate is named `xerj-wasm`, but **the wasmtime backend is not in the tree**: there is no `wasmtime` dependency and no `wasm` feature, only a note that one could be added behind the same trait. Planned: a sandboxed runtime for user-supplied transforms with fuel and memory limits and no ambient filesystem or network access. Until then the refusal rule holds: a pipeline naming a processor this build does not implement is stored as unrunnable and every ingest through it is refused, never quietly run as a shorter pipeline.

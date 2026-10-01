@@ -274,12 +274,20 @@ For a complete disconnected deployment procedure, including current GitHub relea
   behaviour you need against your own node or the docs rather than assuming full parity.
 
 - NOT IMPLEMENTED - do not plan around these. Statuses follow ROADMAP.md, section
-  "The zero-token direction", re-checked against `main` on 2026-09-26 by reading the
+  "The zero-token direction", re-checked against `main` on 2026-09-30 by reading the
   file named beside each one:
-    * Alerting. There is none. `PUT /_watcher/watch/{id}` stores the body in memory and
-      answers `"condition":{"met":true,"type":"always"}` whatever condition was sent; no
-      scheduler exists and no watch is ever evaluated. The console's `.xerj_alert_rules`
-      / `.xerj_alert_fires` indices have schemas and no evaluator. `percolate` IS real
+    * Alerting. PARTIAL since v1.0.0-rc.80 (PR #1082, issue #1062; this bullet said
+      "There is none" before, which was true then): `PUT /_watcher/watch/{id}` with
+      `trigger.schedule.interval` (>= 1s), `input.search` over exactly one index,
+      `condition.xerj_decide` (question, positive_label, p_min, k) and an `index_alert`
+      action runs a background evaluator - it prefilters with the watch's own query
+      (keyset paging, 100/page), runs each rendered question through the real `/_decide`,
+      and writes a fire record into `.xerj_alert_fires` when the positive label wins
+      non-abstaining at or above `p_min`. Every other shape - cron schedules, transforms,
+      other action types, multi-index input - is refused with a 501 naming what is not
+      evaluated; malformed supported shapes are 400. Honest limits: a restart does not
+      resume watches; the per-pass decide budget is 1000; `.xerj_alert_rules` still has
+      no writer (no console watch authoring). `percolate` IS real
       (stored queries matched against a supplied document) - poll it yourself.
     * User-supplied ingest plugins. Pipeline transforms are built-in native code
       (rename, drop, add, JSON parse, timestamp parse, PII redaction, grok, route). The
