@@ -136,11 +136,21 @@ PAGES: dict[str, dict[str, str]] = {
         description="The same Rust vulnerability arrives as RUSTSEC, GHSA and CVE. We collapsed 4,107 advisories to 1,950 identity-resolved records, packed them, and signed the pack — because no vulnerability database we surveyed does.",
         published="2026-09-27", updated="2026-09-27",
     ),
+    # The rc.80 gates write-up, 2026-09-30 — the blog half of the packaging
+    # rule for the ten-item program (#1055-#1064): every gate verdict, wins
+    # and losses, each number traced to its gate run. The window was planned
+    # as rc.79 + rc.80 + v1.1.0 and measured as one suite; the post says so.
+    "blog/the-rc80-gates.html": dict(
+        label="The rc.80 gates", kind="article",
+        title="The rc.80 gates: three passed outright, three failed, one split",
+        description="Ten features, eight measured gates: /_ask macro-F1 0.9975, xerj_map 20/30 to 0/30, calibration ECE 0.0088 pass; the judge, the flywheel and the decide head fail their bars, numbers published.",
+        published="2026-09-30", updated="2026-09-30",
+    ),
     "blog/index.html": dict(
         label="Blog", kind="collection",
         title="XERJ.ai — Blog: the engineering log",
-        description="Measured results with the losses left in: the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
-        updated="2026-09-27",
+        description="Measured results with the losses left in: the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
+        updated="2026-09-30",
     ),
     "demo/index.html": dict(
         label="Real-data demo", kind="software",
