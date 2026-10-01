@@ -1,0 +1,69 @@
+# Stemming gate #1059 (rc.79) — measured on the release binary
+
+Gate, verbatim from the issue:
+  "NFCorpus zero-hit queries 25 -> <=10; BEIR BM25 >= +0.01 over 0.657 SciFact / 0.302 NFCorpus."
+
+Run header: xerj v1.0.0-rc.78 (version string), binary built from main @ a179e1ef3
+(includes the PR #1070 merge 1fa06f944). Single node, private port 9620,
+--insecure --embed-mode lexical, throwaway data dir, 1 shard/index, 32-core
+sandbox shared with concurrent gate runs (latencies are wall-clock and not part
+of the gate). Datasets + sha256s in run-meta.txt. Arms are paired on the SAME
+node and binary; they differ only in the create-time PUT body (see run-meta.txt).
+
+## Sub-gate A — NFCorpus zero-hit queries 25 -> <=10: FAIL (measured 15)
+
+index              zero-hit queries (BM25 arm, default-OR multi_match, size=100)
+nfcorpus-std        25   (baseline arm; identical to the committed rc.74 list
+                         results/nfcorpus-lexical-gap.txt — all 25 qids match)
+nfcorpus-stem       15
+
+Stemming repairs exactly the inflection/plural class and nothing more:
+- FIXED by stemming (10): PLAIN-1008 deafness, PLAIN-1496 leeks, PLAIN-1867
+  pineapples, PLAIN-2281 turnips, PLAIN-2375 whiting, PLAIN-510 airport
+  scanners, PLAIN-520 Alli, PLAIN-583 antinutrients, PLAIN-645 bagels,
+  PLAIN-817 canker sores
+- STILL zero-hit (15): eggnog, Fosamax, halibut, mesquite, Mevacor,
+  myelopathy, okra, Peoria, Splenda, taro, Tufts, Yale, Zoloft, amnesia,
+  Czechoslovakia
+
+One-line reading of the FAIL: the 15 remaining queries are single words whose
+STEM also occurs nowhere in the corpus (brand drugs, place names, foods,
+amnesia/myelopathy) — a stemmer cannot lexically bridge a word that is absent
+in every inflected form, so 25-><=10 required bridging 5 out-of-vocabulary
+words that no amount of stemming reaches; the vector arm remains the only
+repair for those.
+
+## Sub-gate B — BEIR BM25 >= +0.01 over 0.657 SciFact / 0.302 NFCorpus: PASS
+
+index            nDCG@10 (BM25-only)   queries   docs
+scifact-std       0.6572               300       5183
+scifact-stem      0.6732               300       5183
+nfcorpus-std      0.3016               323       3633
+nfcorpus-stem     0.3195               323       3633
+
+deltas (paired, same binary/node/datasets):
+  SciFact   0.6732 - 0.6572 = +0.0160  (>= +0.01)  PASS
+  NFCorpus  0.3195 - 0.3016 = +0.0179  (>= +0.01)  PASS
+
+The std-arm numbers reproduce the README's rc.74 BM25 row exactly (0.6572 /
+0.3016, empty=25) on this binary, so the deltas are same-binary paired
+comparisons, not cross-release ones. Snowball stemming HELPS BM25 nDCG@10 on
+both datasets here (+1.6 / +1.8 points) — it is not a scoring regression on
+these arms.
+
+## Overall: PARTIAL (sub-gate A FAIL at 15 vs required <=10; sub-gate B PASS)
+
+## Caveats
+
+- GET /<idx>/_settings does not echo the analysis block, and POST /<idx>/_analyze
+  shows the standard token path even on the stem arm — the declared default
+  analyser is provably honoured by SEARCH only (bagel/bagels probe in
+  run-meta.txt: std 0 hits for "bagels", stem 1 hit). Recorded as an observed
+  display gap, not tuned around.
+- Latencies are wall-clock on a shared 32-core sandbox; not gate inputs.
+- The semantic_text 'body' field was embedded with the lexical feature-hashing
+  embedder (--embed-mode lexical); the BM25 arm never touches it and it is
+  identical in both arms.
+
+Per-query raw outputs: <dataset>-<arm>-bm25.tsv (qid, nhits, nDCG@10, query),
+summaries with the zero-hit lists in <dataset>-<arm>-summary.txt.

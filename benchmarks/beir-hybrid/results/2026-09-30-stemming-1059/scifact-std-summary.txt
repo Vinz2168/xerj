@@ -1,0 +1,2 @@
+index=scifact-std  queries=300  docs=5183
+bm25-only nDCG@10=0.6572  zero-hit=  0  p50=  71.0ms  p95=  84.7ms

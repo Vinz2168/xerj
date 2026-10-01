@@ -1,0 +1,17 @@
+index=nfcorpus-stem  queries=323  docs=3633
+bm25-only nDCG@10=0.3195  zero-hit= 15  p50=  22.4ms  p95=  69.3ms
+  ZERO	PLAIN-1098	eggnog
+  ZERO	PLAIN-1214	Fosamax
+  ZERO	PLAIN-1309	halibut
+  ZERO	PLAIN-1611	mesquite
+  ZERO	PLAIN-1621	Mevacor
+  ZERO	PLAIN-1679	myelopathy
+  ZERO	PLAIN-1752	okra
+  ZERO	PLAIN-1827	Peoria
+  ZERO	PLAIN-2134	Splenda
+  ZERO	PLAIN-2209	taro
+  ZERO	PLAIN-2271	Tufts
+  ZERO	PLAIN-2396	Yale
+  ZERO	PLAIN-2408	Zoloft
+  ZERO	PLAIN-551	amnesia
+  ZERO	PLAIN-997	Czechoslovakia

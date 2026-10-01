@@ -380,6 +380,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **Measured the #1059 stemming gate on the release binary — the BM25 half
+  passes, the zero-hit half fails at 15 (PR
+  [#1085](https://github.com/xerj-org/xerj/pull/1085)).** Paired arms on one
+  node (`benchmarks/beir-hybrid`, release binary @ `a179e1ef3`): the same
+  create-time `settings.analysis.analyzer.default` = `stemmer` surface
+  #1070 ships, vs the standard-analyzer baseline, which reproduced the rc.74
+  row exactly (0.6572 SciFact / 0.3016 NFCorpus / the same 25 zero-hit
+  queries). BM25 nDCG@10: SciFact 0.6572 → 0.6732 (+0.0160) and NFCorpus
+  0.3016 → 0.3195 (+0.0179) — both clear the gate's +0.01, so stemming is a
+  measured BM25 win, not a regression. NFCorpus zero-hit queries went 25 →
+  15, not the required ≤10: stemming repairs exactly the 10
+  plural/inflection queries; the remaining 15 are single words (Fosamax,
+  Zoloft, eggnog, Yale…) whose stem also occurs nowhere in the corpus — not
+  bridgeable by any stemmer, the vector arm remains their only repair. Raw
+  per-query outputs in
+  `benchmarks/beir-hybrid/results/2026-09-30-stemming-1059/`. Also recorded:
+  `GET _settings` does not echo the analysis block and `_analyze` shows the
+  standard path even when the stemmer is declared and provably applied by
+  search.
 - Rolled `ROADMAP.md`'s tracker state after the issue tracker was emptied on
   2026-09-29, the day of the rc.78 cut: the four issues still open after the
   cut — #1038 and #1030 (their shipped halves are the rc.78 record below) and
