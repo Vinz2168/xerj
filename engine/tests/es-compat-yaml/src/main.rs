@@ -790,7 +790,13 @@ fn execute_do(
                 while !resp_text.is_char_boundary(cut) {
                     cut -= 1;
                 }
-                return Err(format!("{} {} → {} {}", method, path, status, &resp_text[..cut]));
+                return Err(format!(
+                    "{} {} → {} {}",
+                    method,
+                    path,
+                    status,
+                    &resp_text[..cut]
+                ));
             }
         }
 
