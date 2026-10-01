@@ -7,7 +7,7 @@
 //! have that failure mode.
 
 use crate::esclient::Es;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 const USAGE: &str = "\
 xerj gain — what this node has done for you, counted (not estimated)
@@ -33,24 +33,52 @@ pub(crate) struct SearchEvent {
     pub hits: u64,
 }
 
-/// Parse the audit `note` written by the search handler: `took=12ms hits=3`.
-/// Tolerant: missing pieces become 0 rather than dropping the event.
-pub(crate) fn parse_note(note: &str) -> (u64, u64) {
+/// The search events a human caused, plus the machine traffic the same
+/// audit window holds (#1105). `xerj gain` is "what did XERJ do FOR YOU" —
+/// autoindex's own verification round-trips are not that, and folding them
+/// in reported a 3% hit rate immediately after a flawless onboarding where
+/// every real search found something.
+#[derive(Debug, Default)]
+pub(crate) struct SearchWindow {
+    pub user: Vec<SearchEvent>,
+    /// `size:0` searches — counting probes that asked for no hits.
+    pub counting_probes: u64,
+    /// Searches against `autoindex-catalog`, the index autoindex itself
+    /// maintains (incremental reconcile sweeps it with full-page searches).
+    pub catalog_sweeps: u64,
+}
+
+impl SearchWindow {
+    /// Machine entries excluded from `user`, for the honesty line.
+    fn excluded(&self) -> u64 {
+        self.counting_probes + self.catalog_sweeps
+    }
+}
+
+/// Parse the audit `note` written by the search handler:
+/// `took=12ms hits=3 size=10`. Tolerant: missing pieces become 0 (or
+/// `None` for `size`, which entries written before that field existed —
+/// or by any other client — simply do not carry).
+pub(crate) fn parse_note(note: &str) -> (u64, u64, Option<u64>) {
     let mut took = 0;
     let mut hits = 0;
+    let mut size = None;
     for tok in note.split_whitespace() {
         if let Some(v) = tok.strip_prefix("took=") {
             took = v.trim_end_matches("ms").parse().unwrap_or(0);
         } else if let Some(v) = tok.strip_prefix("hits=") {
             hits = v.parse().unwrap_or(0);
+        } else if let Some(v) = tok.strip_prefix("size=") {
+            size = v.parse().ok();
         }
     }
-    (took, hits)
+    (took, hits, size)
 }
 
-/// Pull search events out of the audit snapshot (`{entries: [...]}`).
-pub(crate) fn search_events(audit: &Value) -> Vec<SearchEvent> {
-    let mut out = Vec::new();
+/// Pull search events out of the audit snapshot (`{entries: [...]}`),
+/// separating the user's searches from autoindex's machine traffic.
+pub(crate) fn search_events(audit: &Value) -> SearchWindow {
+    let mut out = SearchWindow::default();
     let Some(entries) = audit.get("entries").and_then(Value::as_array) else {
         return out;
     };
@@ -58,14 +86,23 @@ pub(crate) fn search_events(audit: &Value) -> Vec<SearchEvent> {
         if e.get("op").and_then(Value::as_str) != Some("search") {
             continue;
         }
+        let resource = e
+            .get("resource")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string();
         let note = e.get("note").and_then(Value::as_str).unwrap_or("");
-        let (took_ms, hits) = parse_note(note);
-        out.push(SearchEvent {
-            index: e
-                .get("resource")
-                .and_then(Value::as_str)
-                .unwrap_or("?")
-                .to_string(),
+        let (took_ms, hits, size) = parse_note(note);
+        if size == Some(0) {
+            out.counting_probes += 1;
+            continue;
+        }
+        if resource == "autoindex-catalog" {
+            out.catalog_sweeps += 1;
+            continue;
+        }
+        out.user.push(SearchEvent {
+            index: resource,
             took_ms,
             hits,
         });
@@ -154,63 +191,98 @@ pub fn run_gain_cli() -> i32 {
             return 2;
         }
     };
-    // The audit API lives on the NATIVE listener, which the server starts on
-    // ES-port + 1 (the startup banner prints both). Try the given URL first —
-    // it costs one request and keeps working if the routes ever merge — then
-    // fall back to the +1 convention.
+    // The audit API lives on the node's NATIVE listener, whose default port
+    // is 8080 (the startup banner prints it as 'Native REST'). Try the given
+    // URL first — it costs one request and keeps working if the routes ever
+    // merge — then the default native port on the same host, then the
+    // ES-port+1 convention for nodes that co-locate them that way (#1104:
+    // probing only port+1 missed the default entirely and `gain` was
+    // unusable without hand-guessing the port).
     let audit = match es.get_json("/_audit/_search") {
         Ok(v) => v,
         Err(_) => {
-            let native = bump_port(&url);
-            let retry = native
-                .as_deref()
-                .and_then(|nu| Es::new(nu, std::env::var("XERJ_API_KEY").ok()).ok())
-                .and_then(|nes| nes.get_json("/_audit/_search").ok());
+            let key = std::env::var("XERJ_API_KEY").ok().filter(|s| !s.is_empty());
+            let mut retry = None;
+            let mut tried = vec![url.clone()];
+            for candidate in native_candidates(&url) {
+                tried.push(candidate.clone());
+                if let Some(nes) = Es::new(&candidate, key.clone()).ok() {
+                    if let Ok(v) = nes.get_json("/_audit/_search") {
+                        retry = Some(v);
+                        break;
+                    }
+                }
+            }
             match retry {
                 Some(v) => v,
                 None => {
                     eprintln!(
-                        "xerj gain: could not read the audit log at {url}/_audit/_search{}.\n\
+                        "xerj gain: could not read the audit log at {}.\n\
                          (the audit API is served by the node's native listener — the port the\n\
-                         startup banner prints as 'native REST'. A node started with --insecure\n\
-                         serves it without a key; otherwise the key needs read_audit.)",
-                        native
-                            .map(|n| format!(" or {n}/_audit/_search"))
-                            .unwrap_or_default()
+                         startup banner prints as 'native REST'; a default node uses 8080.\n\
+                         A node started with --insecure serves it without a key; otherwise\n\
+                         the key needs read_audit.)",
+                        tried
+                            .iter()
+                            .map(|u| format!("{u}/_audit/_search"))
+                            .collect::<Vec<_>>()
+                            .join(" or ")
                     );
                     return 1;
                 }
             }
         }
     };
-    let events = search_events(&audit);
+    let window = search_events(&audit);
+    let excluded = window.excluded();
+    let (probes, sweeps) = (window.counting_probes, window.catalog_sweeps);
+    let events = window.user;
     let s = stats(&events);
     if as_json {
+        let mut s = s;
+        s["excluded_machine_searches"] = json!({
+            "counting_probes": probes,
+            "catalog_sweeps": sweeps,
+        });
         println!("{}", serde_json::to_string_pretty(&s).unwrap_or_default());
         return 0;
     }
-    if events.is_empty() {
+    if events.is_empty() && excluded == 0 {
         println!("no searches in the audit window yet.");
         println!("(index something: xerj autoindex <folder> — then: xerj search \"<words>\")");
         return 0;
     }
     println!("xerj gain — counted from the node's audit log, no estimates\n");
-    println!(
-        "  searches served   {}   ({}% found something; {} zero-hit)",
-        s["searches"], s["hit_rate"], s["zero_hit"]
-    );
-    println!(
-        "  latency           p50 {}ms · p95 {}ms",
-        s["took_ms"]["p50"], s["took_ms"]["p95"]
-    );
-    println!("  recent            {}", strip(&events, 50));
-    println!("\n  busiest indices");
-    for t in s["top_indices"].as_array().into_iter().flatten() {
+    if events.is_empty() {
+        println!("  no user searches in the audit window (only machine traffic).");
+        println!("  try one: xerj search \"<words>\"");
+    } else {
         println!(
-            "    {:<40} {:>5} searches  ({} with hits)",
-            t["index"].as_str().unwrap_or("?"),
-            t["searches"],
-            t["with_hits"]
+            "  searches served   {}   ({}% found something; {} zero-hit)",
+            s["searches"], s["hit_rate"], s["zero_hit"]
+        );
+        println!(
+            "  latency           p50 {}ms · p95 {}ms",
+            s["took_ms"]["p50"], s["took_ms"]["p95"]
+        );
+        println!("  recent            {}", strip(&events, 50));
+        println!("\n  busiest indices");
+        for t in s["top_indices"].as_array().into_iter().flatten() {
+            println!(
+                "    {:<40} {:>5} searches  ({} with hits)",
+                t["index"].as_str().unwrap_or("?"),
+                t["searches"],
+                t["with_hits"]
+            );
+        }
+    }
+    if excluded > 0 {
+        println!(
+            "\n  (not counted as yours: {} machine search(es) this window — {} counting\n\
+             \x20  probe(s) autoindex used to verify its own writes, {} catalog\n\
+             \x20  maintenance sweep(s). Nothing was thrown away; they are in the\n\
+             \x20  audit log with everything else.)",
+            excluded, probes, sweeps
         );
     }
     println!(
@@ -228,6 +300,26 @@ pub(crate) fn bump_port(url: &str) -> Option<String> {
     let tail = &url[idx + 1..];
     let port: u16 = tail.parse().ok()?;
     Some(format!("{}:{}", &url[..idx], port.checked_add(1)?))
+}
+
+/// Candidate native-listener base URLs for the audit API, in probe order:
+/// the default native port (8080) on the same host first, then the
+/// ES-port+1 convention. Deduplicated, so a node whose ES listener already
+/// IS on 8080 is probed once.
+pub(crate) fn native_candidates(url: &str) -> Vec<String> {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let mut out = Vec::new();
+    if let Some(host) = after_scheme.split([':', '/']).next() {
+        if !host.is_empty() {
+            out.push(format!("http://{host}:8080"));
+        }
+    }
+    if let Some(bumped) = bump_port(url) {
+        if !out.contains(&bumped) {
+            out.push(bumped);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -248,13 +340,40 @@ mod tests {
         assert_eq!(bump_port("http://localhost"), None);
     }
 
+    #[test]
+    fn native_candidates_default_port_first_then_port_plus_one() {
+        // #1104: the default node's native REST is 8080 — it must be probed,
+        // and probed before the ES-port+1 guess.
+        assert_eq!(
+            native_candidates("http://localhost:9200"),
+            vec!["http://localhost:8080".to_string(), "http://localhost:9201".to_string()]
+        );
+        // A node whose ES listener is itself on 8080 still gets both the
+        // default native port and its +1 guess — only an exact duplicate
+        // (ES port+1 == 8080) is deduplicated.
+        assert_eq!(
+            native_candidates("http://localhost:8080"),
+            vec!["http://localhost:8080".to_string(), "http://localhost:8081".to_string()]
+        );
+        assert_eq!(
+            native_candidates("http://10.0.0.5:8079"),
+            vec!["http://10.0.0.5:8080".to_string()]
+        );
+        assert_eq!(native_candidates("http://10.0.0.5:9280").len(), 2);
+        // No port to bump still yields the default native candidate.
+        assert_eq!(
+            native_candidates("http://localhost"),
+            vec!["http://localhost:8080".to_string()]
+        );
+    }
+
     fn audit(entries: Vec<Value>) -> Value {
         json!({ "next_seq": entries.len(), "entries": entries })
     }
 
     fn search_entry(index: &str, took: u64, hits: u64) -> Value {
         json!({ "op": "search", "subject": "anonymous", "resource": index,
-                "outcome": "ok", "note": format!("took={took}ms hits={hits}") })
+                "outcome": "ok", "note": format!("took={took}ms hits={hits} size=10") })
     }
 
     #[test]
@@ -265,9 +384,46 @@ mod tests {
             search_entry("ref-sled-docs", 4, 0),
         ]);
         let ev = search_events(&a);
-        assert_eq!(ev.len(), 2);
-        assert_eq!((ev[0].took_ms, ev[0].hits), (12, 3));
-        assert_eq!((ev[1].took_ms, ev[1].hits), (4, 0));
+        assert_eq!(ev.user.len(), 2);
+        assert_eq!((ev.user[0].took_ms, ev.user[0].hits), (12, 3));
+        assert_eq!((ev.user[1].took_ms, ev.user[1].hits), (4, 0));
+    }
+
+    #[test]
+    fn parse_note_tolerates_missing_size() {
+        // Entries written before `size=` existed (or by another client) must
+        // still count as user searches, never as counting probes.
+        assert_eq!(parse_note("took=4ms hits=0"), (4, 0, None));
+        assert_eq!(parse_note("took=4ms hits=7 size=0"), (4, 7, Some(0)));
+        assert_eq!(parse_note("took=4ms hits=7 size=25"), (4, 7, Some(25)));
+    }
+
+    #[test]
+    fn counting_probes_and_catalog_sweeps_are_not_user_searches() {
+        // #1105, verbatim from the rc.80 harness run: 179 size-0 verification
+        // probes on the dataset index, catalog reconcile sweeps, three real
+        // searches — gain must report the three.
+        let probe = |hits: u64| {
+            json!({ "op": "search", "subject": "superuser", "resource": "ax-docs",
+                    "outcome": "ok", "note": format!("took=0ms hits={hits} size=0") })
+        };
+        let mut entries: Vec<Value> = (0..179).map(|_| probe(0)).collect();
+        for _ in 0..96 {
+            entries.push(json!({ "op": "search", "subject": "superuser",
+                    "resource": "autoindex-catalog", "outcome": "ok",
+                    "note": "took=0ms hits=0 size=1000" }));
+        }
+        entries.push(search_entry("ax-*", 145, 5));
+        entries.push(search_entry("ax-*", 82, 2));
+        entries.push(search_entry("ax-*", 1028, 10));
+        let w = search_events(&audit(entries));
+        assert_eq!(w.user.len(), 3);
+        assert_eq!(w.counting_probes, 179);
+        assert_eq!(w.catalog_sweeps, 96);
+        let s = stats(&w.user);
+        assert_eq!(s["searches"], 3);
+        assert_eq!(s["with_hits"], 3);
+        assert_eq!(s["hit_rate"], 100.0);
     }
 
     #[test]

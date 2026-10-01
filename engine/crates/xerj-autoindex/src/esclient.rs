@@ -1763,15 +1763,26 @@ impl Es {
     }
 
     pub fn count(&self, index: &str) -> Result<u64> {
-        // _count may not exist on all builds — use size:0 search with totals.
-        let v = self.search(
-            index,
-            &serde_json::json!({"size": 0, "track_total_hits": true}),
-        )?;
-        v.pointer("/hits/total/value")
-            .and_then(|t| t.as_u64())
-            .or_else(|| v.pointer("/hits/total").and_then(|t| t.as_u64()))
-            .ok_or_else(|| anyhow!("no total in search response"))
+        // `_count` first: it is the endpoint this call always meant, and a
+        // node audits it as `count.post` — a size:0 search here lands in the
+        // audit log as a user `search` with zero hits, which is exactly the
+        // machine traffic `xerj gain` must not count as the user's (#1105).
+        // The size:0 search stays as the fallback for builds without `_count`
+        // (the reason this was a search in the first place).
+        match self.count_endpoint(index) {
+            Count::Number(n) => Ok(n),
+            Count::Zero => Ok(0),
+            Count::Unknown(_) => {
+                let v = self.search(
+                    index,
+                    &serde_json::json!({"size": 0, "track_total_hits": true}),
+                )?;
+                v.pointer("/hits/total/value")
+                    .and_then(|t| t.as_u64())
+                    .or_else(|| v.pointer("/hits/total").and_then(|t| t.as_u64()))
+                    .ok_or_else(|| anyhow!("no total in search response"))
+            }
+        }
     }
 
     /// `_cat/indices` is plain text, no header (?format=json is IGNORED —
