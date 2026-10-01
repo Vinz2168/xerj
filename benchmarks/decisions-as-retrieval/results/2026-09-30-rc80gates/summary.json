@@ -1,0 +1,36 @@
+{
+ "ts": "2026-09-30T18:39:06",
+ "summary": [
+  {
+   "set": "SMS held-out noul (1574 rows)",
+   "n": 1574,
+   "accuracy": 0.9193,
+   "ECE": 0.287,
+   "conf>=0.8 share": 0.1811,
+   "acc@>=0.8": 0.8035,
+   "ms/item": 14.6,
+   "ECE_noul_p_raw": 0.3439,
+   "spam_P": 0.643,
+   "spam_R": 0.982,
+   "spam_F1": 0.778
+  },
+  {
+   "set": "Banking77 test choice (77-way, 3080 rows)",
+   "n": 3080,
+   "accuracy": 0.1185,
+   "ECE": 0.0717,
+   "conf>=0.8 share": 0.0,
+   "acc@>=0.8": 0.0,
+   "ms/item": 376.1
+  },
+  {
+   "set": "AG News test choice (4-way, 7600 rows \u2014 never trained)",
+   "n": 7600,
+   "accuracy": 0.2599,
+   "ECE": 0.06,
+   "conf>=0.8 share": 0.0,
+   "acc@>=0.8": 0.0,
+   "ms/item": 52.8
+  }
+ ]
+}

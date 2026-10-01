@@ -1,0 +1,18 @@
+# Stock release binary (main @ a179e1ef3, 'xerj v1.0.0-rc.78') — what --decide-mode local does
+
+Boot command:
+  /tmp/xerj-rc80gates-bin/xerj --insecure --port 9600 --data-dir <throwaway> --embed-mode lexical --decide-mode local --decide-model-dir /tmp/xerj-rc80gates-artifact/xerj-decide-v1
+
+Boot log (nodes/a.log):
+[2m2026-09-30T17:55:45.067601Z[0m [32m INFO[0m [2mxerj[0m[2m:[0m decide ladder resolved (tier 2 off) [3mmode[0m[2m=[0mlocal [3mfrom[0m[2m=[0m"CLI"
+[2m2026-09-30T17:55:45.067616Z[0m [33m WARN[0m [2mxerj[0m[2m:[0m XERJ_DECIDE_MODE=local was requested but this binary was built without the decide-local feature; rebuild with `cargo build --release -p xerj-server --features decide-local`
+
+Request: POST /_decide {"question":"URGENT! You have won a £1000 prize...","positive_label":"spam","index":""}
+Response:
+{"error":{"type":"illegal_argument","reason":"`index` must name the judgement-history index"}}
+
+GET /v1/models (native port 9601):
+{"models":[{"name":"xerj-history-vote-1","description":"Weighted nearest-neighbour vote over a labelled-history index (no [decisions] index configured: /v1/systemone answers 503)","release_date":"2026-09-20"}]}
+
+Release workflow build line (.github/workflows/release.yml:191):
+191:            cargo build --release --locked --target ${{ matrix.target }} -p xerj-server

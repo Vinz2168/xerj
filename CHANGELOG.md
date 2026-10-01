@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **rc.80 decide-gate measurements: tier-2 quality, serving latency, and the
+  flywheel replay, all through live nodes
+  (PR [#1088](https://github.com/xerj-org/xerj/pull/1088)).** The rc.79/rc.80
+  gates on the System One decide ladder, measured on commit `a179e1ef3`
+  (`xerj v1.0.0-rc.78`) in `benchmarks/decisions-as-retrieval/results/2026-09-30-rc80gates/`.
+  #1057 quality **FAIL** (bars: SMS acc ≥0.95 / ECE ≤0.05, AG News ≥0.85):
+  SMS 0.9193 / ECE 0.287 on the 1,574-row seed-7 held-out split; AG News
+  0.2599 on the full 7,600-row test set (chance 0.25 — the artifact was never
+  trained on it); Banking77 reported, not gated: 0.1185 / ECE 0.0717, which
+  reproduces the eval card exactly through the node's choice path. #1057
+  latency **PASS**: p50 8.4 ms for 30 `/_decide` noul questions with the node
+  pinned to 8 cores (5-way choice 20.0 ms; the full 77-way vocabulary 282.6
+  ms); the tier downloads 0 MB — there is no download path — and the artifact
+  is 28.5 MiB of F32 (not quantized; candle 0.9 has no quantized safetensors
+  loader). #1061 flywheel replay **FAIL**: as shipped, the write-back caches
+  only 12 answers in 2,000 requests (once any cached doc gives BM25 support
+  the history vote answers everything, and history answers are never cached),
+  then answers 99.7% of later traffic from that frozen cache at 0.033
+  accuracy — 4.91% of later traffic at ≥0.8 confidence (bar 80%) at 0.0377
+  accuracy (bar 0.97); with the gate's premise instantiated (2,000 gold
+  answers cached), 19.72% of later traffic clears 0.8 confidence at 0.9953
+  accuracy — the accuracy bar holds, the 80% share bar fails 4× under at
+  k=10. Release-cut fact recorded beside the numbers: **the stock release
+  binary is built without the `decide-local` cargo feature** —
+  `--decide-mode local` on it logs a warning and tier 2 stays off, so the
+  tier ships absent, not merely flagged off, until release.yml enables the
+  feature.
+
 - **`xerj-decide-v1`: the open tier-2 decide model — training/export harness,
   measured eval card, upload-ready bundle
   ([#1064](https://github.com/xerj-org/xerj/issues/1064), PR

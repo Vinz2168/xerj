@@ -1,0 +1,44 @@
+{
+ "ts": "2026-09-30T18:42:11",
+ "results": {
+  "arm_a_fill": {
+   "requests": 2000,
+   "tier_local": 14,
+   "tier_history": 1986,
+   "cached_docs_after_fill": 14,
+   "fill_local_accuracy": 0.0714,
+   "fill_overall_accuracy": 0.0335,
+   "s": 4.6
+  },
+  "arm_a_topup": {
+   "train_rows_fired": 10003,
+   "cached_docs_now": 24
+  },
+  "arm_a_gate": {
+   "later_traffic_n": 1080,
+   "history_share": 1.0,
+   "history_at>=0.8_share": 0.025,
+   "history_at>=0.8_accuracy": 0.0,
+   "history_all_accuracy": 0.0148,
+   "local_share": 0.0,
+   "local_accuracy": 0.0,
+   "overall_accuracy": 0.0148,
+   "gate": "FAIL",
+   "cached_docs_at_measure": 24
+  },
+  "arm_b_seed": {
+   "gold_docs_cached": 2000
+  },
+  "arm_b_gate": {
+   "later_traffic_n": 1080,
+   "history_share": 1.0,
+   "history_at>=0.8_share": 0.1056,
+   "history_at>=0.8_accuracy": 0.0,
+   "history_all_accuracy": 0.0,
+   "local_share": 0.0,
+   "local_accuracy": 0.0,
+   "overall_accuracy": 0.0,
+   "gate": "FAIL"
+  }
+ }
+}
