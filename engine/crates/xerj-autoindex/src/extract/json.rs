@@ -8,7 +8,7 @@
 
 use super::{
     emit_document_with_fields, flatten_object, ExtractStats, FieldOrigin, RawRecord, Sink,
-    MAX_WHOLE_FILE,
+    MAX_LINE, MAX_WHOLE_FILE,
 };
 use anyhow::Result;
 use serde_json::{Map, Value};
@@ -23,8 +23,19 @@ pub fn extract(path: &Path, gzip: bool, sink: Sink) -> Result<ExtractStats> {
     let v: Value = match serde_json::from_slice(&bytes) {
         Ok(v) => v,
         Err(_) => {
-            stats.junk += 1;
-            return Ok(stats);
+            // Not one JSON value. Before junking, try the file as JSONL:
+            // a JSONL export whose FIRST line is longer than the sniff
+            // prefix (8 KB) sniffs as `Json` — the sample holds zero
+            // COMPLETE lines, so `classify_structured`'s per-line test
+            // never runs and `looks_like_json_start` routes the whole
+            // file here. Measured on the published rust-vulns pack:
+            // osv/records.jsonl (735 records, first line ≥ 8 KB) was
+            // junked as "no records extracted (json candidate family)"
+            // and `xerj corpus index` accepted 1,230 of 1,963 records as
+            // a success. A file that is neither one JSON value nor a
+            // sequence of JSON lines junks exactly as before — every
+            // line fails the per-line parse too.
+            return jsonl_fallback(&bytes, sink);
         }
     };
     match v {
@@ -243,6 +254,47 @@ pub(crate) fn is_keep_note_file(path: &Path) -> bool {
         Ok(Value::Object(obj)) => keep_note(&obj).is_some(),
         _ => false,
     }
+}
+
+/// Whole-file parse failed — re-parse the same in-memory bytes line by
+/// line under the JSONL contract (see the fallback note in [`extract`]).
+/// Mirrors `jsonl::extract`'s per-line semantics: blank lines skip, a line
+/// at the 16 MB cap junks, an object becomes one flattened record with a
+/// byte-offset locator, anything else junks. No `limit_bytes` exists here
+/// (the family reads the whole file), so there is no truncated-tail
+/// exemption to carry over.
+fn jsonl_fallback(bytes: &[u8], sink: Sink) -> Result<ExtractStats> {
+    let mut stats = ExtractStats::default();
+    let mut offset: u64 = 0;
+    for line in bytes.split(|&b| b == b'\n') {
+        let start = offset;
+        offset += line.len() as u64 + 1;
+        let trimmed = super::jsonl::trim_ws(line);
+        if trimmed.is_empty() {
+            continue;
+        }
+        if line.len() >= MAX_LINE {
+            stats.junk += 1;
+            continue;
+        }
+        match serde_json::from_slice::<Value>(trimmed) {
+            Ok(Value::Object(m)) => {
+                stats.records += 1;
+                if !sink(RawRecord {
+                    fields: flatten_object(m),
+                    locator: format!("b{start}"),
+                    group: None,
+                    origin: FieldOrigin::Data,
+                }) {
+                    return Ok(stats);
+                }
+            }
+            Ok(_) | Err(_) => {
+                stats.junk += 1;
+            }
+        }
+    }
+    Ok(stats)
 }
 
 fn emit(v: Value, locator: &str, sink: Sink, stats: &mut ExtractStats) -> bool {
@@ -480,6 +532,34 @@ mod tests {
         let (stats, recs) = run("not json at all");
         assert_eq!((stats.records, stats.junk), (0, 1));
         assert!(recs.is_empty());
+    }
+
+    /// The published rust-vulns pack's osv half is a JSONL file whose first
+    /// line (an OSV record with a large `affected` array) exceeds the sniff
+    /// prefix — zero complete lines in the sample, so the file sniffs as
+    /// `Json` and arrives HERE, not at the JSONL extractor. It must index
+    /// line by line, not junk: `corpus index` accepted 1,230 of 1,963
+    /// records as a success before this fallback existed.
+    #[test]
+    fn a_jsonl_file_whose_first_line_beats_the_sniff_prefix_still_indexes_per_line() {
+        let fat = format!(
+            r#"{{"id":"OSV-1","affected":{:?}}}"#,
+            vec!["x".repeat(9_000); 2usize]
+        );
+        assert!(
+            fat.len() > 8_192,
+            "the first line must beat the 8 KB sample"
+        );
+        let text = format!("{fat}\n{{\"id\":\"OSV-2\"}}\n");
+        let (stats, recs) = run(&text);
+        assert_eq!((stats.records, stats.junk), (2, 0));
+        assert_eq!(recs[0].locator, "b0", "byte-offset locator, JSONL contract");
+        assert_eq!(recs[1].fields["id"], serde_json::json!("OSV-2"));
+
+        // A mixed file — some parseable lines, one corrupt — keeps the
+        // JSONL semantics: good lines index, the corrupt one junks.
+        let (stats, _) = run("{\"id\":\"a\"}\n{broken\n{\"id\":\"c\"}\n");
+        assert_eq!((stats.records, stats.junk), (2, 1));
     }
 
     #[test]
