@@ -1,0 +1,61 @@
+arm	intent	form	status	unknown_field_400	hits	actions	guess
+A	sort-lastmod	sort	400	True		guess	last_modified
+B	sort-lastmod	sort	200	False	423	dropped-sort:no-candidate-in-map	last_modified
+A	sort-filepath	sort	400	True		guess	file_path
+B	sort-filepath	sort	200	False	2852	map-exact-name	file_path
+A	sort-linenumber	sort	400	True		guess	line_number
+B	sort-linenumber	sort	200	False	423	map-exact-name	line_number
+A	sort-language	sort	200	False	2852	guess	language
+B	sort-language	sort	200	False	2852	map-exact-name	language
+A	sort-symbolname	sort	400	True		guess	symbol_name
+B	sort-symbolname	sort	200	False	423	map-exact-name	symbol_name
+A	sort-repository	sort	400	True		guess	repository
+B	sort-repository	sort	200	False	2852	dropped-sort:no-candidate-in-map	repository
+A	sort-created	sort	400	True		guess	created_at
+B	sort-created	sort	200	False	3	map-exact-name	created_at
+A	sort-title	sort	200	False	2852	guess	title
+B	sort-title	sort	200	False	2852	map-exact-name	title
+A	sort-version	sort	400	True		guess	version
+B	sort-version	sort	200	False	4	map-case-corrected	version
+A	sort-platform	sort	400	True		guess	platform
+B	sort-platform	sort	200	False	3	map-case-corrected	platform
+A	sort-word	sort	200	False	2	guess	word
+B	sort-word	sort	200	False	2	map-exact-name	word
+A	sort-kind	sort	400	True		guess	type
+B	sort-kind	sort	200	False	179	map-exact-name	type
+A	sem-content	semantic	400	True		guess	content
+B	sem-content	semantic	200	False	10	map-semantic-field	content
+A	sem-embedding	semantic	400	True		guess	embedding
+B	sem-embedding	semantic	200	False	10	map-semantic-field	embedding
+A	sem-text	semantic	200	False	5	guess	text
+B	sem-text	semantic	200	False	10	map-semantic-field	text
+A	sem-body-absent	semantic	400	True		guess	body
+B	sem-body-absent	semantic	200	False	4	map-no-semantic-no-text-fell-back-to-match_all	body
+A	sem-vector-kw	semantic	400	True		guess	vector
+B	sem-vector-kw	semantic	200	False	2	map-no-semantic-no-text-fell-back-to-match_all	vector
+A	sem-description	semantic	400	True		guess	description
+B	sem-description	semantic	200	False	3	map-no-semantic-no-text-fell-back-to-match_all	description
+A	knn-embedding	knn	400	True		guess	embedding
+B	knn-embedding	knn	200	False	10	map-semantic-field	embedding
+A	knn-embedding-vector	knn	400	True		guess	embedding_vector
+B	knn-embedding-vector	knn	200	False	10	map-semantic-field	embedding_vector
+A	knn-vector	knn	400	True		guess	vector
+B	knn-vector	knn	200	False	2	map-no-semantic-no-text-fell-back-to-match_all	vector
+A	knn-code-embedding	knn	400	True		guess	code_embedding
+B	knn-code-embedding	knn	200	False	10	map-semantic-field	code_embedding
+A	hyb-knn-leg	hybrid	400	True		guess	embedding
+B	hyb-knn-leg	hybrid	200	False	11	hybrid-legs:map-semantic-field	embedding
+A	hyb-sem-leg	hybrid	400	True		guess	content
+B	hyb-sem-leg	hybrid	200	False	10	hybrid-legs:map-semantic-field	content
+A	filter-lang	term	200	False	0	guess	lang
+B	filter-lang	term	200	False	174	map-exact-name	lang
+A	filter-repo	term	200	False	0	guess	repo
+B	filter-repo	term	200	False	423	dropped-filter:no-candidate-in-map	repo
+A	filter-lines	range	200	False	0	guess	line_number
+B	filter-lines	range	200	False	325	map-exact-name	line_number
+A	filter-include	term	200	False	0	guess	include
+B	filter-include	term	200	False	0	map-case-corrected	include
+A	filter-title-exists	exists	200	False	2789	guess	title
+B	filter-title-exists	exists	200	False	2789	map-exact-name	title
+A	filter-licence	term	200	False	0	guess	license
+B	filter-licence	term	200	False	3	map-exact-name	license

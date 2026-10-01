@@ -1,0 +1,37 @@
+{
+ "intent": "filter-include",
+ "arm": "A",
+ "tool": "xerj_search",
+ "form": "term",
+ "target_index": "xc-map-gate-v-b1790790750-usearch-csharp-cloud-unum-usearch-tests",
+ "intent_text": "package includes",
+ "guess_field": "include",
+ "control": null,
+ "actions": [
+  "guess"
+ ],
+ "request": {
+  "query": {
+   "term": {
+    "include": "PACKAGE"
+   }
+  },
+  "size": 5
+ },
+ "http_status": 200,
+ "fields_used": [
+  "include"
+ ],
+ "error_reason": "",
+ "unknown_field_400": false,
+ "failure_kind": [],
+ "hits": 0,
+ "zero_hit_unknown_field_hint": false,
+ "hint_reason": "",
+ "map_shows": [
+  "Include",
+  "Version",
+  "IncludeAssets",
+  "PrivateAssets"
+ ]
+}

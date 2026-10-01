@@ -1,0 +1,26 @@
+{
+ "gate": "unknown-field 400s from MCP-issued DSL down >=80% on the reference-coding harness (#1055, rc.79)",
+ "harness_git": "e26880844313257efe2dd286bfadd44002fef1f2",
+ "binary": "xerj v1.0.0-rc.78",
+ "mcp_server": {
+  "name": "xerj-mcp",
+  "version": "1.0.0-rc.78"
+ },
+ "node": "http://127.0.0.1:9660",
+ "node_es_version": "8.13.0",
+ "corpus_prefix": "xc-map-gate-v",
+ "indexes": {
+  "hnswlib-docs": "xc-map-gate-v-b1790790750-hnswlib-docs",
+  "usearch-docs": "xc-map-gate-v-b1790790750-usearch-docs",
+  "json": "xc-map-gate-v-b1790790750-json",
+  "usearch-csharp-cloud-unum-usearch-tests": "xc-map-gate-v-b1790790750-usearch-csharp-cloud-unum-usearch-tests",
+  "usearch-csharp-directory-build": "xc-map-gate-v-b1790790750-usearch-csharp-directory-build",
+  "usearch-sqlite-strings-table": "xc-map-gate-v-b1790790750-usearch-sqlite-strings-table",
+  "instant-distance-docs": "xc-map-gate-v-b1790790750-instant-distance-docs",
+  "usearch-csharp-nuget-package": "xc-map-gate-v-b1790790750-usearch-csharp-nuget-package",
+  "usearch-sqlite-binary-vectors": "xc-map-gate-v-b1790790750-usearch-sqlite-binary-vectors"
+ },
+ "map_matched": 9,
+ "map_bytes": 16828,
+ "intents": 30
+}

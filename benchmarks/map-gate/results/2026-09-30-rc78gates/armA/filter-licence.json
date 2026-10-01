@@ -1,0 +1,41 @@
+{
+ "intent": "filter-licence",
+ "arm": "A",
+ "tool": "xerj_search",
+ "form": "term",
+ "target_index": "xc-map-gate-v-b1790790750-json",
+ "intent_text": "Apache-licensed repos only",
+ "guess_field": "license",
+ "control": null,
+ "actions": [
+  "guess"
+ ],
+ "request": {
+  "query": {
+   "term": {
+    "license": "Apache-2.0"
+   }
+  },
+  "size": 5
+ },
+ "http_status": 200,
+ "fields_used": [
+  "license"
+ ],
+ "error_reason": "",
+ "unknown_field_400": false,
+ "failure_kind": [],
+ "hits": 0,
+ "zero_hit_unknown_field_hint": false,
+ "hint_reason": "",
+ "map_shows": [
+  "bytes",
+  "cloned_at",
+  "corpus",
+  "files",
+  "licence",
+  "repo",
+  "sha",
+  "url"
+ ]
+}

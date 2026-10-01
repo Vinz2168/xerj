@@ -1,0 +1,36 @@
+{
+ "intent": "sem-vector-kw",
+ "arm": "A",
+ "tool": "xerj_semantic_search",
+ "form": "semantic",
+ "target_index": "xc-map-gate-v-b1790790750-usearch-sqlite-binary-vectors",
+ "intent_text": "vectors close to this one",
+ "guess_field": "vector",
+ "control": null,
+ "actions": [
+  "guess"
+ ],
+ "request": {
+  "query": {
+   "semantic": {
+    "field": "vector",
+    "query": "binary vector close to this one"
+   }
+  },
+  "size": 5
+ },
+ "http_status": 400,
+ "fields_used": [
+  "vector"
+ ],
+ "error_reason": "semantic query on field [vector]: it is not a `semantic_text` field, so there is no comparable stored vector to match. A `semantic` query requires either a `semantic_text` field (auto-embedded with the built-in lexical embedder) or an active embedding backend (`embedding.mode = \"neural\"`; `\"proxy\"` with `embedding.default_endpoint` set to an OpenAI-compatible endpoint; or `\"onnx-experimental\"` in ",
+ "unknown_field_400": true,
+ "failure_kind": [
+  "semantic-non-semantic-field"
+ ],
+ "error_names_used_field": true,
+ "map_shows": [
+  "id",
+  "vector"
+ ]
+}

@@ -1,0 +1,48 @@
+{
+ "intent": "sem-embedding",
+ "arm": "B",
+ "tool": "xerj_semantic_search",
+ "form": "semantic",
+ "target_index": "xc-map-gate-v-b1790790750-usearch-docs",
+ "intent_text": "index serialization format",
+ "guess_field": "embedding",
+ "control": null,
+ "actions": [
+  "map-semantic-field"
+ ],
+ "request": {
+  "query": {
+   "semantic": {
+    "field": "body",
+    "query": "how the index is serialized to disk"
+   }
+  },
+  "size": 5
+ },
+ "http_status": 200,
+ "fields_used": [
+  "body"
+ ],
+ "error_reason": "",
+ "unknown_field_400": false,
+ "failure_kind": [],
+ "hits": 10,
+ "zero_hit_unknown_field_hint": false,
+ "hint_reason": "",
+ "map_shows": [
+  "title",
+  "language",
+  "code",
+  "kind",
+  "line",
+  "name",
+  "path",
+  "body",
+  "section",
+  "end_line",
+  "start_line",
+  "text",
+  "defs",
+  "symbol_count"
+ ]
+}

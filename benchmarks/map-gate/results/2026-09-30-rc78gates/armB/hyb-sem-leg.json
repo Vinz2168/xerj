@@ -1,0 +1,65 @@
+{
+ "intent": "hyb-sem-leg",
+ "arm": "B",
+ "tool": "xerj_hybrid_search",
+ "form": "hybrid",
+ "target_index": "xc-map-gate-v-b1790790750-hnswlib-docs",
+ "intent_text": "lexical + semantic fusion for brute-force baselines",
+ "guess_field": "content",
+ "control": null,
+ "actions": [
+  "hybrid-legs:map-semantic-field"
+ ],
+ "request": {
+  "query": {
+   "hybrid": {
+    "queries": [
+     {
+      "query": {
+       "match": {
+        "code": "brute force baseline"
+       }
+      }
+     },
+     {
+      "query": {
+       "semantic": {
+        "field": "body",
+        "query": "brute force search baseline comparison"
+       }
+      }
+     }
+    ],
+    "fusion": "rrf"
+   }
+  },
+  "size": 5
+ },
+ "http_status": 200,
+ "fields_used": [
+  "code",
+  "body"
+ ],
+ "error_reason": "",
+ "unknown_field_400": false,
+ "failure_kind": [],
+ "hits": 10,
+ "zero_hit_unknown_field_hint": false,
+ "hint_reason": "",
+ "map_shows": [
+  "title",
+  "language",
+  "code",
+  "kind",
+  "line",
+  "name",
+  "path",
+  "body",
+  "defs",
+  "symbol_count",
+  "section",
+  "end_line",
+  "start_line",
+  "text"
+ ]
+}

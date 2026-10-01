@@ -1,0 +1,290 @@
+{
+  "gate": "unknown-field 400s from MCP-issued DSL down >=80% on the reference-coding harness (#1055, rc.79)",
+  "corpus": "map-gate-v — the three small Apache-2.0 repos of the pinned hub corpus xerj-vector (usearch cc23bbaf21ef, instant-distance 13ea89ac1ca0, hnswlib d9b3608c83d8), indexed with `xerj corpus index` at build stamp b1790790750; 9 datasets, 3472 records",
+  "guess_rule": "Arm A (no-map) field names were written down per intent BEFORE any was checked against the live mapping, as the single most plausible name an ES-fluent agent writes first for the concept with no catalog access: plain snake_case English and the dominant convention across Elasticsearch, GitHub code search and Quickwit (lang vs language, license vs licence, line_number vs line are all real convention splits). Five guesses turned out to coincide with real fields (intents marked control) and were kept — the baseline is not a strawman that misses everything.",
+  "map_policy": "Arm B (with-map) never reads _mapping and never sees this file's targets; it derives every field choice mechanically from the live `xerj_map` MCP tool response: (a) sort/filter intents — the first candidate name that appears in the entry's fields with a compatible es_type (keyword|long|date for sort; any for filter), matched case-insensitively and then used in the map's exact spelling (the agent reads `Version`, writes `Version`); (b) semantic intents — the highest-coverage es_type=semantic_text field; if the entry has none, the tool-use degrades to xerj_search match on the highest-coverage text field, or match_all if the index has no text field either; (c) knn intents — any es_type=dense_vector field; xerj_map lists none in this corpus, so the map-informed agent rewrites to the semantic policy instead of guessing a vector field. Every rewrite is recorded in the per-run raw output as map_action.",
+  "intents": [
+    {
+      "id": "sort-lastmod",
+      "tool": "xerj_search",
+      "form": "sort",
+      "target": "hnswlib-docs",
+      "intent": "most recently changed files first",
+      "guess_field": "last_modified",
+      "map_candidates": ["last_modified", "updated_at", "modified", "timestamp", "time"]
+    },
+    {
+      "id": "sort-filepath",
+      "tool": "xerj_search",
+      "form": "sort",
+      "target": "usearch-docs",
+      "intent": "results ordered by file path",
+      "guess_field": "file_path",
+      "map_candidates": ["file_path", "path", "file"]
+    },
+    {
+      "id": "sort-linenumber",
+      "tool": "xerj_search",
+      "form": "sort",
+      "target": "hnswlib-docs",
+      "intent": "by line number",
+      "guess_field": "line_number",
+      "map_candidates": ["line_number", "line", "lineno"]
+    },
+    {
+      "id": "sort-language",
+      "tool": "xerj_search",
+      "form": "sort",
+      "target": "usearch-docs",
+      "intent": "by language",
+      "guess_field": "language",
+      "map_candidates": ["language", "lang"],
+      "control": "guess coincides with the real field"
+    },
+    {
+      "id": "sort-symbolname",
+      "tool": "xerj_search",
+      "form": "sort",
+      "target": "hnswlib-docs",
+      "intent": "by symbol name",
+      "guess_field": "symbol_name",
+      "map_candidates": ["symbol_name", "symbol", "name"]
+    },
+    {
+      "id": "sort-repository",
+      "tool": "xerj_search",
+      "form": "sort",
+      "target": "usearch-docs",
+      "intent": "by repository",
+      "guess_field": "repository",
+      "map_candidates": ["repository", "repo"]
+    },
+    {
+      "id": "sort-created",
+      "tool": "xerj_search",
+      "form": "sort",
+      "target": "json",
+      "intent": "newest corpus clone first",
+      "guess_field": "created_at",
+      "map_candidates": ["created_at", "cloned_at", "timestamp", "time"]
+    },
+    {
+      "id": "sort-title",
+      "tool": "xerj_search",
+      "form": "sort",
+      "target": "usearch-docs",
+      "intent": "by document title",
+      "guess_field": "title",
+      "map_candidates": ["title", "heading"],
+      "control": "guess coincides with the real field"
+    },
+    {
+      "id": "sort-version",
+      "tool": "xerj_search",
+      "form": "sort",
+      "target": "usearch-csharp-cloud-unum-usearch-tests",
+      "intent": "by package version",
+      "guess_field": "version",
+      "map_candidates": ["version"]
+    },
+    {
+      "id": "sort-platform",
+      "tool": "xerj_search",
+      "form": "sort",
+      "target": "usearch-csharp-directory-build",
+      "intent": "by target platform",
+      "guess_field": "platform",
+      "map_candidates": ["platform"]
+    },
+    {
+      "id": "sort-word",
+      "tool": "xerj_search",
+      "form": "sort",
+      "target": "usearch-sqlite-strings-table",
+      "intent": "words alphabetically",
+      "guess_field": "word",
+      "map_candidates": ["word", "term"],
+      "control": "guess coincides with the real field"
+    },
+    {
+      "id": "sort-kind",
+      "tool": "xerj_search",
+      "form": "sort",
+      "target": "instant-distance-docs",
+      "intent": "by symbol kind",
+      "guess_field": "type",
+      "map_candidates": ["type", "kind", "symbol_kind"]
+    },
+    {
+      "id": "sem-content",
+      "tool": "xerj_semantic_search",
+      "form": "semantic",
+      "target": "hnswlib-docs",
+      "intent": "approximate nearest neighbor graph construction",
+      "query_text": "approximate nearest neighbor graph construction",
+      "guess_field": "content"
+    },
+    {
+      "id": "sem-embedding",
+      "tool": "xerj_semantic_search",
+      "form": "semantic",
+      "target": "usearch-docs",
+      "intent": "index serialization format",
+      "query_text": "how the index is serialized to disk",
+      "guess_field": "embedding"
+    },
+    {
+      "id": "sem-text",
+      "tool": "xerj_semantic_search",
+      "form": "semantic",
+      "target": "instant-distance-docs",
+      "intent": "distance metric implementation",
+      "query_text": "distance metric implementation between embeddings",
+      "guess_field": "text",
+      "control": "guess coincides with a real semantic_text field"
+    },
+    {
+      "id": "sem-body-absent",
+      "tool": "xerj_semantic_search",
+      "form": "semantic",
+      "target": "usearch-csharp-nuget-package",
+      "intent": "what the package build includes",
+      "query_text": "what the package build includes",
+      "guess_field": "body"
+    },
+    {
+      "id": "sem-vector-kw",
+      "tool": "xerj_semantic_search",
+      "form": "semantic",
+      "target": "usearch-sqlite-binary-vectors",
+      "intent": "vectors close to this one",
+      "query_text": "binary vector close to this one",
+      "guess_field": "vector"
+    },
+    {
+      "id": "sem-description",
+      "tool": "xerj_semantic_search",
+      "form": "semantic",
+      "target": "json",
+      "intent": "which repos the corpus holds",
+      "query_text": "which repositories are indexed in this corpus",
+      "guess_field": "description"
+    },
+    {
+      "id": "knn-embedding",
+      "tool": "xerj_vector_search",
+      "form": "knn",
+      "target": "usearch-docs",
+      "intent": "code similar to this snippet",
+      "query_text": "code similar to this snippet",
+      "guess_field": "embedding"
+    },
+    {
+      "id": "knn-embedding-vector",
+      "tool": "xerj_vector_search",
+      "form": "knn",
+      "target": "hnswlib-docs",
+      "intent": "neighbors of this passage",
+      "query_text": "neighbors of this passage",
+      "guess_field": "embedding_vector"
+    },
+    {
+      "id": "knn-vector",
+      "tool": "xerj_vector_search",
+      "form": "knn",
+      "target": "usearch-sqlite-binary-vectors",
+      "intent": "nearest binary vectors",
+      "query_text": "nearest binary vectors",
+      "guess_field": "vector"
+    },
+    {
+      "id": "knn-code-embedding",
+      "tool": "xerj_vector_search",
+      "form": "knn",
+      "target": "instant-distance-docs",
+      "intent": "implementations similar to this one",
+      "query_text": "implementations similar to this one",
+      "guess_field": "code_embedding"
+    },
+    {
+      "id": "hyb-knn-leg",
+      "tool": "xerj_hybrid_search",
+      "form": "hybrid",
+      "target": "usearch-docs",
+      "intent": "lexical + vector fusion for HNSW construction",
+      "lexical_text": "hnsw construction layer",
+      "vector_leg_guess_field": "embedding",
+      "vector_text": "graph construction for approximate search"
+    },
+    {
+      "id": "hyb-sem-leg",
+      "tool": "xerj_hybrid_search",
+      "form": "hybrid",
+      "target": "hnswlib-docs",
+      "intent": "lexical + semantic fusion for brute-force baselines",
+      "lexical_text": "brute force baseline",
+      "vector_leg_guess_field": "content",
+      "vector_text": "brute force search baseline comparison"
+    },
+    {
+      "id": "filter-lang",
+      "tool": "xerj_search",
+      "form": "term",
+      "target": "usearch-docs",
+      "intent": "only Rust files",
+      "value": "rust",
+      "guess_field": "lang",
+      "map_candidates": ["lang", "language"]
+    },
+    {
+      "id": "filter-repo",
+      "tool": "xerj_search",
+      "form": "term",
+      "target": "hnswlib-docs",
+      "intent": "only the hnswlib repository",
+      "value": "hnswlib",
+      "guess_field": "repo",
+      "map_candidates": ["repo", "repository"]
+    },
+    {
+      "id": "filter-lines",
+      "tool": "xerj_search",
+      "form": "range",
+      "target": "usearch-docs",
+      "intent": "definitions between lines 100 and 200",
+      "range": {"gte": 100, "lte": 200},
+      "guess_field": "line_number",
+      "map_candidates": ["line_number", "line"]
+    },
+    {
+      "id": "filter-include",
+      "tool": "xerj_search",
+      "form": "term",
+      "target": "usearch-csharp-cloud-unum-usearch-tests",
+      "intent": "package includes",
+      "value": "PACKAGE",
+      "guess_field": "include",
+      "map_candidates": ["include"]
+    },
+    {
+      "id": "filter-title-exists",
+      "tool": "xerj_search",
+      "form": "exists",
+      "target": "usearch-docs",
+      "intent": "documents that have a title",
+      "guess_field": "title",
+      "map_candidates": ["title", "heading"],
+      "control": "guess coincides with the real field"
+    },
+    {
+      "id": "filter-licence",
+      "tool": "xerj_search",
+      "form": "term",
+      "target": "json",
+      "intent": "Apache-licensed repos only",
+      "value": "Apache-2.0",
+      "guess_field": "license",
+      "map_candidates": ["license", "licence"]
+    }
+  ]
+}

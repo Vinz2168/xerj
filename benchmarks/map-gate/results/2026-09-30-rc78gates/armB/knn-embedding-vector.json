@@ -1,0 +1,48 @@
+{
+ "intent": "knn-embedding-vector",
+ "arm": "B",
+ "tool": "xerj_vector_search",
+ "form": "knn",
+ "target_index": "xc-map-gate-v-b1790790750-hnswlib-docs",
+ "intent_text": "neighbors of this passage",
+ "guess_field": "embedding_vector",
+ "control": null,
+ "actions": [
+  "map-semantic-field"
+ ],
+ "request": {
+  "query": {
+   "semantic": {
+    "field": "body",
+    "query": "neighbors of this passage"
+   }
+  },
+  "size": 5
+ },
+ "http_status": 200,
+ "fields_used": [
+  "body"
+ ],
+ "error_reason": "",
+ "unknown_field_400": false,
+ "failure_kind": [],
+ "hits": 10,
+ "zero_hit_unknown_field_hint": false,
+ "hint_reason": "",
+ "map_shows": [
+  "title",
+  "language",
+  "code",
+  "kind",
+  "line",
+  "name",
+  "path",
+  "body",
+  "defs",
+  "symbol_count",
+  "section",
+  "end_line",
+  "start_line",
+  "text"
+ ]
+}
