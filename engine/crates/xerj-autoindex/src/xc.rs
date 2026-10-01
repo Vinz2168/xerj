@@ -1200,6 +1200,61 @@ fn run_corpus_index(args: &[String]) -> i32 {
     )
 }
 
+/// A pack-materialized corpus carries its record count on disk: one JSON
+/// line per record under `corpora/<name>/*/records.jsonl`. The verify gate
+/// in [`corpus_index_flow`] only checks the node answered MORE THAN ZERO —
+/// which let a build that silently junked a whole source file pass as a
+/// success (the published rust-vulns pack indexed 1,230 of 1,963 records:
+/// `osv/records.jsonl`'s first line beats the 8 KB sniff prefix, the file
+/// sniffed as a single JSON document and was junked as "json candidate
+/// family" — fixed by the JSONL fallback in `extract::json`, warned here in
+/// case any other path loses records). Warn loudly when the node holds
+/// fewer records than the pack does. Git-clone corpora (code sources, where
+/// junk is normal) have no `records.jsonl` and are exempt by construction.
+fn warn_short_of_pack_records(name: &str, root: &Path, docs: Option<u64>) {
+    let Some((lines, files)) = pack_record_gap(name, root, docs) else {
+        return;
+    };
+    eprintln!("xerj corpus index: WARNING — the pack holds {lines} records across {files} records.jsonl file(s),");
+    eprintln!("xerj corpus index: but the node answered only {} records for this corpus. A source file was", docs.unwrap_or(0));
+    eprintln!("xerj corpus index: silently junked — check the junk report (autoindex-catalog, doc_kind=junk)");
+    eprintln!("xerj corpus index: before trusting `xerj code {name}` coverage.");
+}
+
+/// The on-disk pack record count versus what the node answered:
+/// `Some((lines, files))` when a pack corpus's `records.jsonl` files hold
+/// MORE lines than the node has records — the shape of a silently junked
+/// source file. `None` when there is nothing to compare against (no corpus
+/// dir, a git-clone corpus with no records.jsonl, an unanswerable count) or
+/// nothing missing.
+fn pack_record_gap(name: &str, root: &Path, docs: Option<u64>) -> Option<(u64, u64)> {
+    let docs = docs?;
+    let entries = std::fs::read_dir(root.join("corpora").join(name)).ok()?;
+    let mut lines = 0u64;
+    let mut files = 0u64;
+    for e in entries.flatten() {
+        use std::io::Read;
+        let Ok(mut r) = std::fs::File::open(e.path().join("records.jsonl")) else {
+            continue;
+        };
+        let mut buf = [0u8; 65536];
+        let mut file_lines = 0u64;
+        loop {
+            match r.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => file_lines += buf[..n].iter().filter(|&&b| b == b'\n').count() as u64,
+                Err(_) => return None,
+            }
+        }
+        if file_lines == 0 {
+            continue;
+        }
+        lines += file_lines;
+        files += 1;
+    }
+    (files > 0 && docs < lines).then_some((lines, files))
+}
+
 /// The build/verify/swap flow over an injected node, autoindex runner and
 /// clock (#1004) — the destructive-operation contracts are pinned by the
 /// tests below against a [`FakeNode`](tests::FakeNode), which is why none of
@@ -1382,6 +1437,7 @@ fn corpus_index_flow(
             }
             // Verified. Switch readers first, retire second: a crash between
             // the two leaves a duplicate, never a gap.
+            warn_short_of_pack_records(name, root, Some(docs));
             let _ = state::write_state(
                 root,
                 name,
@@ -1431,7 +1487,9 @@ fn corpus_index_flow(
                 eprintln!("xerj corpus index: stays live until the replacement verifies).");
                 return rc;
             }
-            let docs = count_under(node, &prefix)
+            let live = count_under(node, &prefix);
+            warn_short_of_pack_records(name, root, live);
+            let docs = live
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "?".to_string());
             let _ = state::write_state(
@@ -2047,6 +2105,49 @@ mod tests {
         assert_eq!(st.index_prefix.as_deref(), Some(old_prefix.as_str()));
         assert_ne!(st.salvaged, Some(true));
         assert!(!node.live(&format!("xc-kv-b{T0}-000")));
+    }
+
+    #[test]
+    fn a_build_short_of_the_packs_records_is_named_not_swallowed() {
+        // the pack-materialized shape: two records.jsonl files, 5 + 3 lines
+        let root = corpus_root("kv");
+        std::fs::create_dir_all(root.join("corpora/kv/a")).unwrap();
+        std::fs::write(
+            root.join("corpora/kv/a/records.jsonl"),
+            "{}\n{}\n{}\n{}\n{}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("corpora/kv/b")).unwrap();
+        std::fs::write(root.join("corpora/kv/b/records.jsonl"), "{}\n{}\n{}\n").unwrap();
+
+        // the node answered fewer records than the pack holds → the gap
+        let gap = pack_record_gap("kv", &root, Some(6));
+        assert_eq!(
+            gap,
+            Some((8, 2)),
+            "1,230-of-1,963 must be named, not verified"
+        );
+
+        // full coverage and over-coverage (corpus.json rides along as extra
+        // docs) → no gap
+        assert_eq!(pack_record_gap("kv", &root, Some(8)), None);
+        assert_eq!(pack_record_gap("kv", &root, Some(10)), None);
+
+        // a git-clone corpus (source repos, junk is normal there) has no
+        // records.jsonl at all → exempt by construction
+        let clone_root = corpus_root("git");
+        std::fs::create_dir_all(clone_root.join("corpora/git/crate-src")).unwrap();
+        std::fs::write(
+            clone_root.join("corpora/git/crate-src/Cargo.toml"),
+            "[package]\n",
+        )
+        .unwrap();
+        assert_eq!(pack_record_gap("git", &clone_root, Some(0)), None);
+
+        // an unanswerable count says nothing
+        assert_eq!(pack_record_gap("kv", &root, None), None);
+        // so does a corpus this root does not hold
+        assert_eq!(pack_record_gap("ghost", &root, Some(0)), None);
     }
 
     #[test]
