@@ -93,7 +93,7 @@ use xerj_engine::Engine;
 const GRAPH_CONTRACT: &str = "xerj-second-brain/1";
 
 /// Reserved `_id` of the per-brain meta document (SECOND_BRAIN_SPEC §2.5).
-const BRAIN_META_ID: &str = "__xerj-brain-meta";
+pub(crate) const BRAIN_META_ID: &str = "__xerj-brain-meta";
 
 /// Max returned edges for `ego` (same clamp as the data plane).
 const MAX_EGO_LIMIT: usize = 1000;
@@ -113,7 +113,7 @@ const BRAINS_LISTED_CAP: usize = 256;
 /// Edges index name for a brain (SECOND_BRAIN_SPEC §1) — same construction as
 /// `xerj_api::authz::brain_edges_index`, which names the resource a
 /// data-plane grant must hold.
-fn edges_index(brain: &str) -> String {
+pub(crate) fn edges_index(brain: &str) -> String {
     format!("{RESERVED_INDEX_PREFIX}{brain}-edges")
 }
 
@@ -129,7 +129,7 @@ fn default_nodes_index(brain: &str) -> String {
 /// matching the existing deliberate duplication (`memory_api`,
 /// `xerj_autoindex::detect`) — the console crate does not depend on
 /// `xerj-api`, on purpose (see `lib.rs`).
-fn validate_brain(brain: &str) -> Result<(), String> {
+pub(crate) fn validate_brain(brain: &str) -> Result<(), String> {
     if brain.is_empty() {
         return Err("brain name must not be empty".into());
     }
@@ -248,7 +248,7 @@ fn nodes_index_names(nodes_index: &str) -> impl Iterator<Item = &str> {
 /// Resolve the nodes index for a brain: the meta doc's `nodes_index`, else
 /// the `.xerj-memory-{brain}` default. Mirrors `graph_api::resolve_nodes_index`
 /// (explicit-param override excluded — see module docs).
-async fn resolve_nodes_index(engine: &Engine, brain: &str, edges: &str) -> String {
+pub(crate) async fn resolve_nodes_index(engine: &Engine, brain: &str, edges: &str) -> String {
     if let Some(src) = get_doc_source(engine, edges, BRAIN_META_ID)
         .await
         .ok()

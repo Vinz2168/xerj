@@ -329,7 +329,7 @@ fn help_text(feedback: bool) -> String {
                                              log — searches, hit rate, latency (xerj gain --help)\n\
              xerj brain      <folder>        one command: index a folder into a running, browsable\n\
                                              second brain in your browser (see xerj brain --help)\n\
-             xerj mcp        [opts]          Model Context Protocol stdio server: exposes 11 tools\n\
+             xerj mcp        [opts]          Model Context Protocol stdio server: exposes 13 tools\n\
                                              (search, semantic, vector, hybrid, memory, second-brain,\n\
                                              code-search) to any MCP client. Proxies to a node you\n\
                                              already started — set XERJ_URL or --url (see xerj mcp --help)\n\

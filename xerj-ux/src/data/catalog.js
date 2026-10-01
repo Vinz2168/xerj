@@ -28,9 +28,15 @@ function parseFields(fieldsJson) {
       name: f.name,
       type: str(f.es_type || f.type || 'object'),
       semantic: !!f.semantic,
-      coverage: Number.isFinite(Number(f.coverage)) ? Number(f.coverage) : 1,
+      // Unmeasured coverage is null → "—", never 1 → "100%": a field the
+      // catalog did not measure must not read as fully covered (#1098).
+      // (`Number(null)` is 0, so null has to be checked before the finite
+      // test — a JSON null means "not measured", not "measured zero".)
+      coverage: f.coverage == null || !Number.isFinite(Number(f.coverage)) ? null : Number(f.coverage),
       cardinality: num(f.cardinality_est),
-      examples: Array.isArray(f.examples) ? f.examples.slice(0, 2).map(str) : [],
+      nullRatio: f.null_ratio == null || !Number.isFinite(Number(f.null_ratio)) ? null : Number(f.null_ratio),
+      avgLen: Number.isFinite(Number(f.avg_len)) ? Number(f.avg_len) : 0,
+      examples: Array.isArray(f.examples) ? f.examples.slice(0, 3).map(str) : [],
     }));
 }
 
@@ -83,20 +89,125 @@ export function parseCatalogHits(hits) {
   return cards;
 }
 
-/** The fields worth showing on a card: the semantic field first, then the
- *  best-covered keyword/date/text fields; autoindex plumbing (`ax_*`) last. */
+/** The card's fields in DISPLAY ORDER: the corpus's DOMINANT fields first —
+ *  ranked by the share of the corpus's content they hold (the catalog's own
+ *  coverage × avg_len), tie-broken by coverage — with autoindex plumbing
+ *  (`ax_*`) last. Type must not lead the ranking (#1098): a type-first rank
+ *  put every keyword/date field above the text field that IS the corpus, so
+ *  a 96%-code corpus opened with 0.6%-coverage email fields and its `code`
+ *  field was pushed into the disclosure. The semantic field keeps its accent
+ *  styling but no ranking pin — on a notes corpus it dominates on its own. */
+export function rankedFields(card) {
+  const plumbing = (f) => (f.name.startsWith('ax_') ? 1 : 0);
+  const content = (f) => (f.coverage == null ? 0 : f.coverage) * (f.avgLen || 0);
+  const cov = (f) => (f.coverage == null ? -1 : f.coverage);
+  return [...(card.fields || [])].sort(
+    (a, b) => (plumbing(a) - plumbing(b)) || (content(b) - content(a)) || (cov(b) - cov(a)) || a.name.localeCompare(b.name),
+  );
+}
+
+/** The fields worth showing as a card's top chips. */
 export function topFields(card, n = 8) {
-  const rank = (f) => {
-    if (f.name.startsWith('ax_')) return 9;
-    if (f.semantic || f.name === card.semanticField) return 0;
-    if (f.type === 'date') return 1;
-    if (f.type === 'keyword') return 2;
-    if (f.type === 'text' || f.type === 'semantic_text') return 3;
-    return 5;
+  return rankedFields(card).slice(0, n);
+}
+
+// ── the knowledge surface ───────────────────────────────────────────
+//
+// GET /_xerj-console/api/v1/knowledge is ONE read that answers the three
+// questions a person has the moment indexing finishes — how large, which
+// data, what can I do now. The server (xerj-console-api/src/knowledge.rs)
+// joins the catalog's own numbers with the engine's live ones and computes
+// the totals, the relations autoindex actually inferred, and a capability
+// strip grounded in real routes/commands/endpoints. parseKnowledge()
+// normalizes that payload into the SAME card shape parseCatalogHits
+// produces (plus the live facts), so the render layer has one shape
+// whatever served it.
+
+const knowledgeField = (f) => ({
+  name: str(f.name),
+  type: str(f.type || 'object'),
+  semantic: f.semantic === true,
+  coverage: f.coverage == null || !Number.isFinite(Number(f.coverage)) ? null : Number(f.coverage),
+  cardinality: Number.isFinite(Number(f.cardinality)) ? Number(f.cardinality) : null,
+  nullRatio: f.null_ratio == null || !Number.isFinite(Number(f.null_ratio)) ? null : Number(f.null_ratio),
+  avgLen: Number.isFinite(Number(f.avg_len)) ? Number(f.avg_len) : 0,
+  examples: Array.isArray(f.examples) ? f.examples.slice(0, 3).map(str) : [],
+});
+
+const knowledgeDataset = (d) => ({
+  index: str(d.index),
+  slug: str(d.slug) || str(d.index).replace(/^ax-/, ''),
+  formats: Array.isArray(d.formats) ? d.formats.map(str) : [],
+  records: num(d.records),
+  junk: num(d.junk),
+  files: num(d.files),
+  bytes: num(d.bytes),
+  liveDocs: Number.isFinite(Number(d.live_docs)) ? Number(d.live_docs) : null,
+  storeBytes: Number.isFinite(Number(d.store_bytes)) ? Number(d.store_bytes) : null,
+  timeField: str(d.time_field) || null,
+  timeMin: str(d.time_min) || null,
+  timeMax: str(d.time_max) || null,
+  semanticField: str(d.semantic_field) || null,
+  fields: (Array.isArray(d.fields) ? d.fields : []).map(knowledgeField),
+  sampleQueries: parseSampleQueries(d.sample_queries),
+  notes: Array.isArray(d.notes) ? d.notes.map(str) : [],
+  runId: str(d.run_id) || null,
+});
+
+/** A key_overlap / time_alignment relation row, in display shape. */
+const knowledgeRelation = (r) => ({
+  kind: str(r.kind) === 'time_alignment' ? 'time_alignment' : 'key_overlap',
+  aIndex: str(r.a_index), aField: str(r.a_field), aDataset: str(r.a_dataset) || null,
+  bIndex: str(r.b_index), bField: str(r.b_field), bDataset: str(r.b_dataset) || null,
+  grade: str(r.grade),
+  overlap: num(r.overlap),
+  containment: Number.isFinite(Number(r.containment)) ? Number(r.containment) : null,
+  confirmed: Number.isFinite(Number(r.confirmed_values)) ? Number(r.confirmed_values) : null,
+  tested: Number.isFinite(Number(r.tested_values)) ? Number(r.tested_values) : null,
+  examples: Array.isArray(r.examples) ? r.examples.slice(0, 3).map(str) : [],
+  rangeOverlap: Number.isFinite(Number(r.range_overlap)) ? Number(r.range_overlap) : null,
+  sharedBuckets: Number.isFinite(Number(r.shared_buckets)) ? Number(r.shared_buckets) : null,
+  pearsonR: Number.isFinite(Number(r.pearson_r)) ? Number(r.pearson_r) : null,
+  activityCorrelated: r.activity_correlated === true,
+});
+
+/**
+ * The `{ data: … }` body of GET /_xerj-console/api/v1/knowledge → the
+ * corpus state the Corpus home renders: `datasets` (cards, same shape as
+ * parseCatalogHits + the engine's live doc counts and store bytes),
+ * `summaries` (indices the catalog does not describe), whole-corpus
+ * `totals`, `relations`, `capabilities` and `brains`. Pure; throws on
+ * nothing (a malformed payload degrades to empty lists, and the caller
+ * decides what an unreachable engine means).
+ */
+export function parseKnowledge(payload) {
+  const d = (payload && payload.data && typeof payload.data === 'object') ? payload.data : {};
+  const datasets = (Array.isArray(d.datasets) ? d.datasets : []).map(knowledgeDataset);
+  datasets.sort((a, b) => (b.records - a.records) || a.index.localeCompare(b.index));
+  const summaries = (Array.isArray(d.others) ? d.others : []).map((o) => ({
+    index: str(o.index),
+    records: num(o.docs),
+    storeBytes: Number.isFinite(Number(o.store_bytes)) ? Number(o.store_bytes) : null,
+    emails: 0, attachments: 0, formats: [],
+  }));
+  const t = d.totals || {};
+  const totals = {
+    datasets: num(t.datasets), records: num(t.records), files: num(t.files),
+    bytes: num(t.bytes), docs: num(t.docs), relations: num(t.relations),
+    catalog: d.catalog === true,
   };
-  return [...(card.fields || [])]
-    .sort((a, b) => (rank(a) - rank(b)) || (b.coverage - a.coverage) || a.name.localeCompare(b.name))
-    .slice(0, n);
+  const relations = (Array.isArray(d.relations) ? d.relations : []).map(knowledgeRelation);
+  const capabilities = (Array.isArray(d.capabilities) ? d.capabilities : [])
+    .filter((c) => c && typeof c === 'object' && c.id)
+    .map((c) => ({
+      id: str(c.id), title: str(c.title), blurb: str(c.blurb),
+      href: str(c.href) || null, command: str(c.command) || null, endpoint: str(c.endpoint) || null,
+      kind: str(c.kind) || (c.href ? 'console' : 'cli'),
+    }));
+  const brains = (Array.isArray(d.brains) ? d.brains : []).map((b) => ({
+    name: str(b.name), links: num(b.links),
+  }));
+  return { status: 'ok', datasets, summaries, totals, relations, capabilities, brains, _live: true };
 }
 
 function firstMatchText(clause) {

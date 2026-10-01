@@ -12,7 +12,7 @@
 import { liveSecondBrain } from '../second-brain-api.js';
 import { schemaForSearch, indexNamesStrict } from '../schema.js';
 import { buildSearchBody } from '../search-body.js';
-import { CATALOG_INDEX, catalogQueryBody, parseCatalogHits } from '../catalog.js';
+import { CATALOG_INDEX, catalogQueryBody, parseCatalogHits, parseKnowledge } from '../catalog.js';
 import { listUserIndices, INTERNAL_INDICES } from '../console-index-api.js';
 
 // Aggregation materialisation bypass.
@@ -28,6 +28,11 @@ import { listUserIndices, INTERNAL_INDICES } from '../console-index-api.js';
 // `.hits.hits` payload is discarded by every adapter below.
 // Track engine fix at: engine bug "agg materialisation cap".
 const AGG_BYPASS_SIZE = 9999;
+
+/** The knowledge surface — one session-authenticated read, same origin as
+ *  this SPA (the console API serves both). See knowledge.rs for the
+ *  payload; data/catalog.js#parseKnowledge for its client shape. */
+const KNOWLEDGE_PATH = '/_xerj-console/api/v1/knowledge';
 
 export const meta = {
   id: 'xerj',
@@ -135,22 +140,54 @@ export async function search(baseUrl, dashId, ctx, signal) {
 
 // ── corpus ──────────────────────────────────────────────────────────
 //
-// The Corpus home: every dataset `xerj brain` / `xerj autoindex` recorded in
-// the `autoindex-catalog` index, plus any other user index the engine holds
-// (listed by name and document count, so an engine that was filled some other
-// way does not read as "nothing indexed"). NEVER returns null and never
-// throws: data/query.js treats null as "fall back to mock", and a fabricated
-// corpus is the one thing this page must not be able to show.
-async function liveCorpus(baseUrl, _ctx, signal) {
+// The Corpus home is the knowledge surface: ONE read —
+// GET /_xerj-console/api/v1/knowledge — that returns what a person asks the
+// moment `xerj brain` finishes: the whole-corpus totals, every dataset the
+// autoindex catalog records with its full field list, the relations
+// autoindex actually inferred between datasets, and a capability strip
+// grounded in real routes/commands/endpoints. Plus any other user index
+// the engine holds, so an engine that was filled some other way does not
+// read as "nothing indexed".
+//
+// NEVER returns null and never throws: data/query.js treats null as "fall
+// back to mock", and a fabricated corpus is the one thing this page must
+// not be able to show. A session that cannot read the endpoint (401/403)
+// or an unreachable console is returned as `{ status: 'error' }`.
+async function liveCorpus(_baseUrl, _ctx, signal) {
+  try {
+    const r = await fetch(KNOWLEDGE_PATH, {
+      signal,
+      credentials: 'same-origin',
+      headers: { accept: 'application/json' },
+    });
+    if (!r.ok) {
+      const err = new Error(`knowledge HTTP ${r.status}`);
+      err.status = r.status;
+      throw err;
+    }
+    return parseKnowledge(await r.json());
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw e;
+    if (e && e.status === 404) return legacyLiveCorpus(signal); // engine older than the endpoint
+    // A fetch that never reached the engine is a bare TypeError ("Failed to
+    // fetch"): say what it means, as the Reader and the guest shell do.
+    const message = e instanceof TypeError ? 'engine unreachable' : String(e && e.message || e).slice(0, 200);
+    return { status: 'error', error: message, datasets: [], summaries: [], totals: null, relations: [], capabilities: [], brains: [] };
+  }
+}
+
+/** The pre-knowledge-endpoint path: the catalog index read directly plus
+ *  the index list — same cards, no totals/relations/capabilities. Kept for
+ *  engines built before the endpoint existed (the SPA and the binary ship
+ *  together, so this is belt-and-braces, and the node tests still pin it). */
+async function legacyLiveCorpus(signal) {
   let datasets = [];
   let catalogError = null;
   try {
-    const resp = await rawSearch(baseUrl, CATALOG_INDEX, catalogQueryBody(), signal);
+    const resp = await rawSearch(null, CATALOG_INDEX, catalogQueryBody(), signal);
     datasets = parseCatalogHits(resp?.hits?.hits || []);
   } catch (e) {
     // No catalog index yet (HTTP 404) is the ordinary empty state, not an error.
-    // A fetch that never reached the engine is a bare TypeError ("Failed to
-    // fetch"): say what it means, as the Reader and the guest shell do.
     if (e instanceof TypeError) catalogError = 'engine unreachable';
     else if (!/HTTP 404/.test(String(e))) catalogError = String(e && e.message || e).slice(0, 200);
   }
@@ -165,7 +202,7 @@ async function liveCorpus(baseUrl, _ctx, signal) {
     /* the catalog cards still stand on their own */
   }
   if (catalogError && !datasets.length && !others.length) return { status: 'error', error: catalogError, datasets: [], summaries: [] };
-  return { status: 'ok', datasets, summaries: others, _live: true };
+  return { status: 'ok', datasets, summaries: others, totals: null, relations: [], capabilities: [], brains: [], _live: true };
 }
 
 // ── search-discover ────────────────────────────────────────────────
@@ -350,43 +387,32 @@ function bucketSize(range) {
 
 // ── data (data sources / index inventory) ─────────────────────────
 //
-// Same overlay pattern as logs-overview: mock supplies the rich
-// canvas (clusters list, fieldsByIndex, narrative blurb) and we
-// overlay the live indices Xerj actually has.
-async function liveData(baseUrl, ctx, signal) {
-  let indices;
-  try {
-    indices = await listIndices(baseUrl, signal);
-  } catch (_e) {
-    return null;
+// Real-only: the built-in connection, its indices and their mappings,
+// from the same facade the DATA section reads (data/data-sources.js —
+// see that module for why nothing here is ever seeded). The section
+// view builds its shape in app.js#buildSectionData; this adapter serves
+// any dashboard-form consumer of the same id.
+async function liveData(_baseUrl, _ctx, signal) {
+  const { listClusters, listIndices, listFields } = await import('../data-sources.js');
+  const clusters = await listClusters();
+  const indicesByCluster = {};
+  for (const c of clusters) {
+    indicesByCluster[c.id] = await listIndices(c.id);
   }
-  const { mock: mockData } = await import('../mock.js');
-  const base = mockData('data', ctx.range || '24H', {
-    cluster: ctx.cluster || '',
-    filters: ctx.filters || {},
-    customRange: ctx.customRange || null,
-  });
-
-  const liveIndices = (indices || []).map((i) => ({
-    name: i.index,
-    health: i.health || 'green',
-    docs: Number(i['docs.count'] || 0),
-    size: i['store.size'] || '0b',
-    status: i.status || 'open',
-    primary_shards: Number(i.pri || 1),
-    replica_shards: Number(i.rep || 0),
-  }));
-
-  // Inject the live indices under whichever cluster is active in the
-  // mock — that way the existing renderClusters / renderIndices tiles
-  // light up without needing a new shape.
-  const active = base?.activeCluster || 'local';
-  if (base?.indicesByCluster) {
-    base.indicesByCluster[active] = liveIndices.length ? liveIndices : base.indicesByCluster[active];
-    base.focusIndex = liveIndices[0]?.name || base.focusIndex;
+  const active = clusters[0]?.id || 'local';
+  const fieldsByIndex = {};
+  for (const i of indicesByCluster[active] || []) {
+    fieldsByIndex[i.name] = await listFields(i.name);
   }
-  base._live = { indices: liveIndices };
-  return base;
+  void signal;
+  return {
+    clusters,
+    indicesByCluster,
+    fieldsByIndex,
+    activeCluster: active,
+    focusIndex: (indicesByCluster[active] || [])[0]?.name || null,
+    _live: { indices: indicesByCluster[active] || [] },
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────

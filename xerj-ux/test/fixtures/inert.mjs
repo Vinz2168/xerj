@@ -3,8 +3,16 @@ import assert from 'node:assert/strict';
 import { TAGS, attrAllowed, walk, textOf } from '../../src/ux/safe-dom.js';
 
 /** Tags that load a resource, run script, or submit somewhere. None of them
- *  is in TAGS; listed so a future "just add <img>" fails HERE with a reason. */
-export const FORBIDDEN_TAGS = ['script', 'img', 'svg', 'iframe', 'object', 'embed', 'style', 'link', 'meta', 'base', 'form', 'video', 'audio', 'source', 'math', 'template', 'frame', 'frameset', 'applet', 'textarea', 'details', 'animate', 'image'];
+ *  is in TAGS; listed so a future "just add <img>" fails HERE with a reason.
+ *
+ *  `<details>` is NOT here and IS in TAGS (knowledge surface, the ALL-FIELDS
+ *  fold-out): it loads, runs and submits nothing — the only interaction is
+ *  the browser's own disclosure toggle, and every `on*` attribute
+ *  (ontoggle included) stays rejected by the closed ATTRS list, so a
+ *  document cannot reach it. It was on this list as part of the original
+ *  blanket "nothing interactive but <button>" rule, before anything needed
+ *  a disclosure. */
+export const FORBIDDEN_TAGS = ['script', 'img', 'svg', 'iframe', 'object', 'embed', 'style', 'link', 'meta', 'base', 'form', 'video', 'audio', 'source', 'math', 'template', 'frame', 'frameset', 'applet', 'textarea', 'animate', 'image'];
 export const FORBIDDEN_ATTRS = ['style', 'src', 'srcset', 'srcdoc', 'action', 'formaction', 'background', 'poster', 'ping', 'xlink:href', 'target', 'download', 'is', 'nonce', 'integrity', 'sandbox', 'allow'];
 
 export function assertInert(tree, label = 'tree') {

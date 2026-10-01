@@ -31,7 +31,8 @@ use axum::{
 };
 
 use crate::{
-    auth, cluster, dashboards, data_sources, graph, prefs, spa, state::ConsoleState, views,
+    auth, cluster, dashboards, data_sources, graph, knowledge, prefs, spa, state::ConsoleState,
+    views,
 };
 
 /// Build the full Xerj Console router. Mount at the root of an axum Router
@@ -146,6 +147,11 @@ pub fn xerj_console_router(state: ConsoleState) -> Router {
             "/_xerj-console/api/v1/data-sources/connections/:id/indices/:name/search",
             post(data_sources::search),
         )
+        // ── API: the knowledge surface (session-authorized) ─
+        // One read that answers what a person asks the moment indexing
+        // finishes: how large, which data, what can I do now. See
+        // src/knowledge.rs.
+        .route("/_xerj-console/api/v1/knowledge", get(knowledge::knowledge))
         // ── API: Second-Brain graph reads (session-authorized, issue #936) ─
         // The data plane's /_graph/* routes stay credential-only; these are
         // the console's own role-gated read paths over the same engine
@@ -198,6 +204,7 @@ pub fn known_routes() -> &'static [&'static str] {
         "/_xerj-console/api/v1/data-sources/connections/:id/indices",
         "/_xerj-console/api/v1/data-sources/connections/:id/indices/:name/fields",
         "/_xerj-console/api/v1/data-sources/connections/:id/indices/:name/search",
+        "/_xerj-console/api/v1/knowledge",
         "/_xerj-console/api/v1/graph/brains",
         "/_xerj-console/api/v1/graph/:brain/ego",
         "/_xerj-console/api/v1/graph/:brain/overview",
