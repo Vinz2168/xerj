@@ -206,7 +206,7 @@ pub fn run_gain_cli() -> i32 {
             let mut tried = vec![url.clone()];
             for candidate in native_candidates(&url) {
                 tried.push(candidate.clone());
-                if let Some(nes) = Es::new(&candidate, key.clone()).ok() {
+                if let Ok(nes) = Es::new(&candidate, key.clone()) {
                     if let Ok(v) = nes.get_json("/_audit/_search") {
                         retry = Some(v);
                         break;
