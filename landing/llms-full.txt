@@ -266,6 +266,25 @@ For a complete disconnected deployment procedure, including current GitHub relea
   entry — a ready-to-send corrected request — ahead of `hits` (never inside
   `hits`/`total`/`_score`, so existing ES clients are unaffected). See §3.1.
 
+- Unknown-field lookups: strict on autoindex indices, ES-exact elsewhere. Elasticsearch
+  answers a lookup on an unmapped field with `0 hits` — indistinguishable from an empty
+  corpus, and the measured failure behind this behaviour was 5 of 30 agent intents
+  silently searching a wrong field name. XERJ's wire default is ES's own answer, plus an
+  additive `_xerj.hints` `unknown_field` entry naming what does not exist and what does;
+  but `xerj autoindex` PUTs an explicit full schema per dataset, so the indices it creates
+  (`ax-*` by default) refuse instead: a `term`, `terms`, `match`, `match_phrase`,
+  `match_phrase_prefix`, `prefix`, `wildcard`, `regexp`, `fuzzy`, or `range` naming an
+  unmapped field — or a `multi_match` whose `fields` are ALL unmapped (a half-real one
+  still searches the real fields, with a hint) — answers 400 naming the field and the
+  searchable fields. Turn the refusal on anywhere: `?strict_unknown_fields=true` per
+  request, or the `index.query.strict_unknown_fields=true` setting per index (one strict
+  target covers the whole request); `?strict_unknown_fields=false` opts one request back
+  out, and `_msearch` follows the index setting only, NDJSON items carrying no params.
+  Exemptions either way: `exists` on an unmapped field stays a truthful 0-hit, and a
+  just-created index with no mappings yet is never validated (dynamic mapping has seen
+  no documents). To get real field names, `GET /{index}/_mapping` or the `xerj_map`
+  tool/MCP tool.
+
 - The fully-exercised, AI-core surface is: index & mapping management, `_doc` CRUD,
   `_bulk`, `_search` (full DSL + `semantic`/`knn`/`hybrid`), `_count`, `_mget`,
   `_msearch`, the `/_memory` API, and the `autoindex` CLI. Many cluster / _cat /

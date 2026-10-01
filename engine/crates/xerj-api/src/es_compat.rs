@@ -6938,6 +6938,16 @@ pub struct EsSearchQueryParams {
     /// * `exact` — serialize and count every omitted byte.
     /// * `false` / `off` / `0` — do not measure, emit nothing.
     pub savings: Option<String>,
+    /// xerj extension, `?strict_unknown_fields=` (#1093): refuse lookup
+    /// clauses (`term`, `match`, `range`, …) that name fields no target
+    /// index maps, instead of ES's silent 0-hit 200.
+    ///
+    /// * `true` — enforce for this request regardless of index settings.
+    /// * `false` / `off` / `0` — never enforce, regardless of index settings
+    ///   (the explicit escape hatch for one request against a strict index).
+    /// * absent — each target index's `index.query.strict_unknown_fields`
+    ///   setting decides; a strict mark on ANY target covers the request.
+    pub strict_unknown_fields: Option<String>,
 }
 
 /// Parse `?savings=` into a measurement mode. Anything unrecognised falls
@@ -7313,24 +7323,142 @@ fn fields_request_includes_passage(fields: &Value) -> bool {
 /// every response the caller already handled correctly is exactly the kind
 /// of noise this project's review guidance rules out. Returns `None`
 /// whenever the hint would not be actionable.
+/// Field-keyed leaf clause types (`{"match": {"field": …}}`), shared by the
+/// unknown-field hint and the #1093 refusal so the two walks cannot drift.
+const FIELD_KEYED_CLAUSES: &[&str] = &[
+    "match",
+    "match_phrase",
+    "match_phrase_prefix",
+    "term",
+    "terms",
+    "prefix",
+    "wildcard",
+    "regexp",
+    "fuzzy",
+    "range",
+];
+
+/// A query field is "known" when any of `schemas` maps it, maps its parent
+/// (`symbols.name.keyword` → `symbols`), or it is an ES metadata field
+/// (`_id`, `_index`, …) a query may legitimately target.
+fn field_known_in_any(name: &str, schemas: &[&xerj_common::types::Schema]) -> bool {
+    if name.starts_with('_') {
+        return true;
+    }
+    schemas.iter().any(|s| {
+        s.field(name).is_some()
+            || name
+                .split_once('.')
+                .is_some_and(|(parent, _)| s.field(parent).is_some())
+    })
+}
+
+/// #1093: `(clause, field)` pairs named by lookup clauses that no schema in
+/// `schemas` maps — the clauses `_search` refuses instead of answering with
+/// ES's silent zero-hit 200, which a caller cannot tell from an empty corpus.
+///
+/// Every clause in [`FIELD_KEYED_CLAUSES`] is a lookup: zero hits there is a
+/// claim about the data, and a wrong field name makes it a false claim.
+/// `exists` is deliberately absent — zero IS the truthful answer to "does any
+/// document have this field" — and keeps its `_xerj.hints` diagnostic instead
+/// of a refusal. `multi_match` appears once, joining its field list, and only
+/// when EVERY field it names is unknown (a half-real multi_match still
+/// searches the fields that exist, so it gets the hint, not the 400); a
+/// wildcard pattern field (`"ob*"` — legal in `multi_match.fields`) counts as
+/// known when it matches at least one mapped field in any schema.
+fn unknown_lookup_clause_fields(
+    q: &Value,
+    schemas: &[&xerj_common::types::Schema],
+    out: &mut Vec<(String, String)>,
+) {
+    match q {
+        Value::Object(o) => {
+            for (k, v) in o {
+                if FIELD_KEYED_CLAUSES.contains(&k.as_str()) {
+                    if let Value::Object(inner) = v {
+                        for f in inner.keys() {
+                            if !field_known_in_any(f, schemas) {
+                                let entry = (k.clone(), f.clone());
+                                if !out.contains(&entry) {
+                                    out.push(entry);
+                                }
+                            }
+                        }
+                    }
+                } else if k == "multi_match" {
+                    if let Some(Value::Array(fs)) = v.get("fields") {
+                        let names: Vec<String> = fs
+                            .iter()
+                            .filter_map(Value::as_str)
+                            // `body^3` — the boost is not part of the name.
+                            .map(|f| f.split('^').next().unwrap_or(f).to_string())
+                            .collect();
+                        let all_unknown = !names.is_empty()
+                            && names.iter().all(|f| {
+                                if f.contains('*') {
+                                    !schemas.iter().any(|s| {
+                                        s.fields.iter().any(|sf| glob_match_simple(f, &sf.name))
+                                    })
+                                } else {
+                                    !field_known_in_any(f, schemas)
+                                }
+                            });
+                        if all_unknown {
+                            out.push(("multi_match".to_string(), names.join(", ")));
+                        }
+                    }
+                } else if k == "span_multi" {
+                    // `{"span_multi": {"match": {"prefix": {"field": …}}}}` —
+                    // the inner multi-term objects are NOT field-keyed (their
+                    // keys are `field`/`value`/`boost`), so the generic walk
+                    // would read "field" itself as a field name. The field is
+                    // the `field` member of the wrapped multi-term spec.
+                    if let Some(m) = v.get("match").and_then(Value::as_object) {
+                        for (mt, spec) in m {
+                            if let Some(f) = spec.get("field").and_then(Value::as_str) {
+                                if !field_known_in_any(f, schemas) {
+                                    let entry = (format!("span_multi {mt}"), f.to_string());
+                                    if !out.contains(&entry) {
+                                        out.push(entry);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if k == "intervals" {
+                    // `{"intervals": {"<field>": {"match"|"prefix"|…: {…}}}}` —
+                    // the field is the KEY; the spec's own `prefix`/`wildcard`/
+                    // `regexp`/`fuzzy` keys are interval kinds, not fields, and
+                    // must not be walked as field-keyed clauses.
+                    if let Some(inner) = v.as_object() {
+                        for (f, _) in inner {
+                            if !field_known_in_any(f, schemas) {
+                                let entry = ("intervals".to_string(), f.clone());
+                                if !out.contains(&entry) {
+                                    out.push(entry);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    unknown_lookup_clause_fields(v, schemas, out);
+                }
+            }
+        }
+        Value::Array(a) => a
+            .iter()
+            .for_each(|v| unknown_lookup_clause_fields(v, schemas, out)),
+        _ => {}
+    }
+}
+
 /// Field names a query refers to, gathered from the ordinary ES leaf shapes.
 ///
 /// Subfield suffixes are kept (`symbols.name.keyword`) but the parent is also
 /// recorded, so a query against a real field's subfield is not reported as
 /// unknown.
 fn referenced_query_fields(q: &Value, out: &mut Vec<String>) {
-    const FIELD_KEYED: &[&str] = &[
-        "match",
-        "match_phrase",
-        "match_phrase_prefix",
-        "term",
-        "terms",
-        "prefix",
-        "wildcard",
-        "regexp",
-        "fuzzy",
-        "range",
-    ];
+    const FIELD_KEYED: &[&str] = FIELD_KEYED_CLAUSES;
     match q {
         Value::Object(o) => {
             for (k, v) in o {
@@ -7349,6 +7477,25 @@ fn referenced_query_fields(q: &Value, out: &mut Vec<String>) {
                         for f in fs.iter().filter_map(Value::as_str) {
                             // `body^3` — the boost is not part of the name.
                             out.push(f.split('^').next().unwrap_or(f).to_string());
+                        }
+                    }
+                } else if k == "span_multi" {
+                    // The wrapped multi-term spec is not field-keyed; its
+                    // `field` member is the reference (see the matching case
+                    // in `unknown_lookup_clause_fields`).
+                    if let Some(m) = v.get("match").and_then(Value::as_object) {
+                        for spec in m.values() {
+                            if let Some(f) = spec.get("field").and_then(Value::as_str) {
+                                out.push(f.to_string());
+                            }
+                        }
+                    }
+                } else if k == "intervals" {
+                    // Fields are the keys of the intervals object; the spec
+                    // bodies are interval kinds, not clauses.
+                    if let Some(inner) = v.as_object() {
+                        for f in inner.keys() {
+                            out.push(f.clone());
                         }
                     }
                 } else {
@@ -7408,17 +7555,7 @@ fn unknown_field_hint(
 
     // Text-ish fields are what a full-text query actually wants; listing every
     // keyword and numeric column would bury the answer.
-    let searchable: Vec<String> = schema
-        .fields
-        .iter()
-        .filter(|f| {
-            matches!(
-                f.field_type,
-                xerj_common::types::FieldType::Text | xerj_common::types::FieldType::Keyword
-            ) && !f.name.starts_with("ax_")
-        })
-        .map(|f| f.name.clone())
-        .collect();
+    let searchable = searchable_text_fields(schema);
 
     let primary = searchable
         .iter()
@@ -7448,6 +7585,165 @@ fn unknown_field_hint(
             },
         }],
     }))
+}
+
+/// Text-ish fields are what a full-text query actually wants; listing every
+/// keyword and numeric column would bury the answer.
+fn searchable_text_fields(schema: &xerj_common::types::Schema) -> Vec<String> {
+    schema
+        .fields
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.field_type,
+                xerj_common::types::FieldType::Text | xerj_common::types::FieldType::Keyword
+            ) && !f.name.starts_with("ax_")
+        })
+        .map(|f| f.name.clone())
+        .collect()
+}
+
+/// The #1093 refusal reason for a search, or `None` when the query's lookup
+/// clauses are all known, no strictness is requested, or there is nothing to
+/// validate against.
+///
+/// Strictness: the `?strict_unknown_fields=` URL param, or the
+/// `index.query.strict_unknown_fields` setting on ANY resolved index — a
+/// strict mark anywhere in the target set must cover the whole request, or
+/// a heterogeneous alias would answer the very 0-hit its strict member was
+/// configured to refuse.
+///
+/// Fresh indices (schema with no fields yet — dynamic mapping has seen no
+/// documents) are skipped on both sides: they cannot prove a field unknown,
+/// and when every target is fresh the request is exactly the ES case where
+/// the field may simply not have arrived yet.
+/// Is `index.query.strict_unknown_fields` truthy in this settings tree?
+/// Three spellings reach storage: nested (`{"index": {"query": …}}`, also
+/// the shape a wrapper-less body lands in), a flat top-level key, and a flat
+/// key merged UNDER `index` by the `_settings` handler's normalization —
+/// ES clients routinely send flat dotted keys, and that handler stores them
+/// verbatim.
+fn strict_unknown_fields_set(settings: &Value) -> bool {
+    let truthy = |v: &Value| {
+        matches!(v, Value::Bool(true)) || v.as_str().is_some_and(|s| s == "true" || s == "1")
+    };
+    if let Some(v) = settings.pointer("/index/query/strict_unknown_fields") {
+        if truthy(v) {
+            return true;
+        }
+    }
+    [Some(settings), settings.get("index")]
+        .into_iter()
+        .flatten()
+        .any(|container| {
+            container
+                .get("index.query.strict_unknown_fields")
+                .is_some_and(truthy)
+        })
+}
+
+/// The #1093 refusal reason for a search, or `None` when the query's lookup
+/// clauses are all known, no target asks for strict, or there is nothing to
+/// validate against.
+///
+/// Strictness: the `?strict_unknown_fields=` URL param (`false`/`off`/`0`
+/// forces lenient and beats any setting; `true` enforces outright; absent
+/// defers to the settings), then the `index.query.strict_unknown_fields`
+/// setting on ANY resolved index — a strict mark anywhere in the target set
+/// covers the whole request, or a heterogeneous alias would silently answer
+/// the very 0-hit its strict member was configured to refuse.
+///
+/// The default is ES's own lenient behaviour: a lookup on an unmapped field
+/// is a 0-hit 200 (with the `_xerj.hints` diagnostic). Turning the refusal
+/// on wholesale broke the ES-YAML suite (aggregation cases legitimately
+/// query `missing_field` expecting 200), so strictness is opt-in — and
+/// `xerj autoindex` turns it on for the indices it creates, whose explicit
+/// full schemas are exactly where a wrong field name is a mistake and not
+/// a dynamic-mapping probe (#1093's measured case: 5 of 30 agent intents).
+async fn unknown_lookup_field_reason(
+    state: &crate::state::AppState,
+    index_names: &[&str],
+    strict_param: Option<&str>,
+    query: Option<&Value>,
+) -> Option<String> {
+    match strict_param {
+        Some("false") | Some("off") | Some("0") => return None,
+        _ => {}
+    }
+    let mut enforce = strict_param == Some("true");
+    let query = query?;
+    let mut schemas: Vec<xerj_common::types::Schema> = Vec::new();
+    for name in index_names {
+        // A missing index is not this check's error to report — the search
+        // itself 404s (or is skipped for ignore_unavailable) further down.
+        let Ok(idx) = state.engine.get_index(name) else {
+            continue;
+        };
+        // Two stores can carry the setting: the engine's `settings.json`
+        // copy (written at create) and the display map `PUT /_settings`
+        // merges into — generic keys are not forwarded to the engine store,
+        // so reading one of the two would silently miss the other.
+        let display = state
+            .engine
+            .index_settings
+            .get(*name)
+            .map(|v| v.clone())
+            .unwrap_or(Value::Null);
+        if !enforce
+            && (strict_unknown_fields_set(&display)
+                || strict_unknown_fields_set(&idx.get_settings().await))
+        {
+            enforce = true;
+        }
+        let schema = idx.schema().await;
+        if !schema.fields.is_empty() {
+            schemas.push(schema);
+        }
+    }
+    if !enforce {
+        return None;
+    }
+    // Every target is fresh (no mapped fields anywhere): nothing can be
+    // proven unknown, and this is exactly the ES case where the field may
+    // simply not have arrived yet — dynamic mapping has seen no documents.
+    if schemas.is_empty() {
+        return None;
+    }
+    let refs: Vec<&xerj_common::types::Schema> = schemas.iter().collect();
+    let mut unknown = Vec::new();
+    unknown_lookup_clause_fields(query, &refs, &mut unknown);
+    if unknown.is_empty() {
+        return None;
+    }
+
+    // `QueryError::UnknownField` was written for exactly this refusal and,
+    // until #1093, constructed nowhere. The per-clause reasons come from its
+    // Display so the crate's error vocabulary stays the one source.
+    let named = unknown
+        .iter()
+        .take(5)
+        .map(|(clause, field)| {
+            xerj_query::QueryError::UnknownField {
+                field: field.clone(),
+                context: format!("{clause} clause"),
+            }
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let searchable = searchable_text_fields(&schemas[0]);
+    Some(format!(
+        "{named}. This target enforces strict_unknown_fields because ES's answer \
+         here — a silent 0-hit — is indistinguishable from an empty corpus. \
+         Unset index.query.strict_unknown_fields (or send ?strict_unknown_fields=false \
+         for one request) to restore that behaviour; `exists` on an unmapped field \
+         stays a truthful 0-hit either way. Searchable text fields here: {}",
+        if searchable.is_empty() {
+            "(none)".to_string()
+        } else {
+            searchable.join(", ")
+        },
+    ))
 }
 
 /// `term`/`terms` clauses in a query, as (field, value) pairs.
@@ -8684,7 +8980,10 @@ mod semantic_text_lexical_hint_tests {
 
     /// The hint rides alongside the existing diagnostics rather than
     /// displacing one: a query naming a nonexistent field AND a
-    /// semantic_text field must report both.
+    /// semantic_text field must report both. Runs in the default (lenient)
+    /// mode — the strict opt-in of #1093 would refuse this query before
+    /// hints exist, and the additivity being pinned here is a property of
+    /// lenient responses.
     #[tokio::test]
     async fn the_hint_is_additive_to_the_unknown_field_hint() {
         let state = test_state();
@@ -8711,6 +9010,545 @@ mod semantic_text_lexical_hint_tests {
             codes.contains(&"unknown_field".to_string())
                 && codes.contains(&"lexical_on_semantic_text".to_string()),
             "both diagnostics must survive: {codes:?} / {json}"
+        );
+    }
+}
+
+/// #1093 — opt-in strict mode refuses lookup clauses (`term`, `match`,
+/// `range`, …) naming fields no target index maps, instead of ES's silent
+/// 0-hit 200 that a caller cannot tell from an empty corpus. The default is
+/// ES's own lenient answer (with the `_xerj.hints` diagnostic); strictness
+/// comes from `?strict_unknown_fields=true`, the
+/// `index.query.strict_unknown_fields` setting, or an autoindex-created
+/// index. Pinned here: the refusal, both opt-in routes and the per-request
+/// opt-out, the `exists` exemption, the fresh-index exemption, and the
+/// walker's span_multi/intervals special cases.
+#[cfg(test)]
+mod unknown_field_refusal_tests {
+    use super::*;
+    use axum::{
+        body::{to_bytes, Body},
+        http::Request,
+    };
+    use tower::ServiceExt;
+    use xerj_common::{
+        config::{Config, WalSync},
+        metrics::Metrics,
+    };
+    use xerj_engine::Engine;
+
+    fn test_state() -> AppState {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let mut config = Config::default();
+        config.server.data_dir = dir.to_string_lossy().into_owned();
+        config.storage.wal_sync = WalSync::Async;
+        let metrics = Metrics::new().expect("metrics");
+        let engine = Engine::new(config.clone()).expect("engine");
+        AppState::new(config, engine, metrics)
+    }
+
+    async fn request_json(
+        state: &AppState,
+        method: &str,
+        path: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let response = crate::router::build_es_compat_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            panic!(
+                "{method} {path} returned non-JSON ({error}): {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        });
+        (status, json)
+    }
+
+    /// `ctx` text + `status` keyword, three documents.
+    async fn build_index(state: &AppState, index: &str) {
+        let (status, body) = request_json(
+            state,
+            "PUT",
+            &format!("/{index}"),
+            json!({"mappings": {"properties": {
+                "ctx": {"type": "text"},
+                "status": {"type": "keyword"},
+                "title": {"type": "text"},
+            }}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        for (id, text) in ["alpha graph", "beta edges", "gamma nodes"]
+            .iter()
+            .enumerate()
+        {
+            let (status, body) = request_json(
+                state,
+                "PUT",
+                &format!("/{index}/_doc/{id}"),
+                json!({"ctx": text, "status": "ok", "title": format!("doc {id}")}),
+            )
+            .await;
+            assert!(status.is_success(), "{body}");
+        }
+        state
+            .engine
+            .get_index(index)
+            .expect("index")
+            .refresh()
+            .await
+            .expect("refresh");
+    }
+
+    fn reason(json: &Value) -> String {
+        json["error"]["root_cause"][0]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// The refusal itself: every unknown lookup clause is named, the envelope
+    /// is the house 400, and the reason carries the way out.
+    #[tokio::test]
+    async fn unknown_lookup_fields_are_refused_with_every_clause_named() {
+        let state = test_state();
+        build_index(&state, "uf-strict").await;
+
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-strict/_search?strict_unknown_fields=true",
+            json!({"query": {"bool": {"must": [
+                {"term": {"stauts": "ok"}},
+                {"range": {"titel": {"gte": "a"}}},
+            ]}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert_eq!(json["error"]["type"], "search_phase_execution_exception");
+        let r = reason(&json);
+        assert!(
+            r.contains("unknown field `stauts` in term clause")
+                && r.contains("unknown field `titel` in range clause"),
+            "both clauses named: {r}"
+        );
+        assert!(
+            r.contains("strict_unknown_fields=false"),
+            "the per-request opt-out is in the reason: {r}"
+        );
+
+        // The default, no param: ES's own silent 0-hit.
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-strict/_search",
+            json!({"query": {"term": {"stauts": "ok"}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "default is lenient: {json}");
+        assert_eq!(json["hits"]["total"]["value"], 0, "{json}");
+    }
+
+    /// The default carries the `_xerj.hints` unknown-field diagnostic, so a
+    /// lenient caller keeps the explanation a strict caller gets as a 400 —
+    /// and the per-request opt-out beats a strict index setting.
+    #[tokio::test]
+    async fn the_default_is_lenient_with_the_hint_and_false_beats_the_setting() {
+        let state = test_state();
+        build_index(&state, "uf-lenient").await;
+
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-lenient/_search",
+            json!({"query": {"term": {"stauts": "ok"}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["hits"]["total"]["value"], 0, "{json}");
+        let codes = json["_xerj"]["hints"]
+            .as_array()
+            .map(|h| {
+                h.iter()
+                    .filter_map(|x| x["code"].as_str())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert!(
+            codes.contains(&"unknown_field"),
+            "lenient mode keeps the hint: {codes:?} / {json}"
+        );
+
+        // Now make the index strict and opt out for one request.
+        let (status, body) = request_json(
+            &state,
+            "PUT",
+            "/uf-lenient/_settings",
+            json!({"index.query.strict_unknown_fields": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, _) = request_json(
+            &state,
+            "POST",
+            "/uf-lenient/_search",
+            json!({"query": {"term": {"stauts": "ok"}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "the setting enforces");
+
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-lenient/_search?strict_unknown_fields=false",
+            json!({"query": {"term": {"stauts": "ok"}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "?false beats the setting: {json}");
+        assert_eq!(json["hits"]["total"]["value"], 0, "{json}");
+    }
+
+    /// The per-index setting — any ONE resolved index marked strict covers
+    /// the whole request, so a heterogeneous alias cannot answer the very
+    /// 0-hit its strict member was configured to refuse.
+    #[tokio::test]
+    async fn the_index_setting_enforces_strict_for_the_whole_request() {
+        let state = test_state();
+        build_index(&state, "uf-set-a").await;
+        build_index(&state, "uf-set-b").await;
+        let (status, body) = request_json(
+            &state,
+            "PUT",
+            "/uf-set-b/_settings",
+            json!({"index.query.strict_unknown_fields": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // No strict member: the lenient default.
+        let (status, _) = request_json(
+            &state,
+            "POST",
+            "/uf-set-a/_search",
+            json!({"query": {"term": {"stauts": "ok"}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // With the strict member in the target set: refused.
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-set-a,uf-set-b/_search",
+            json!({"query": {"term": {"stauts": "ok"}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert!(
+            reason(&json).contains("unknown field `stauts` in term clause"),
+            "the field is named: {json}"
+        );
+    }
+
+    /// The settings spelled the ES-native way (nested under `index`) and set
+    /// at CREATE time — the shape `xerj autoindex` sends — must enforce too.
+    #[tokio::test]
+    async fn a_create_time_nested_setting_enforces() {
+        let state = test_state();
+        let (status, body) = request_json(
+            &state,
+            "PUT",
+            "/uf-created",
+            json!({
+                "settings": {"index": {"query": {"strict_unknown_fields": true}}},
+                "mappings": {"properties": {"ctx": {"type": "text"}}},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-created/_search",
+            json!({"query": {"term": {"stauts": "ok"}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    }
+
+    /// `exists` is exempt on purpose: zero IS the truthful answer to "does
+    /// any document have this field", and heterogeneous-index probes rely on
+    /// it. The hint still explains the zero.
+    #[tokio::test]
+    async fn exists_on_an_unknown_field_stays_a_truthful_zero() {
+        let state = test_state();
+        build_index(&state, "uf-exists").await;
+
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-exists/_search?strict_unknown_fields=true",
+            json!({"query": {"exists": {"field": "stauts"}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["hits"]["total"]["value"], 0, "{json}");
+    }
+
+    /// A `multi_match` that names one real field still searches it — hinted,
+    /// not refused; one that names ONLY unknown fields is refused.
+    #[tokio::test]
+    async fn multi_match_is_refused_only_when_every_named_field_is_unknown() {
+        let state = test_state();
+        build_index(&state, "uf-mm").await;
+
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-mm/_search?strict_unknown_fields=true",
+            json!({"query": {"multi_match": {"query": "graph", "fields": ["ctx", "nope"]}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(
+            json["hits"]["total"]["value"].as_i64().unwrap_or(0) > 0,
+            "the real half of the multi_match still matched: {json}"
+        );
+
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-mm/_search?strict_unknown_fields=true",
+            json!({"query": {"multi_match": {"query": "graph", "fields": ["nope", "titel"]}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert!(
+            reason(&json).contains("multi_match"),
+            "the refused clause is named: {json}"
+        );
+    }
+
+    /// A wildcard field pattern in `multi_match.fields` is legal ES; it must
+    /// not be REFUSED for matching no literal field name. (Whether the
+    /// engine expands the pattern to matching fields is a separate question
+    /// this test does not pin — today it does not, and that gap is engine
+    /// work, not a false 400.)
+    #[tokio::test]
+    async fn multi_match_wildcard_fields_matching_a_real_field_are_not_refused() {
+        let state = test_state();
+        build_index(&state, "uf-glob").await;
+
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-glob/_search?strict_unknown_fields=true",
+            json!({"query": {"multi_match": {"query": "graph", "fields": ["ct*"]}}}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a pattern matching a real field must not be refused: {json}"
+        );
+    }
+
+    /// `span_multi` wraps a multi-term query whose inner keys are
+    /// `field`/`value` — the walk must read the wrapped field, not treat
+    /// `field`/`prefix` themselves as field names (the false positive the
+    /// ES-YAML 190_index_prefix_search case surfaced). `span_multi` is not a
+    /// supported query type here, so the parser 400 is what a caller sees
+    /// when the wrapped field is real — the pin is that the strict walk does
+    /// not MASK it with a bogus `unknown field \`field\``. `intervals` IS
+    /// supported: its field is the KEY and its spec keys are interval kinds.
+    #[tokio::test]
+    async fn span_multi_and_intervals_are_not_false_positives() {
+        let state = test_state();
+        build_index(&state, "uf-span").await;
+
+        // Real field wrapped in span_multi: the parser's own refusal (the
+        // query type is unsupported), never an unknown-field error.
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-span/_search?strict_unknown_fields=true",
+            json!({"query": {"span_multi": {"match": {"prefix": {"field": "title", "value": "doc"}}}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        let r = reason(&json);
+        assert!(
+            r.contains("unknown query type `span_multi`"),
+            "the parser's refusal, not a masked one: {r}"
+        );
+        assert!(
+            !r.contains("unknown field `field`"),
+            "the strict walk must not read span_multi's inner keys as fields: {r}"
+        );
+
+        // Unknown field wrapped in span_multi: the strict walk fires first,
+        // naming the wrapped clause — not the inner keys.
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-span/_search?strict_unknown_fields=true",
+            json!({"query": {"span_multi": {"match": {"prefix": {"field": "titel", "value": "doc"}}}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert!(
+            reason(&json).contains("unknown field `titel` in span_multi prefix clause"),
+            "the wrapped clause is named: {json}"
+        );
+
+        // intervals over a real field: 200, no refusal — the spec's own
+        // `match`/`prefix` keys are interval kinds, not field names.
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-span/_search?strict_unknown_fields=true",
+            json!({"query": {"intervals": {"title": {
+                "match": {"query": "doc", "ordered": true}
+            }}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "intervals real field: {json}");
+
+        // intervals over an unknown field: refused.
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-span/_search?strict_unknown_fields=true",
+            json!({"query": {"intervals": {"titel": {
+                "match": {"query": "doc", "ordered": true}
+            }}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert!(
+            reason(&json).contains("unknown field `titel` in intervals clause"),
+            "the intervals field is named: {json}"
+        );
+    }
+
+    /// A just-created index with no mappings yet cannot prove any field
+    /// unknown — dynamic mapping has seen nothing — so it is exempt even in
+    /// strict mode.
+    #[tokio::test]
+    async fn a_fresh_index_with_no_mappings_is_not_validated() {
+        let state = test_state();
+        let (status, body) = request_json(
+            &state,
+            "PUT",
+            "/uf-fresh",
+            json!({"settings": {"index.query.strict_unknown_fields": true}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-fresh/_search?strict_unknown_fields=true",
+            json!({"query": {"term": {"anything": "at-all"}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["hits"]["total"]["value"], 0, "{json}");
+    }
+
+    /// A subfield of a real field (`ctx.exact`) and ES metadata (`_id`) are
+    /// not "unknown", exactly as the lenient hint already treated them.
+    #[tokio::test]
+    async fn subfields_of_real_fields_and_metadata_fields_are_known() {
+        let state = test_state();
+        build_index(&state, "uf-sub").await;
+
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-sub/_search?strict_unknown_fields=true",
+            json!({"query": {"term": {"ctx.exact": "graph"}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "subfield of a real field: {json}");
+
+        let (status, json) = request_json(
+            &state,
+            "POST",
+            "/uf-sub/_search?strict_unknown_fields=true",
+            json!({"query": {"term": {"_id": "0"}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "metadata field: {json}");
+    }
+
+    /// `_msearch` refuses the offending item alone, ES's per-item error
+    /// shape, and the rest of the batch still runs — against a strict index,
+    /// since NDJSON items carry no URL params.
+    #[tokio::test]
+    async fn msearch_refuses_the_offending_item_and_runs_its_sibling() {
+        let state = test_state();
+        build_index(&state, "uf-ms").await;
+        let (status, body) = request_json(
+            &state,
+            "PUT",
+            "/uf-ms/_settings",
+            json!({"index.query.strict_unknown_fields": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let response = crate::router::build_es_compat_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/_msearch")
+                    .header("content-type", "application/x-ndjson")
+                    .body(Body::from(concat!(
+                        "{\"index\":\"uf-ms\"}\n",
+                        "{\"query\":{\"term\":{\"stauts\":\"ok\"}}}\n",
+                        "{\"index\":\"uf-ms\"}\n",
+                        "{\"query\":{\"term\":{\"status\":\"ok\"}}}\n",
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&bytes).expect("msearch json");
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let responses = json["responses"].as_array().expect("responses");
+        assert_eq!(responses.len(), 2, "{json}");
+        assert_eq!(responses[0]["status"], 400, "{json}");
+        assert_eq!(
+            responses[0]["error"]["type"],
+            "search_phase_execution_exception"
+        );
+        assert!(
+            responses[0]["error"]["root_cause"][0]["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unknown field `stauts` in term clause"),
+            "the item names the field: {json}"
+        );
+        assert_eq!(responses[1]["status"], 200, "{json}");
+        assert!(
+            responses[1]["hits"]["total"]["value"].as_i64().unwrap_or(0) > 0,
+            "the sibling item ran: {json}"
         );
     }
 }
@@ -9675,6 +10513,28 @@ async fn search_impl(
                     }
                 }),
             });
+        }
+    }
+
+    // ── #1093: refuse lookup clauses naming fields no resolved index maps ──
+    // Opt-in (`?strict_unknown_fields=true`, the `index.query.strict_unknown_fields`
+    // setting, or an autoindex-created index); runs after the PIT filter merge and
+    // `_index`-constraint strip, on the query as it will actually execute. ES answers
+    // these with a silent 0-hit 200; here that made a wrong field name indistinguishable from an
+    // empty corpus (the map-gate run counted 5 silent wrong-field misses in
+    // 30 agent intents). The refusal names the field and both escape hatches;
+    // `exists` is exempt (zero IS the truthful answer there) and fresh
+    // all-dynamic indices are exempt (nothing is mapped yet).
+    if !index_names.is_empty() {
+        if let Some(reason) = unknown_lookup_field_reason(
+            &state,
+            &index_names,
+            params.strict_unknown_fields.as_deref(),
+            body.query.as_ref(),
+        )
+        .await
+        {
+            return search_shard_validation_error(&reason);
         }
     }
 
@@ -24322,6 +25182,55 @@ async fn msearch_impl(
             strip_index_constraints(q, &mut idx_constraints);
             if q.as_object().map(|o| o.is_empty()).unwrap_or(false) {
                 *q = json!({ "match_all": {} });
+            }
+        }
+
+        // #1093, the `_msearch` half of the `_search` refusal: a lookup
+        // clause naming a field no strict target index maps fails THIS item
+        // with the same 400 the single-request path answers with, and the
+        // rest of the batch still runs. Wildcard/unresolvable targets
+        // degrade to the lenient default (nothing is provably unknown);
+        // there is no per-item URL param in NDJSON, so strictness here
+        // comes from the index setting (or `?strict_unknown_fields=true`,
+        // which does not exist per item) — the index setting only.
+        {
+            let mut names: Vec<String> = Vec::new();
+            for part in index_name
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if let Some(entry) = state.engine.aliases.get(part) {
+                    for backing in entry.value().iter() {
+                        if !names.contains(backing) {
+                            names.push(backing.clone());
+                        }
+                    }
+                } else if !part.contains('*') && part != "_all" && !names.iter().any(|n| n == part)
+                {
+                    names.push(part.to_string());
+                }
+            }
+            let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            if !name_refs.is_empty() {
+                if let Some(reason) = unknown_lookup_field_reason(
+                    &state,
+                    &name_refs,
+                    None,
+                    effective_body.get("query"),
+                )
+                .await
+                {
+                    responses.push(json!({
+                        "error": {
+                            "root_cause": [{ "type": "illegal_argument_exception", "reason": reason }],
+                            "type": "search_phase_execution_exception",
+                            "reason": "all shards failed",
+                        },
+                        "status": 400
+                    }));
+                    continue;
+                }
             }
         }
 
