@@ -1,0 +1,91 @@
+Run manifest — local-judge gate #1060, measured 2026-09-30
+===========================================================
+
+Binary (NOT rebuilt; release binary staged for the rc.80 gate wave)
+  path    /tmp/xerj-rc80gates-bin/xerj
+  version "xerj v1.0.0-rc.78" (release binary built from main @ a179e1ef3)
+  sha256  a95ed5f0f91e90fffe2e82a7a1c1057ab9639029ea7f43676cc61eddb88e5f76
+
+Datasets (BEIR canonical mirror, fetched fresh this run; zips sha256)
+  scifact.zip   536e14446a0ba56ed1398ab1055f39fe852686ecad24a6306c80c490fa8e0165
+                corpus.jsonl 5,183 docs (sha256 dec31c8182f3d744c7d2c09423756fd1d17cbef75808db13ba01cc0aab4f1ac6)
+  nfcorpus.zip  efe5be03f8c5b86a5870102d0599d227c8c6c2444328e68c6522560385671b0b
+                corpus.jsonl 3,633 docs (sha256 10cc83ef1826b1425e6a87090b5140b39b27755d5a27e48215a88611c899991f)
+  fiqa.zip      32c7df99ed21252fdfb2cf3f5673502a8d245ee0c44c4a133570d92ce2b3ad02
+                corpus.jsonl 57,638 docs (sha256 ff593e4df9933955dc3af83be0c3fa28ac7465f627e08c2e53593e734d506517)
+  URL     https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/<name>.zip
+  test splits scored: queries.jsonl + qrels/test.tsv from each archive, verbatim.
+
+Node
+  xerj --insecure --embed-mode neural --port 9642 -d <throwaway mktemp dir under /tmp>
+  private port band 9640-9659 assigned to this task; :9200 never touched.
+  ALL measured numbers: node pinned to cores 0-7 (taskset -c 0-7).
+  Ingest was done on an unpinned instance of the same binary + data dir
+  (SciFact 4.7 docs/s pinned vs ~30 docs/s unpinned; ingest CPU cannot affect
+  query-time ranking or judge latency, and post-#940 ranking is deterministic
+  across restarts — verified below by 3 identical runs per arm).
+  Latency runs: python client pinned to cores 8-15 so it never competes with
+  the node for the measured cores.
+  Co-tenant load: other rc.80 gate agents were measuring on the same 32-core
+  box during these runs — wall-clock absolute values are upper bounds; the
+  judge-vs-base DELTA is the measurement that matters and is sub-ms.
+
+Index mapping (load.py, unchanged from the hybrid baseline runs)
+  title: text, text: text, body: semantic_text (body = title + ". " + text)
+  Note for reproducers: the judged page carries _source with BOTH `text` and
+  `body` (the semantic field duplicates the prose), so the judge's candidate
+  text contains the document twice, cut at DEFAULT_MAX_DOC_CHARS. That is the
+  shipped behaviour of the stage reading the response as emitted; it was not
+  tuned for this run.
+
+Harness
+  judge_gate.py (new, this directory's parent) — same qrels/nDCG@10 scoring as
+  eval.py; arms bm30 / hy30 / bm30+judge / hy30+judge, size=30, 3 runs with
+  query order shuffled per run (seeds 1001..1003). The judge block carries NO
+  min_p in the gate arms (reorder-only; a threshold can only remove recall).
+  hy30+judge passes judge.query explicitly (a `hybrid` query is not an
+  inferable shape); bm30+judge exercises the inference path (multi_match).
+
+Gate line, verbatim from #1060
+  "BEIR harness on the post-#940 deterministic path beats hybrid 0.699
+  SciFact / 0.345 NFCorpus by more than the 3-run spread, and FiQA >=0.30
+  (hosted Jev rerank got 0.3638). Loses, does not ship, same rule as the
+  cross-encoder."
+  AC cost line: "adds <=40 ms p50 for top-30 on CPU."
+
+Incidents during the run (recorded, none change a gate number)
+  1. The pinned node received an external SIGTERM at 19:28:31 local, after all
+     quality and latency logs in this directory were already written; it shut
+     down cleanly ("final flush complete in 445ms"). A restarted instance on
+     the same data dir reproduced every SciFact and NFCorpus arm bit-for-bit
+     (scifact-minp05.log / nfcorpus-minp05.log re-measure all four base arms
+     after the restart: 0.6572/0.7045/0.5966/0.5967 and
+     0.3016/0.3419/0.2827/0.2924) — post-#940 determinism holds across
+     restarts, not just across runs.
+  2. A first full-arm FiQA run was stopped when the hybrid first stage
+     measured 13-26 s wall per query on the 57,638-doc index (server-side
+     slow-query log: 14.7-15.1 s). Its python client survived the stop and
+     kept issuing queries until it was killed; the FiQA bm25-arm logs were
+     measured on the same node while that runaway was running, so FiQA
+     wall-clock absolutes are upper bounds. nDCG@10 is unaffected (ranking is
+     deterministic and was reproduced identically 3x), and the added-p50
+     delta (+0.6 ms) is a within-request difference measured under the same
+     contention in both arms.
+  3. An early two-processes-one-data-dir mistake (old pinned node + new
+     unpinned node, lock file removed by hand) lasted ~30 s and was resolved
+     by SIGKILL of the old process + clean restart before ANY measurement;
+     SciFact's index replayed from WAL and counted 5,183 both before and
+     after. No measurement ran against the contended state.
+
+FiQA bm30-arms re-run (2026-09-30, verifier follow-up):
+  The first FiQA quality attempt aborted mid-bm30+judge (node died under the
+  runaway hybrid client — fiqa-quality-aborted.log), leaving the cited
+  0.1650 without a raw log. Re-run clean: same fiqa.zip (sha256 above),
+  fresh throwaway node --embed-mode lexical :9646, load.py mapping identical,
+  ARMS=bm30,bm30+judge (hybrid arms excluded: 13-26 s/query, issue #1091).
+  bm30 0.2380/0.2382/0.2382 (run-1 warm-up wobble 0.0002; the aborted run's
+  single bm30 pass was 0.2382); bm30+judge 0.1650/0.1650/0.1650, spread
+  0.0000, W/L/T 86/209/353, mean per-query delta -0.0731. Raw log:
+  fiqa-quality-bm30arms.log. The judge arm is embedder-independent (the
+  stage scores BM25 shortlists), which is why the lexical boot is valid for
+  these two arms; the hybrid arms were never measured on FiQA.

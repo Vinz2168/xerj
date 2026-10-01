@@ -1,0 +1,14 @@
+index=fiqa queries=648 mode=quality size=30 url=http://127.0.0.1:9646
+docs=57638
+run 1 bm30                     nDCG@10=0.2380 empty=  0
+run 1 bm30+judge               nDCG@10=0.1650 empty=  0 judge_took_ms_p50=0 kept_avg=30.0 dropped_avg=0.0
+run 2 bm30                     nDCG@10=0.2382 empty=  0
+run 2 bm30+judge               nDCG@10=0.1650 empty=  0 judge_took_ms_p50=0 kept_avg=30.0 dropped_avg=0.0
+run 3 bm30                     nDCG@10=0.2382 empty=  0
+run 3 bm30+judge               nDCG@10=0.1650 empty=  0 judge_took_ms_p50=0 kept_avg=30.0 dropped_avg=0.0
+
+== per-arm means over runs, spread, and head-to-head vs hy30 ==
+bm30                       runs=0.2380 0.2382 0.2382  mean=0.2381  spread=0.0002
+bm30+judge                 runs=0.1650 0.1650 0.1650  mean=0.1650  spread=0.0000
+hy30+judge vs hy30: skipped (an arm was not run — ARMS filter?)
+bm30+judge vs bm30: W/L/T = 86/209/353  mean per-query delta=-0.0731

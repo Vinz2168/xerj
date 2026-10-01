@@ -1,0 +1,15 @@
+index=fiqa queries=648 mode=quality size=30 url=http://localhost:9642
+docs=57638
+run 1 bm30                     nDCG@10=0.2382 empty=  0
+
+[aborted] Full-arm FiQA run stopped after run 1's bm30 arm: a probe measured
+the hybrid first stage itself at 13.7 / 26.0 / 26.2 s per query on the 57,638-doc
+index (8 pinned cores, box load 2.8/32, judged variant 26.5-27.1 s), so the
+4-arm x 3-run plan was ~28 h of wall. The FiQA gate row is measured on the
+BM25 top-30 shortlist — the same first stage the hosted-Jev 0.3638 reference
+used. Hybrid-vs-judged-hybrid remains measured on SciFact and NFCorpus, the
+two datasets the gate's hybrid bar was recorded on.
+Probe (3 queries, 2026-09-30 ~20:20 local):
+  hybrid 13.7 s hits 30 / hyb+judge 26.51 s took_ms 0
+  hybrid 26.02 s hits 30 / hyb+judge 27.12 s took_ms 0
+  hybrid 26.22 s hits 30 / hyb+judge 26.71 s took_ms 0

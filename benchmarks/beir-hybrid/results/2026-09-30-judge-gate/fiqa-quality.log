@@ -1,0 +1,58 @@
+index=fiqa queries=648 mode=quality size=30 url=http://localhost:9642
+docs=57638
+run 1 bm30                     nDCG@10=0.2382 empty=  0
+Traceback (most recent call last):
+  File "/usr/lib/python3.11/urllib/request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "/usr/lib/python3.11/http/client.py", line 1302, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "/usr/lib/python3.11/http/client.py", line 1348, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "/usr/lib/python3.11/http/client.py", line 1297, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "/usr/lib/python3.11/http/client.py", line 1057, in _send_output
+    self.send(msg)
+  File "/usr/lib/python3.11/http/client.py", line 995, in send
+    self.connect()
+  File "/usr/lib/python3.11/http/client.py", line 961, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/socket.py", line 851, in create_connection
+    raise exceptions[0]
+  File "/usr/lib/python3.11/socket.py", line 836, in create_connection
+    sock.connect(sa)
+ConnectionRefusedError: [Errno 111] Connection refused
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/workspace/.claude/worktrees/wf_7ffac925-ac6-3/benchmarks/beir-hybrid/judge_gate.py", line 131, in <module>
+    scores, empties, took, kept, dropped = [], 0, [], [], []
+                    ^^^^^^^^^^^^^^^^
+  File "/workspace/.claude/worktrees/wf_7ffac925-ac6-3/benchmarks/beir-hybrid/judge_gate.py", line 108, in <lambda>
+    "hy30": lambda q: (hy30(q), None),
+                       ^^^^^^^
+  File "/workspace/.claude/worktrees/wf_7ffac925-ac6-3/benchmarks/beir-hybrid/judge_gate.py", line 85, in hy30
+    return ids(post(f"/{IDX}/_search", {"size": SIZE, "_source": False, "query": HYB(q)}))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/.claude/worktrees/wf_7ffac925-ac6-3/benchmarks/beir-hybrid/judge_gate.py", line 45, in post
+    return json.loads(urllib.request.urlopen(r, timeout=300).read())
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/urllib/request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/urllib/request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/urllib/request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/urllib/request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.11/urllib/request.py", line 1377, in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/urllib/request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 111] Connection refused>
