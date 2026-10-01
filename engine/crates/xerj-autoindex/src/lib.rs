@@ -2334,6 +2334,7 @@ fn scan_file(
         // download IS one `.zip`/`.tgz`, and "binary content (zip)" tells its
         // owner nothing about why their mail is not searchable.
         let reason = sniff::archive_advice(&kind, sn.gzip)
+            .or_else(|| sniff::unsupported_document_advice(&kind))
             .unwrap_or_else(|| format!("binary content ({kind})"));
         out.junk = Some(("junk".into(), reason));
         out.sniffed = Some(sn);
