@@ -51,8 +51,11 @@ const LIMITS: Limits = Limits {
     body: MAX_BODY_BYTES,
 };
 
-pub fn extract(path: &Path, sink: Sink) -> Result<ExtractStats> {
-    extract_bounded(path, sink, LIMITS)
+/// `name` is the file as the corpus names it, which under durable preparation
+/// is not `path` (a sealed snapshot blob); a deck with no slide title is
+/// titled from it.
+pub fn extract(path: &Path, name: &Path, sink: Sink) -> Result<ExtractStats> {
+    extract_bounded(path, name, sink, LIMITS)
 }
 
 /// Text of one slide (or notes page).
@@ -69,7 +72,7 @@ struct Slide {
     body: String,
 }
 
-fn extract_bounded(path: &Path, sink: Sink, limits: Limits) -> Result<ExtractStats> {
+fn extract_bounded(path: &Path, name: &Path, sink: Sink, limits: Limits) -> Result<ExtractStats> {
     let mut stats = ExtractStats::default();
     let f = std::fs::File::open(path)?;
     let mut z = zip::ZipArchive::new(f).context("open pptx container")?;
@@ -125,7 +128,7 @@ fn extract_bounded(path: &Path, sink: Sink, limits: Limits) -> Result<ExtractSta
         .iter()
         .find_map(|s| s.title.clone())
         .unwrap_or_else(|| {
-            path.file_stem()
+            name.file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "untitled".into())
         });
@@ -580,6 +583,7 @@ mod tests {
         let mut out = Vec::new();
         let stats = extract_bounded(
             path,
+            path,
             &mut |r| {
                 out.push(r);
                 true
@@ -729,6 +733,30 @@ mod tests {
         let (recs, stats) = run(&empty, LIMITS);
         assert!(recs.is_empty());
         assert_eq!((stats.records, stats.junk), (0, 1));
+    }
+
+    /// Durable preparation extracts a sealed snapshot blob (`00000000`); a deck
+    /// with no slide title must still be titled from its own name (#722's
+    /// class).
+    #[test]
+    fn an_untitled_deck_is_titled_from_the_logical_name_not_the_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob = dir.path().join("00000000");
+        write_deck(
+            &blob,
+            &[slide_xml(&[sp(None, &["body text"])])],
+            &[1],
+            &[None],
+        );
+        let sn = crate::sniff::sniff_with_name(&blob, Path::new("decks/kickoff.pptx")).unwrap();
+        assert_eq!(sn.family, crate::sniff::Family::Pptx);
+        let mut recs = Vec::new();
+        super::super::extract(&blob, &sn, None, &mut |r| {
+            recs.push(r);
+            true
+        })
+        .unwrap();
+        assert_eq!(*field(&recs[0], "title"), "kickoff");
     }
 
     /// A slide longer than one section splits like a PDF page does.
