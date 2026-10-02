@@ -29,6 +29,8 @@ pub enum Family {
     /// each message goes through the same extraction as [`Family::Eml`].
     Mbox,
     Docx,
+    /// PowerPoint deck: one record per slide, speaker notes included.
+    Pptx,
     Sqlite,
     SqlDump,
     /// Source code — AST-parsed by the matching tree-sitter grammar.
@@ -67,6 +69,7 @@ impl Family {
             Family::Eml => "eml",
             Family::Mbox => "mbox",
             Family::Docx => "docx",
+            Family::Pptx => "pptx",
             Family::Sqlite => "sqlite",
             Family::SqlDump => "sqldump",
             Family::Code => "code",
@@ -81,7 +84,12 @@ impl Family {
     pub fn is_document(&self) -> bool {
         matches!(
             self,
-            Family::Pdf | Family::Docx | Family::TxtProse | Family::Eml | Family::Mbox
+            Family::Pdf
+                | Family::Docx
+                | Family::Pptx
+                | Family::TxtProse
+                | Family::Eml
+                | Family::Mbox
         )
     }
 }
@@ -219,15 +227,17 @@ fn sniff_bytes(
         return Ok(mk(Family::Sqlite));
     }
     if prefix.starts_with(b"PK\x03\x04") {
-        // zip container: DOCX iff it holds word/document.xml; another known
-        // document container is named for what it is, not as an archive
+        // zip container: DOCX/PPTX by their main part; another known document
+        // container is named for what it is, not as an archive
         let mut kind = "zip";
         if !gzip {
             if let Ok(f) = std::fs::File::open(content_path) {
                 if let Ok(mut z) = zip::ZipArchive::new(f) {
                     kind = zip_container_kind(&mut z);
-                    if kind == "docx" {
-                        return Ok(mk(Family::Docx));
+                    match kind {
+                        "docx" => return Ok(mk(Family::Docx)),
+                        "pptx" => return Ok(mk(Family::Pptx)),
+                        _ => {}
                     }
                 }
             }
@@ -1070,9 +1080,9 @@ fn looks_like_tar_header(prefix: &[u8]) -> bool {
     stored == computed
 }
 
-/// Name a zip container by its members: `"docx"`, another document format
-/// autoindex has no extractor for (`"xlsx"`, `"pptx"`, `"odt"`, …), or
-/// `"zip"` for anything else.
+/// Name a zip container by its members: `"docx"` or `"pptx"` (extracted),
+/// another document format autoindex has no extractor for (`"xlsx"`,
+/// `"odt"`, …), or `"zip"` for anything else.
 ///
 /// Office Open XML, OpenDocument and EPUB are all zips, so the `PK` magic alone
 /// cannot tell a spreadsheet from a Takeout download — and calling a workbook
@@ -1114,7 +1124,6 @@ pub fn unsupported_document_advice(binary_kind: &str) -> Option<String> {
     let (what, how) = match binary_kind {
         "xlsx" => ("Excel workbook", "export each sheet as CSV"),
         "xlsb" => ("Excel binary workbook", "export each sheet as CSV"),
-        "pptx" => ("PowerPoint presentation", "export it as PDF"),
         "odt" => ("OpenDocument text", "export it as DOCX or PDF"),
         "ods" => ("OpenDocument spreadsheet", "export each sheet as CSV"),
         "odp" => ("OpenDocument presentation", "export it as PDF"),
@@ -4038,7 +4047,7 @@ mod zip_container_sniff_tests {
         assert_eq!(kind(&[ct, ("xl/workbook.bin", "\u{1}")]), binary("xlsb"));
         assert_eq!(
             kind(&[ct, ("ppt/presentation.xml", "<p:presentation/>")]),
-            binary("pptx")
+            (Family::Pptx, None)
         );
     }
 
@@ -4094,7 +4103,7 @@ mod zip_container_sniff_tests {
 
     #[test]
     fn unsupported_documents_get_an_export_hint_not_archive_advice() {
-        for k in ["xlsx", "xlsb", "pptx", "odt", "ods", "odp", "epub"] {
+        for k in ["xlsx", "xlsb", "odt", "ods", "odp", "epub"] {
             assert_eq!(archive_advice(k, false), None, "{k}");
             let advice = unsupported_document_advice(k).unwrap();
             assert!(
@@ -4107,7 +4116,7 @@ mod zip_container_sniff_tests {
         assert!(unsupported_document_advice("xlsx")
             .unwrap()
             .contains("Excel workbook"));
-        for k in ["zip", "tar", "png", "docx", "unknown", ""] {
+        for k in ["zip", "tar", "png", "docx", "pptx", "unknown", ""] {
             assert_eq!(unsupported_document_advice(k), None, "{k}");
         }
     }
