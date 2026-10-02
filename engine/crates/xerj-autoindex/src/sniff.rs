@@ -31,6 +31,9 @@ pub enum Family {
     Docx,
     /// PowerPoint deck: one record per slide, speaker notes included.
     Pptx,
+    /// Excel workbook: one dataset per worksheet, one record per row under
+    /// the sheet's header row, typed from the stored cell values.
+    Xlsx,
     Sqlite,
     SqlDump,
     /// Source code — AST-parsed by the matching tree-sitter grammar.
@@ -70,6 +73,7 @@ impl Family {
             Family::Mbox => "mbox",
             Family::Docx => "docx",
             Family::Pptx => "pptx",
+            Family::Xlsx => "xlsx",
             Family::Sqlite => "sqlite",
             Family::SqlDump => "sqldump",
             Family::Code => "code",
@@ -237,6 +241,7 @@ fn sniff_bytes(
                     match kind {
                         "docx" => return Ok(mk(Family::Docx)),
                         "pptx" => return Ok(mk(Family::Pptx)),
+                        "xlsx" => return Ok(mk(Family::Xlsx)),
                         _ => {}
                     }
                 }
@@ -1080,9 +1085,9 @@ fn looks_like_tar_header(prefix: &[u8]) -> bool {
     stored == computed
 }
 
-/// Name a zip container by its members: `"docx"` or `"pptx"` (extracted),
-/// another document format autoindex has no extractor for (`"xlsx"`,
-/// `"odt"`, …), or `"zip"` for anything else.
+/// Name a zip container by its members: `"docx"`, `"pptx"` or `"xlsx"`
+/// (extracted), another document format autoindex has no extractor for
+/// (`"xlsb"`, `"odt"`, …), or `"zip"` for anything else.
 ///
 /// Office Open XML, OpenDocument and EPUB are all zips, so the `PK` magic alone
 /// cannot tell a spreadsheet from a Takeout download — and calling a workbook
@@ -1122,10 +1127,9 @@ fn zip_container_kind<R: Read + std::io::Seek>(z: &mut zip::ZipArchive<R>) -> &'
 /// file into a format autoindex does index today.
 pub fn unsupported_document_advice(binary_kind: &str) -> Option<String> {
     let (what, how) = match binary_kind {
-        "xlsx" => ("Excel workbook", "export each sheet as CSV"),
-        "xlsb" => ("Excel binary workbook", "export each sheet as CSV"),
+        "xlsb" => ("Excel binary workbook", "save it as .xlsx"),
         "odt" => ("OpenDocument text", "export it as DOCX or PDF"),
-        "ods" => ("OpenDocument spreadsheet", "export each sheet as CSV"),
+        "ods" => ("OpenDocument spreadsheet", "save it as .xlsx"),
         "odp" => ("OpenDocument presentation", "export it as PDF"),
         "epub" => ("EPUB e-book", "convert it to PDF"),
         _ => return None,
@@ -4042,7 +4046,7 @@ mod zip_container_sniff_tests {
         );
         assert_eq!(
             kind(&[ct, ("xl/workbook.xml", "<workbook/>")]),
-            binary("xlsx")
+            (Family::Xlsx, None)
         );
         assert_eq!(kind(&[ct, ("xl/workbook.bin", "\u{1}")]), binary("xlsb"));
         assert_eq!(
@@ -4103,7 +4107,7 @@ mod zip_container_sniff_tests {
 
     #[test]
     fn unsupported_documents_get_an_export_hint_not_archive_advice() {
-        for k in ["xlsx", "xlsb", "odt", "ods", "odp", "epub"] {
+        for k in ["xlsb", "odt", "ods", "odp", "epub"] {
             assert_eq!(archive_advice(k, false), None, "{k}");
             let advice = unsupported_document_advice(k).unwrap();
             assert!(
@@ -4113,10 +4117,10 @@ mod zip_container_sniff_tests {
             );
             assert!(!advice.contains("unzip"), "{k}: {advice}");
         }
-        assert!(unsupported_document_advice("xlsx")
+        assert!(unsupported_document_advice("xlsb")
             .unwrap()
-            .contains("Excel workbook"));
-        for k in ["zip", "tar", "png", "docx", "pptx", "unknown", ""] {
+            .contains("Excel binary workbook"));
+        for k in ["zip", "tar", "png", "docx", "pptx", "xlsx", "unknown", ""] {
             assert_eq!(unsupported_document_advice(k), None, "{k}");
         }
     }
