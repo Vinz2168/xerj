@@ -12,6 +12,7 @@ pub mod json;
 pub mod jsonl;
 pub mod logs;
 pub mod mbox;
+pub(crate) mod opc;
 pub mod pdf;
 pub mod pptx;
 pub mod sqldump;
