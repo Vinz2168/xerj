@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>XERJ.ai — Blog: the engineering log</title>
-<meta name="description" content="Measured results with the losses left in: the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
+<meta name="description" content="Measured results with the losses left in: the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@400;700;800;900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -16,7 +16,7 @@
 <meta property="og:site_name" content="XERJ.ai">
 <meta property="og:type" content="website">
 <meta property="og:title" content="XERJ.ai — Blog: the engineering log">
-<meta property="og:description" content="Measured results with the losses left in: the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
+<meta property="og:description" content="Measured results with the losses left in: the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
 <meta property="og:url" content="https://xerj.org/blog/">
 <meta property="og:image" content="https://xerj.org/og/xerj-card.png">
 <meta property="og:image:width" content="1200">
@@ -25,7 +25,7 @@
 <meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="XERJ.ai — Blog: the engineering log">
-<meta name="twitter:description" content="Measured results with the losses left in: the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
+<meta name="twitter:description" content="Measured results with the losses left in: the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
 <meta name="twitter:image" content="https://xerj.org/og/xerj-card.png">
 <script type="application/ld+json">
 {
@@ -59,7 +59,7 @@
   "@context": "https://schema.org",
   "@type": "CollectionPage",
   "name": "XERJ.ai — Blog: the engineering log",
-  "description": "Measured results with the losses left in: the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
+  "description": "Measured results with the losses left in: the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
   "url": "https://xerj.org/blog/",
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
@@ -126,6 +126,54 @@
   <!-- Reverse-chronological by hand while there is one post; new posts PREPEND.
        Move to a generator only past ~10 posts. -->
   <ol class="blog-list">
+    <li>
+      <a class="bl-card" href="/blog/the-corpus-hub">
+        <!-- Bars share one denominator per row (that row's max). Neutral bar =
+             the plain arm / native baseline, accent bar = the corpus arm.
+             Figures verbatim from the post and its sources: reference-coding
+             case study 26,477 vs 9,982 median output tokens / $3.27 vs $1.58;
+             A/B audit 13 vs 16 dynamically confirmed, 1 FP vs 0, and the row
+             that decided the verdict — 0 findings traceable to the corpus. -->
+        <div class="bl-preview" aria-hidden="true">
+          <div class="blp-kicker">CORPUS HUB · PINNED · LICENCED · SIGNED · OPEN PRS</div>
+          <div class="blp-row">
+            <div class="blp-ds">REFCODING OUT TOK</div>
+            <div class="blp-pair">
+              <span class="blp-num">26,477 <i>native</i></span><span class="blp-bar b" style="width:100%"></span>
+              <span class="blp-num">9,982 <i>retrieval</i> <span class="blp-chip">2.7&times;</span></span><span class="blp-bar a" style="width:37.7%"></span>
+            </div>
+          </div>
+          <div class="blp-row">
+            <div class="blp-ds">COST / 16 TASKS</div>
+            <div class="blp-pair">
+              <span class="blp-num">$3.27 <i>native</i></span><span class="blp-bar b" style="width:100%"></span>
+              <span class="blp-num">$1.58 <i>retrieval</i> <span class="blp-chip">2.1&times;</span></span><span class="blp-bar a" style="width:48.3%"></span>
+            </div>
+          </div>
+          <div class="blp-row">
+            <div class="blp-ds">SECURITY A/B</div>
+            <div class="blp-pair">
+              <span class="blp-num">13 + 1 FP <i>plain</i></span><span class="blp-bar b" style="width:81%"></span>
+              <span class="blp-num">16 + 0 FP <i>corpus</i></span><span class="blp-bar a" style="width:100%"></span>
+            </div>
+          </div>
+          <p class="blp-foot">4 reference corpora + 1 signed pack · 0 corpus-traceable findings · the tie, published</p>
+        </div>
+        <div class="bl-meta">
+          <p class="bl-date"><time datetime="2026-10-01">2026-10-01</time> · CORPUS HUB · AGENT CONTEXT</p>
+          <h2 class="bl-title">The Corpus Hub: pinned, licenced, signed, and contributed by pull request</h2>
+          <p class="bl-excerpt">Agent context is everyone's private plumbing: unknown vintage, unknown
+          licence, no checksum, no signature. The Corpus Hub makes it a registry — four reference
+          corpora and a signed daily pack, every source pinned to the SHA the build used and
+          licence-reviewed by a human. The measured use case: same <strong>16/16</strong> solve rate at
+          <strong>2.7&times; fewer output tokens</strong>. And the experiment we did not want: our own
+          security A/B <strong>tied</strong> — <strong>zero</strong> findings traceable to the corpus &mdash;
+          so the hub ships with that row in the table and a code-shaped pack as its roadmap.</p>
+          <p class="bl-byline">AUTHOR · XERJ ENGINEERING TEAM · PUBLISHED · 2026-10-01</p>
+          <span class="bl-read">READ THE POST &rarr;</span>
+        </div>
+      </a>
+    </li>
     <li>
       <a class="bl-card" href="/blog/the-rc80-gates">
         <!-- Bar widths are normalized WITHIN each row against that row's own

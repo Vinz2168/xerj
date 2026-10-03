@@ -146,10 +146,21 @@ PAGES: dict[str, dict[str, str]] = {
         description="Ten features, eight measured gates: /_ask macro-F1 0.9975, xerj_map 20/30 to 0/30, calibration ECE 0.0088 pass; the judge, the flywheel and the decide head fail their bars, numbers published.",
         published="2026-09-30", updated="2026-09-30",
     ),
+    # Corpus Hub launch post, 2026-10-01. Numbers trace to: docs/case-studies/
+    # reference-coding/SUMMARY.md (16/16, 9,982 vs 26,477, $1.58 vs $3.27),
+    # benchmarks/corpus-ab-2026-10/RESULTS.md (13 vs 16 confirmed, 1 vs 0 FP,
+    # zero corpus-traceable findings — the tie, published as a tie), and the
+    # registry itself on the corpus-hub branch (4 manifests + 1 recipe).
+    "blog/the-corpus-hub.html": dict(
+        label="The Corpus Hub", kind="article",
+        title="The Corpus Hub: pinned, licenced, signed, contributed by PR",
+        description="A public registry of corpora for AI agents: reference code pinned to SHAs, record packs ed25519-signed, every source licence-reviewed by a human. The measured use case (2.7× fewer output tokens), the tie we published anyway, and how to contribute yours by PR.",
+        published="2026-10-01", updated="2026-10-01",
+    ),
     "blog/index.html": dict(
         label="Blog", kind="collection",
         title="XERJ.ai — Blog: the engineering log",
-        description="Measured results with the losses left in: the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
+        description="Measured results with the losses left in: the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
         updated="2026-09-30",
     ),
     "demo/index.html": dict(
@@ -309,6 +320,13 @@ PAGES: dict[str, dict[str, str]] = {
     "docs/cli.html": dict(
         label="CLI reference", kind="techarticle",
         description="The xerj command line — server flags, config and data-dir overrides, and the autoindex, index, brain and mcp subcommands that drive a running node.",
+    ),
+    # Registry + contribution guide for the corpus-hub branch; mirrors
+    # tools/xerj-code/hub/CONTRIBUTING.md on that branch (the branch is the
+    # source of record for rules; this page is the walkthrough).
+    "docs/corpus-hub.html": dict(
+        label="Corpus Hub", kind="techarticle",
+        description="The corpus registry: two lanes (reference corpora and record packs), the manifest and recipe formats field by field, the human licence-review contract, and the pull-request path with CI validation.",
     ),
     "docs/config.html": dict(
         label="Config TOML", kind="techarticle",
