@@ -2,7 +2,14 @@
 
 This roadmap tracks capabilities that are **planned but not yet fully implemented**, so the project's public claims stay honest about what ships today versus what is coming. Status is verified against the actual code and by real API requests to the release binary, not aspirational.
 
-Last reviewed: 2026-09-30 (against `v1.0.0-rc.80` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.80 release-cut roll: the rc.79 milestone was folded into rc.80 by direction (no rc.79 tag exists), the ten-item program below is executed whole with its gate verdicts — wins and losses — folded into the rc.80 cut record, and the open-defects shortlist was re-verified against the live tracker at cut time (five open: #1091–#1094 from the gate runs, #1100 from the release's own console review) — the lesson of 2026-09-21, when several entries went stale within hours of that review, is why the shortlist is checked live at the cut rather than desk-carried. Later the same day the tracker was emptied: everything open after the cut — #1038, #1030, #1031, #1032 — was closed (the two shipped-half epics are in the rc.78 record below, the two defects are recorded below as deferred, not fixed), leaving zero open issues. The 2026-09-26 desk review (PR [#1036](https://github.com/xerj-org/xerj/pull/1036)) stands as recorded: it closed the CHANGELOG-gap GA item (the rc.19–rc.70 backfill, PR [#1035](https://github.com/xerj-org/xerj/pull/1035)), marked the stage-2 object-storage item done ([#965](https://github.com/xerj-org/xerj/issues/965) wired in rc.77), and corrected the mail-ingest memory line to the post-[#1002](https://github.com/xerj-org/xerj/pull/1002) reality. The *Shipping today* claims were last live-verified against rc.76 (unchanged by this pass), and *The zero-token direction* below was verified separately on 2026-09-18, against `main` @ `4d8dadbf`.
+Last reviewed: 2026-10-03 (against `v1.0.0-rc.81` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.81 release-cut roll: the open-defects shortlist was
+re-verified against the live tracker at cut time — **four open** (#1091,
+#1092, #1094 from the rc.80 gate runs; #1100 from the console review);
+#1093 was closed inside the window by PR
+[#1112](https://github.com/xerj-org/xerj/pull/1112) (strict unknown-field
+refusal) and moves to the CHANGELOG — the lesson of 2026-09-21, when several
+entries went stale within hours of that review, is why the shortlist is
+checked live at the cut rather than desk-carried. Later the same day the tracker was emptied: everything open after the cut — #1038, #1030, #1031, #1032 — was closed (the two shipped-half epics are in the rc.78 record below, the two defects are recorded below as deferred, not fixed), leaving zero open issues. The 2026-09-26 desk review (PR [#1036](https://github.com/xerj-org/xerj/pull/1036)) stands as recorded: it closed the CHANGELOG-gap GA item (the rc.19–rc.70 backfill, PR [#1035](https://github.com/xerj-org/xerj/pull/1035)), marked the stage-2 object-storage item done ([#965](https://github.com/xerj-org/xerj/issues/965) wired in rc.77), and corrected the mail-ingest memory line to the post-[#1002](https://github.com/xerj-org/xerj/pull/1002) reality. The *Shipping today* claims were last live-verified against rc.76 (unchanged by this pass), and *The zero-token direction* below was verified separately on 2026-09-18, against `main` @ `4d8dadbf`.
 
 ## Follow the roadmap
 
@@ -33,15 +40,19 @@ The release-by-release record of how all of this landed is [CHANGELOG.md](./CHAN
 
 ## Next release — [v1.0.0](https://github.com/xerj-org/xerj/milestone/2)
 
-The GA window. **rc.80 was cut on 2026-09-30** — its full contents are the
+The GA window. **rc.81 was cut on 2026-10-03** — its full contents are the
 [CHANGELOG.md](./CHANGELOG.md) entry, not this file. It is **the
-measured-gates release**: the ten-item program to the first official release
-([discussion #1054](https://github.com/xerj-org/xerj/discussions/1054),
+agent-intake release**: the zero-experience E2E harness and its four
+defect fixes, `.pptx`/`.xlsx` extraction, the #1122 abort-under-memory-
+pressure engine fix, and the public Corpus Hub at hub.xerj.org with the
+G7 grade standing between a corpus and "live". **rc.80** (2026-09-30) was
+the measured-gates release — the ten-item program to the first official
+release ([discussion #1054](https://github.com/xerj-org/xerj/discussions/1054),
 #1055–#1064) executed whole with every acceptance criterion measured on the
-release binary — three gates passed outright, three failed and ship opt-in or
-behind a flag with the numbers published, one split; the blog post
-([the rc.80 gates](https://xerj.org/blog/the-rc80-gates)) carries each verdict.
-The decide ladder is the release's spine — tier-2 local head behind
+release binary — three gates passed outright, three failed and ship opt-in
+or behind a flag with the numbers published, one split; the blog post
+([the rc.80 gates](https://xerj.org/blog/the-rc80-gates)) carries each
+verdict. The decide ladder is that release's spine — tier-2 local head behind
 `--decide-mode local` (arming on the stock binary since PR
 [#1097](https://github.com/xerj-org/xerj/pull/1097)), `p_cal` beside every
 `p_raw` ([#1080](https://github.com/xerj-org/xerj/pull/1080),
@@ -67,21 +78,21 @@ and the console review's), the #1062 wrong-and-confident detection gate, the
 `xerj-decide-v1` Hugging Face publication (operator credentials), and the GA
 bar itself — *The road to v1.0.0 GA* below.
 
-**Open defects.** Five, all live on the tracker at cut time — the shortlist
-the release-notes gate checks. From the rc.80 gate runs:
+**Open defects.** Four, all live on the tracker at rc.81 cut time — the
+shortlist the release-notes gate checks. From the rc.80 gate runs:
 [#1091](https://github.com/xerj-org/xerj/issues/1091) (hybrid first stage
 13–26 s/query on the 57,638-doc FiQA index),
 [#1092](https://github.com/xerj-org/xerj/issues/1092) (`_settings` does not
 echo the analysis block; `_analyze` shows the standard path under a declared
-stemmer), [#1093](https://github.com/xerj-org/xerj/issues/1093) (unknown
-field in `term`/`match`/`range`/`exists` is a silent 0-hit 200, not a 4xx)
-and [#1094](https://github.com/xerj-org/xerj/issues/1094) (decision flywheel
-write-back freezes once the history index has BM25 support). From the
-release's own console knowledge-surface review:
+stemmer) and [#1094](https://github.com/xerj-org/xerj/issues/1094) (decision
+flywheel write-back freezes once the history index has BM25 support). From
+the rc.80 console knowledge-surface review:
 [#1100](https://github.com/xerj-org/xerj/issues/1100) (second-brain
-belief-time frame rendered on non-note corpora). Two siblings it filed,
-#1098 and #1099, were fixed and closed by the same PR (#1095) inside this
-release and are recorded in the CHANGELOG, not carried here.
+belief-time frame rendered on non-note corpora). **Closed inside the rc.81
+window and recorded in the CHANGELOG, not carried here:** #1093 (unknown
+lookup fields — strict refusal shipped with PR
+[#1112](https://github.com/xerj-org/xerj/pull/1112)); its siblings #1098 and
+#1099 were closed by #1095 inside rc.80.
 
 ## The road to [v1.0.0 GA](https://github.com/xerj-org/xerj/milestone/2)
 
