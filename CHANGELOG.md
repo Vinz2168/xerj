@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.81] - 2026-10-03
+
+The agent-intake release — everything between rc.80 and this cut serves the
+same turn: an agent (or a first-time user) points XERJ at a folder or a
+document and gets a searchable index without being told "unzip it first" or
+silently indexing junk. The window's spine is the **zero-experience E2E
+harness** ([#1106](https://github.com/xerj-org/xerj/pull/1106)):
+`demo/playbooks/AGENT_FTX_HARNESS.md` runs a no-prior-knowledge agent
+through folder onboarding end to end with a reference run recorded — and its
+findings were fixed as defects, not filed and forgotten: the naive path's
+four E2E failures ([#1107](https://github.com/xerj-org/xerj/pull/1107),
+issues #1102–#1105), JSONL with a fat first line indexing as one junk
+record ([#1113](https://github.com/xerj-org/xerj/pull/1113)), and Office /
+OpenDocument / EPUB archives named instead of advised-to-unzip
+([#1114](https://github.com/xerj-org/xerj/pull/1114)). Two new extractors
+join the autoindex family on the same one-record-per-unit rule:
+PowerPoint decks, one record per slide
+([#1117](https://github.com/xerj-org/xerj/pull/1117)), and Excel workbooks,
+one dataset per sheet ([#1124](https://github.com/xerj-org/xerj/pull/1124),
+carrying the community contribution of #1120 rebased). The engine fix the
+window is proudest of came from our own corpus-indexing crash: under memory
+exhaustion a background `std::thread::spawn` **panics** (never returns
+`Err`), and with `panic = "abort"` one ENOMEM at flush time took the whole
+node down (issue [#1122](https://github.com/xerj-org/xerj/issues/1122)) —
+[#1123](https://github.com/xerj-org/xerj/pull/1123) adds a governor-backed
+`thread_spawn_safe` gate so the drain-free path drops inline instead of
+aborting the process. The **Corpus Hub** shipped publicly at
+[hub.xerj.org](https://hub.xerj.org) — registry-driven, every live corpus
+G7-graded against pre-registered suites
+([#1119](https://github.com/xerj-org/xerj/pull/1119)) — and the corpus
+A/B benchmark behind its honesty rule landed with the tie published
+([#1116](https://github.com/xerj-org/xerj/pull/1116), issue #1111: no X
+finding traces to corpus content; 33 confirmed defect classes, 2 shared).
+Strict unknown-field refusal ([#1112](https://github.com/xerj-org/xerj/pull/1112))
+closed defect #1093: opt-in strict mode 4xx's unknown lookup fields, and
+autoindex-created indices are strict at create. CLA signature
+[#1115](https://github.com/xerj-org/xerj/pull/1115) is process, not product.
+
+### Added
+
+- **Zero-experience E2E harness** — `AGENT_FTX_HARNESS.md` playbook with the
+  rc.80 reference run; re-runnable on shell, MCP-only and HTTP-only personas
+  (PR [#1106](https://github.com/xerj-org/xerj/pull/1106)).
+- **PowerPoint extraction** — `.pptx` autoindexed as one record per slide
+  (title, notes, shape text), joining DOCX/PDF/EPUB in the document family
+  (PR [#1117](https://github.com/xerj-org/xerj/pull/1117)).
+- **Excel extraction** — `.xlsx` autoindexed as one dataset per sheet with
+  headered columns typed from the first data row (PR
+  [#1124](https://github.com/xerj-org/xerj/pull/1124); community contribution
+  #1120 rebased onto main).
+- **Corpus Hub** — public registry site at hub.xerj.org, generated purely
+  from the corpus-hub branch registry; live status requires a G7 grade
+  against a suite pre-registered before retrieval (PR
+  [#1119](https://github.com/xerj-org/xerj/pull/1119)).
+
+### Fixed
+
+- **#1122 — node abort under memory pressure.** `std::thread::Builder::spawn`
+  panics (not `Err`) when the alternate signal stack cannot be mmap'd;
+  `panic = "abort"` turned that into SIGABRT for the whole process at flush
+  time under RSS exhaustion. `ResourceGovernor::thread_spawn_safe` now gates
+  the drain-free spawn: breaker engaged or live RSS ≥ watermark → drop
+  inline (PR [#1123](https://github.com/xerj-org/xerj/pull/1123); root-caused
+  from the persistent server log, repro and three fix directions on the
+  issue).
+- **Zero-experience naive path** — the four E2E defects the FTX harness
+  filed: wrong index-name derivation, progress-stream shapes a first-time
+  agent cannot parse, a misleading success on empty folders, and the
+  shell-assumption in the onboarding prose (PR
+  [#1107](https://github.com/xerj-org/xerj/pull/1107), issues
+  [#1102](https://github.com/xerj-org/xerj/issues/1102)–[#1105](https://github.com/xerj-org/xerj/issues/1105)).
+- **JSONL fat-first-line** — a first line larger than the sniff window sent
+  the whole file to one junk record; JSONL now indexes per line (PR
+  [#1113](https://github.com/xerj-org/xerj/pull/1113)).
+- **Office/OpenDocument/EPUB zips named** — autoindex extracts them itself;
+  the "run unzip" advice is gone (PR
+  [#1114](https://github.com/xerj-org/xerj/pull/1114)).
+- **#1093 — unknown lookup fields silently 0-hit.** Opt-in strict mode
+  returns a 4xx for unknown fields in `term`/`match`/`range`/`exists`;
+  autoindex indices are strict at create (PR
+  [#1112](https://github.com/xerj-org/xerj/pull/1112)).
+
+### Benchmarks
+
+- **Corpus A/B (#1111)** — fair two-arm protocol over 71 corpora; the tie
+  published: no X-arm finding traces to corpus content, P 13 vs X 16
+  dynamic-exploitable tasks, 33 confirmed defect classes of which 2 shared
+  (PR [#1116](https://github.com/xerj-org/xerj/pull/1116)).
+
 ## [1.0.0-rc.80] - 2026-09-30
 
 The measured-gates release — the ten-item program to the first official
