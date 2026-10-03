@@ -152,6 +152,30 @@ impl ResourceGovernor {
         self.memory_tripped.load(Ordering::Relaxed)
     }
 
+    /// Whether it is safe to spawn a helper thread right now (#1122).
+    ///
+    /// `std::thread::Builder::spawn` **panics** — it does not return `Err` —
+    /// when the new thread's alternate signal stack cannot be mmap'd under
+    /// memory exhaustion, and the shipped profile is `panic = "abort"`, so one
+    /// ENOMEM at spawn time aborts the whole node. Callers on flush/publish
+    /// paths that have an inline fallback must check this and take the
+    /// fallback instead of spawning.
+    ///
+    /// Reads the *live* RSS (`current_rss_bytes`), not the sampler's last
+    /// value, so an RSS spike between samples cannot sneak a spawn through;
+    /// the engaged breaker flag is the second, sampled signal. With no RSS
+    /// probe or no configured watermark this returns `true` — spawning is
+    /// unrestricted, exactly the pre-#1122 behaviour.
+    pub fn thread_spawn_safe(&self) -> bool {
+        if self.memory_breaker_engaged() {
+            return false;
+        }
+        if self.memory_watermark_bytes == 0 {
+            return true;
+        }
+        current_rss_bytes() < self.memory_watermark_bytes
+    }
+
     /// Disk flood-stage admission. Returns an ES-shaped
     /// `read_only_allow_delete` cluster block (HTTP 429) when the data-dir
     /// filesystem is over the flood-stage watermark. `index` names the
@@ -689,6 +713,13 @@ pub fn init(config: &Config) -> Arc<ResourceGovernor> {
 /// unchanged for them.
 pub fn global() -> Option<Arc<ResourceGovernor>> {
     GOVERNOR.get().map(Arc::clone)
+}
+
+/// Global form of [`ResourceGovernor::thread_spawn_safe`] (#1122). Without an
+/// initialised governor (unit tests, library embedding) there is no watermark
+/// to protect, so spawning is unrestricted.
+pub fn thread_spawn_safe() -> bool {
+    global().map(|g| g.thread_spawn_safe()).unwrap_or(true)
 }
 
 fn build(config: &Config) -> ResourceGovernor {
@@ -1620,6 +1651,37 @@ mod tests {
         assert!(
             !g.memory_breaker_engaged(),
             "RSS back under the watermark releases it"
+        );
+    }
+
+    /// #1122: a spawn attempted while the breaker is engaged aborts the node
+    /// (std panics on the alternate-signal-stack mmap; release is
+    /// panic=abort), so `thread_spawn_safe` must refuse exactly then and
+    /// allow it again once pressure releases — the drain-free caller drops
+    /// the Arcs inline instead, which is the fallback that path was written
+    /// for.
+    #[test]
+    fn thread_spawn_safe_refuses_under_memory_pressure() {
+        let mut cfg = Config::default();
+        cfg.limits.max_total_memtable_mb = 0; // isolate the RSS path
+        cfg.limits.memory_watermark_percent = 95;
+        let g = build(&cfg);
+        let watermark = g.memory_watermark_bytes;
+        assert!(watermark > 0, "this test needs a live RSS watermark");
+        // Disengaged + this process's real RSS under the watermark.
+        assert!(
+            g.thread_spawn_safe(),
+            "healthy governor allows helper spawns"
+        );
+        g.refresh(0, watermark, 0);
+        assert!(
+            !g.thread_spawn_safe(),
+            "breaker engaged: spawning would risk #1122's abort"
+        );
+        g.refresh(0, watermark / 2, 0);
+        assert!(
+            g.thread_spawn_safe(),
+            "pressure released: helper spawns allowed again"
         );
     }
 
