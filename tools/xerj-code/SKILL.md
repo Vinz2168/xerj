@@ -68,6 +68,54 @@ Enterprise Edition** parts — check the header/path first. Read the design,
 write our own implementation. Each manifest's `review.use` field says which
 bucket a repo is in; `hub/README.md` explains the three.
 
+## Choosing a corpus for the project at hand
+
+The four engine corpora above are this repository's standing set. The full
+live catalogue — every corpus pinned, licence-reviewed and **G7-graded**
+(a five-question retrieval gate whose suite was pre-registered *before*
+retrieval ran) — is browsable at **[hub.xerj.org](https://hub.xerj.org)**
+and queryable live with `xerj corpus list --url <node>`. Pick by the
+project's domain, not by size:
+
+| the project is… | start with | why |
+|---|---|---|
+| a search / query engine | `xerj-search` | postings, BM25, merge policy, segment layout, ES wire semantics |
+| vector search / ANN | `xerj-vector` | HNSW build, neighbour heuristics, quantisation, filtered kNN |
+| storage engine / KV | `xerj-storage`, `duckdb`, `rocksdb`, `leveldb`, `badger`, `lmdb` | WAL, crash recovery, compaction, page allocation; LSM-vs-B trees |
+| analytical / columnar | `xerj-columnar`, `duckdb`, `arrow-rs`, `parquet-format`, `iceberg` | columnar layout, codecs, vectorised scans, table formats |
+| a database server | `sqlite-src`, `postgres-src` | parsers, planners, executors — the two most-studied codebases in the field |
+| messaging / consensus | `kafka-src`, `rabbitmq`, `nats-server`, `etcd-src`, `raft-rs`, `dragonboat` | log compaction, delivery semantics, quorum/lease correctness |
+| monitoring / timeseries | `influxdb`, `prometheus-src` | TSDB layout, downsampling, scrape/ingest paths |
+| TLS / crypto / tunnels | `rustls`, `openssl`, `s2n-tls`, `boringtun` | modern-TLS-by-hand, hardening precedent, constant-time patterns |
+| QUIC / HTTP / networking | `quinn`, `nghttp2`, `curl-src`, `libuv`, `caddy`, `envoy`, `nginx` | protocol state machines, connection pooling, event loops |
+| compression / serialization | `zstd`, `lz4`, `brotli`, `zlib-ng`, `snappy`, `protobuf`, `flatbuffers`, `capnproto`, `msgpack-c` | format design, blocked/entropy coding, zero-copy schemas |
+| secrets / config serving | `openbao` | KV store with seal/unseal, lease machinery |
+| API design review | `rust-api-guidelines`, `msft-api-guidelines` | naming, error shape, versioning — the two curated guideline sets |
+| protocol/spec conformance | `openapi-spec`, `graphql-spec`, `w3c-css`, `valkey-docs`, `nats-protocol` | the normative text an implementation is judged against |
+| production ops / SRE | `gitlab-runbooks`, `mozilla-ssl-configs`, `twelve-factor` | real incident playbooks, deployed TLS configs, deployment doctrine |
+| security review of dependencies | the `rust-vulns` pack (`xerj corpus add --from` the hub recipe) | real patched-vulna pairs, mined for #1111's defect-class study |
+| non-software (tax, employment, UK law) | `ecfr-title-12`, `ecfr-title-29`, `uk-legislation` | consolidated current regulation, section-per-file |
+
+Three rules that keep the choice honest:
+
+1. **A corpus only helps on code you have not memorised.** On popular
+   public library code the model already knows, retrieval is overhead —
+   the measured crossover is in `measure/DEVQA_RESULTS.md`. Private,
+   internal, niche and post-cutoff code is where it wins decisively
+   (bare-P 20% vs with-corpus-X 98% across 33 measured corpora —
+   `benchmarks/corpus-tasks/IMPACT.md`).
+2. **Shape beats size.** A corpus whose answer sits in one giant file
+   (a 3 MB single-page spec, a 50 MB JSON bundle) loses to a
+   section-per-file mirror of the same content — whole-file indexing skips
+   what it cannot chunk, and near-duplicate bundles crowd the answer. The
+   hub's G7 gate exists to catch exactly this; corpora that failed it were
+   demoted with the fix pre-registered, not padded into "live".
+3. **Cite what you adapted.** A retrieved hit is evidence of how *that*
+   project solved it under *its* licence and constraints — `file:line` in
+   the comment, and check the manifest's `review.use` bucket before
+   copying anything.
+
+
 ### Operational traps, both hit in practice
 
 - **Nothing under `/tmp`.** Clones live in `~/.xerj-code/corpora/`, the index in
