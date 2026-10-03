@@ -11,6 +11,7 @@
 //! and slide-number placeholders and `a:fld` field text are skipped: they
 //! repeat on every slide and carry nothing to retrieve.
 
+use super::opc::{attr, parse_rels, resolve_target, Budget};
 use super::{split_sections, ExtractStats, FieldOrigin, RawRecord, Sink, MAX_RECORDS_PER_FILE};
 use anyhow::{Context, Result};
 use quick_xml::events::{BytesStart, Event};
@@ -76,11 +77,7 @@ fn extract_bounded(path: &Path, name: &Path, sink: Sink, limits: Limits) -> Resu
     let mut stats = ExtractStats::default();
     let f = std::fs::File::open(path)?;
     let mut z = zip::ZipArchive::new(f).context("open pptx container")?;
-    let mut budget = Budget {
-        part: limits.part,
-        left: limits.total,
-        exhausted: false,
-    };
+    let mut budget = Budget::new(limits.part, limits.total);
 
     let order = slide_order(&mut z, &mut budget);
     let mut slides: Vec<Slide> = Vec::new();
@@ -165,34 +162,6 @@ fn extract_bounded(path: &Path, name: &Path, sink: Sink, limits: Limits) -> Resu
     Ok(stats)
 }
 
-/// Decompression budget shared by every part read from one container.
-struct Budget {
-    part: u64,
-    left: u64,
-    exhausted: bool,
-}
-
-impl Budget {
-    /// Read one part, or `None` when it is missing or the budget is spent.
-    fn read<R: Read + Seek>(&mut self, z: &mut zip::ZipArchive<R>, name: &str) -> Option<Vec<u8>> {
-        if self.left == 0 {
-            self.exhausted = true;
-            return None;
-        }
-        let entry = z.by_name(name).ok()?;
-        let cap = self.part.min(self.left);
-        let mut out = Vec::new();
-        // A read error mid-part keeps what was read; the XML parser stops at
-        // the damage like it does at a cap.
-        entry.take(cap).read_to_end(&mut out).ok();
-        self.left -= out.len() as u64;
-        if out.len() as u64 == cap {
-            self.exhausted = true;
-        }
-        Some(out)
-    }
-}
-
 /// Slide part names in presentation order. Falls back to `ppt/slides/slideN.xml`
 /// sorted by N when the presentation part or its relationships are unusable.
 fn slide_order<R: Read + Seek>(z: &mut zip::ZipArchive<R>, budget: &mut Budget) -> Vec<String> {
@@ -259,66 +228,6 @@ fn slide_rel_ids(xml: &[u8]) -> Vec<String> {
         buf.clear();
     }
     ids
-}
-
-struct Rel {
-    id: String,
-    kind: String,
-    target: String,
-}
-
-/// Internal relationships of an OPC `.rels` part.
-fn parse_rels(xml: &[u8]) -> Vec<Rel> {
-    let mut reader = Reader::from_reader(xml);
-    let mut buf = Vec::new();
-    let mut rels = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e))
-                if e.local_name().as_ref() == b"Relationship" =>
-            {
-                let external = attr(&e, |k| k == b"TargetMode").is_some_and(|m| m == "External");
-                if let (false, Some(id), Some(kind), Some(target)) = (
-                    external,
-                    attr(&e, |k| k == b"Id"),
-                    attr(&e, |k| k == b"Type"),
-                    attr(&e, |k| k == b"Target"),
-                ) {
-                    rels.push(Rel { id, kind, target });
-                }
-            }
-            Ok(Event::Eof) | Err(_) => break,
-            Ok(_) => {}
-        }
-        buf.clear();
-    }
-    rels
-}
-
-fn attr(e: &BytesStart, key: impl Fn(&[u8]) -> bool) -> Option<String> {
-    e.attributes()
-        .flatten()
-        .find(|a| key(a.key.as_ref()))
-        .map(|a| String::from_utf8_lossy(&a.value).into_owned())
-}
-
-/// Resolve a relationship target against the source part's directory. A
-/// leading `/` is relative to the package root.
-fn resolve_target(dir: &str, target: &str) -> String {
-    let mut parts: Vec<&str> = match target.strip_prefix('/') {
-        Some(_) => Vec::new(),
-        None => dir.split('/').filter(|s| !s.is_empty()).collect(),
-    };
-    for seg in target.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            s => parts.push(s),
-        }
-    }
-    parts.join("/")
 }
 
 #[derive(PartialEq)]
@@ -803,25 +712,5 @@ mod tests {
         let (some, stats) = run(&path, tight);
         assert!(stats.truncated);
         assert!(!some.is_empty() && some.len() < 20, "{}", some.len());
-    }
-
-    #[test]
-    fn relationship_targets_resolve_like_opc() {
-        assert_eq!(
-            resolve_target("ppt", "slides/slide1.xml"),
-            "ppt/slides/slide1.xml"
-        );
-        assert_eq!(
-            resolve_target("ppt/slides", "../notesSlides/notesSlide1.xml"),
-            "ppt/notesSlides/notesSlide1.xml"
-        );
-        assert_eq!(
-            resolve_target("ppt/slides", "/ppt/notesSlides/n.xml"),
-            "ppt/notesSlides/n.xml"
-        );
-        assert_eq!(
-            resolve_target("ppt", "./slides/./s.xml"),
-            "ppt/slides/s.xml"
-        );
     }
 }

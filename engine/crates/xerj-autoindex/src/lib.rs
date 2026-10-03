@@ -1840,6 +1840,7 @@ fn sample_limit_bytes(family: Family, path: &Path) -> Option<u64> {
         // multi-GB Takeout export costs phase A a few MB of reading.
         Family::Mbox => Some(SAMPLE_LIMIT_BYTES),
         Family::Sqlite => Some(1), // signals per-table row cap inside the extractor
+        Family::Xlsx => Some(1),   // likewise a per-sheet row cap
         _ => None,                 // whole-file extractors cap themselves
     }
 }
@@ -2375,7 +2376,7 @@ fn scan_file(
     // untyped.
     let grouped_family = matches!(
         sn.family,
-        Family::SqlDump | Family::Sqlite | Family::UnityYaml
+        Family::SqlDump | Family::Sqlite | Family::Xlsx | Family::UnityYaml
     );
     let mut sink = |rec: extract::RawRecord| -> bool {
         let entry = groups.entry(rec.group.clone()).or_default();
@@ -2773,6 +2774,155 @@ mod phase_a_grouping_tests {
             .find(|d| d.slug == "memcached-data")
             .unwrap();
         assert!(data.specs.iter().any(|s| s.name == "email"), "{data:#?}");
+    }
+
+    /// A minimal Excel workbook: inline-string text, numbers, and style 1 =
+    /// built-in date format 14 so a serial reads as a date.
+    fn write_xlsx(path: &Path, sheets: &[(&str, &[&[&str]])]) {
+        use std::io::Write;
+        let cell = |r: usize, c: usize, v: &str| {
+            let at = format!("{}{}", (b'A' + c as u8) as char, r + 1);
+            match v.strip_prefix('#') {
+                Some(serial) => format!(r#"<c r="{at}" s="1"><v>{serial}</v></c>"#),
+                None if v.parse::<f64>().is_ok() => format!(r#"<c r="{at}"><v>{v}</v></c>"#),
+                None => format!(r#"<c r="{at}" t="inlineStr"><is><t>{v}</t></is></c>"#),
+            }
+        };
+        let ns = r#"xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+        let rel_t = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        let mut put = |name: &str, body: String| {
+            z.start_file(name, opts).unwrap();
+            z.write_all(body.as_bytes()).unwrap();
+        };
+        let list: String = (0..sheets.len())
+            .map(|i| {
+                format!(
+                    r#"<sheet name="{}" sheetId="{}" r:id="rId{}"/>"#,
+                    sheets[i].0,
+                    i + 1,
+                    i + 1
+                )
+            })
+            .collect();
+        put(
+            "xl/workbook.xml",
+            format!("<workbook {ns}><sheets>{list}</sheets></workbook>"),
+        );
+        let rels: String = (0..sheets.len())
+            .map(|i| {
+                format!(
+                    r#"<Relationship Id="rId{}" Type="{rel_t}/worksheet" Target="worksheets/sheet{}.xml"/>"#,
+                    i + 1,
+                    i + 1
+                )
+            })
+            .collect();
+        put(
+            "xl/_rels/workbook.xml.rels",
+            format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{rels}<Relationship Id="rIdT" Type="{rel_t}/styles" Target="styles.xml"/></Relationships>"#
+            ),
+        );
+        put(
+            "xl/styles.xml",
+            format!(
+                r#"<styleSheet {ns}><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="14"/></cellXfs></styleSheet>"#
+            ),
+        );
+        for (i, (_, rows)) in sheets.iter().enumerate() {
+            let data: String = rows
+                .iter()
+                .enumerate()
+                .map(|(r, cells)| {
+                    let cs: String = cells
+                        .iter()
+                        .enumerate()
+                        .map(|(c, v)| cell(r, c, v))
+                        .collect();
+                    format!(r#"<row r="{}">{cs}</row>"#, r + 1)
+                })
+                .collect();
+            put(
+                &format!("xl/worksheets/sheet{}.xml", i + 1),
+                format!("<worksheet {ns}><sheetData>{data}</sheetData></worksheet>"),
+            );
+        }
+        z.finish().unwrap();
+    }
+
+    /// Workbooks through the real planner. Each worksheet is its own group, so
+    /// the same `Sales` sheet in two quarterly files clusters into ONE data
+    /// dataset, typed from the cells (a date-formatted serial elects `date`,
+    /// not `long`). A sheet with no header row is rendered as a document and
+    /// joins the scope's document dataset beside the README, so one file is
+    /// assigned to both.
+    #[test]
+    fn workbooks_plan_a_dataset_per_sheet_schema_and_documents_for_form_sheets() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("README.md"), PROSE).unwrap();
+        for (name, month, revenue) in [("q1", "#46023", "1250"), ("q2", "#46113", "980.5")] {
+            write_xlsx(
+                &root.join(format!("{name}.xlsx")),
+                &[
+                    (
+                        "Sales",
+                        &[
+                            &["Quarterly sales"],
+                            &["Region", "Month", "Revenue"],
+                            &["EMEA", month, revenue],
+                            &["APAC", month, "700"],
+                        ],
+                    ),
+                    (
+                        "Assumptions",
+                        &[&["Discount rate", "0.08"], &["Owner", "Finance team"]],
+                    ),
+                ],
+            );
+        }
+
+        let plan = plan_for(root);
+        let sales: Vec<_> = plan
+            .datasets
+            .iter()
+            .filter(|d| d.group.as_deref() == Some("Sales"))
+            .collect();
+        assert_eq!(sales.len(), 1, "{:#?}", plan.datasets);
+        let sales = sales[0];
+        assert_eq!(sales.file_count, 2, "both quarters share the sheet schema");
+        let spec = |name: &str| sales.specs.iter().find(|s| s.name == name).unwrap();
+        assert_eq!(spec("Month").es_type, "date", "{:#?}", sales.specs);
+        assert!(
+            spec("Month")
+                .date_min
+                .as_deref()
+                .is_some_and(|d| d.starts_with("2026-01-01")),
+            "{:#?}",
+            spec("Month")
+        );
+        assert_eq!(spec("Revenue").es_type, "double");
+        assert!(
+            !sales.specs.iter().any(|s| s.name == "Quarterly_sales"),
+            "the title row is not a header"
+        );
+
+        let docs = plan.datasets.iter().find(|d| d.family == "docs").unwrap();
+        assert_eq!(docs.file_count, 3, "README + each workbook's form sheet");
+        let by_rel: HashMap<&str, &FileAssignment> =
+            plan.files.values().map(|f| (f.rel.as_str(), f)).collect();
+        let mut q1 = by_rel["q1.xlsx"].assignments.clone();
+        q1.sort();
+        assert_eq!(
+            q1,
+            [
+                (None, docs.slug.clone()),
+                (Some("Sales".to_string()), sales.slug.clone())
+            ]
+        );
+        assert_eq!(by_rel["q1.xlsx"].family, "xlsx");
     }
 
     /// #196: the same tree WITHOUT nested `.git` markers (or with one at the
