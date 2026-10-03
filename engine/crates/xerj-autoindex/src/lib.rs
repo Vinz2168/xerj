@@ -2343,7 +2343,13 @@ fn scan_file(
     // whole-file families get a size cap; streaming families don't need one
     let whole_file = matches!(
         sn.family,
-        Family::Json | Family::Html | Family::Yaml | Family::TxtProse | Family::Pdf | Family::Docx
+        Family::Json
+            | Family::Html
+            | Family::Yaml
+            | Family::TxtProse
+            | Family::Pdf
+            | Family::Docx
+            | Family::Pptx
     );
     if whole_file && size > max_file_gb * GB {
         out.junk = Some((
