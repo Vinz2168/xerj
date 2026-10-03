@@ -65,6 +65,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offsets and positions match on all 24 probed requests. Only the wording of
   the reason differs on 3 of the 400s.
 
+- **`sort: [{"_doc": ...}]` is arrival order, not `_id` order** — the `_doc`
+  sort key projected the document id string, so `_doc` pages ranked
+  lexicographically by `_id` (matching neither ES index order nor XERJ's own
+  stored order). The key is now the document's `seq_no`: numeric arrival
+  order, unique per live doc (no ties), and a working `search_after` cursor.
+  `_id` sort still echoes the id string.
+
 ## [1.0.0-rc.85] - 2026-10-06
 
 The cluster-ring-works window. One defect fix and one docs correction,
