@@ -1525,7 +1525,9 @@ fn yaml_like_count(lines: &[&str]) -> usize {
 fn markdown_signature(nonblank: &[&str]) -> bool {
     let atx = |t: &str| {
         let hashes = t.chars().take_while(|c| *c == '#').count();
-        (1..=6).contains(&hashes) && t[hashes..].starts_with(' ') && !t[hashes + 1..].trim().is_empty()
+        (1..=6).contains(&hashes)
+            && t[hashes..].starts_with(' ')
+            && !t[hashes + 1..].trim().is_empty()
     };
     let mut has_heading = false;
     let mut markers = 0usize;
@@ -3578,7 +3580,10 @@ mod tests {
     /// parses keeps YAML.
     #[test]
     fn xml_and_real_yaml_survive_the_1142_guards() {
-        assert_eq!(classify("<root>\n  <a>1</a>\n  <b>2</b>\n</root>"), Family::Xml);
+        assert_eq!(
+            classify("<root>\n  <a>1</a>\n  <b>2</b>\n</root>"),
+            Family::Xml
+        );
         assert_eq!(
             classify("<?xml version='1.0'?>\n<r>\n  <a># not a heading</a>\n</r>"),
             Family::Xml
@@ -3597,14 +3602,20 @@ mod tests {
         fn n(s: &str) -> Vec<&str> {
             s.lines().filter(|l| !l.trim().is_empty()).collect()
         }
-        assert!(markdown_signature(&n(
-            "# T\n\n- a\n- b\n- c\n"
-        )));
-        assert!(!markdown_signature(&n("- a\n- b\n- c\n- d\n")), "no heading");
-        assert!(!markdown_signature(&n("# T\n\n- a\n- b\n")), "only 2 markers");
-        assert!(!markdown_signature(&n("#NotAHeading\n\n- a\n- b\n- c\n")), "no space");
+        assert!(markdown_signature(&n("# T\n\n- a\n- b\n- c\n")));
+        assert!(
+            !markdown_signature(&n("- a\n- b\n- c\n- d\n")),
+            "no heading"
+        );
+        assert!(
+            !markdown_signature(&n("# T\n\n- a\n- b\n")),
+            "only 2 markers"
+        );
+        assert!(
+            !markdown_signature(&n("#NotAHeading\n\n- a\n- b\n- c\n")),
+            "no space"
+        );
     }
-
 
     /// `[package]`-style openers are TOML/INI table headers, not JSON
     /// arrays. Before the guard, Cargo.toml sniffed as Json, the JSON
