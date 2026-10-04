@@ -103,7 +103,11 @@ project's domain, not by size:
 | triaging an active campaign | `cisa-alerts` | CISA advisory IOCs, required actions and mitigations (2025-05..2026-10 window) |
 | querying endpoint visibility | `osquery-config-examples` | real deployed osquery packs and scheduled-query shapes |
 | non-software (tax, employment, UK law) | `ecfr-title-12`, `ecfr-title-29`, `ecfr-title-26`, `uk-legislation` | consolidated current regulation, section-per-file |
+| aviation (FARs) | `ecfr-title-14` | 14 CFR section-per-file: visibility minimums, transponder airspace, inspection intervals, right-of-way |
+| maritime rules of the road | `navrules` | COMDTINST M16672.2D per-rule text — risk of collision, narrow channels, crossing situations, lights and sound signals |
+| accessible UI components | `govuk-design-system` | GOV.UK component options and accessibility criteria — the exact option semantics (maxwords vs maxlength, divider text, focus-on-load) |
 | pharma / drug labels | `dailymed` | FDA label sections: indications, contraindications, administration timing |
+| clinical treatment guidance | `cdc-clinical` | CDC STI treatment regimens and doses, syphilis desensitization, measles clinical signs |
 
 Three rules that keep the choice honest:
 
