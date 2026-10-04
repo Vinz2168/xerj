@@ -1262,7 +1262,16 @@ fn classify_text(text: &str, nonblank: &[&str]) -> Family {
             }
         }
     }
-    if leads_with_marker || yaml_line_ratio(nonblank) >= 0.6 {
+    // #1142: `yaml_line_ratio` counts `Label:` prose headers and `- ` bullets
+    // as YAML evidence, so "labeled prose" — a short `id:`/`title:` header
+    // followed by `Statement:`/`Guidance:` paragraphs, the shape of every
+    // NIST/OSCAL control file — scores ~0.7, went to the YAML extractor, and
+    // was junk-filed (measured: 400 of 722 files in one corpus silently never
+    // indexed). The discriminator the frontmatter branch already uses applies
+    // here too: labeled prose does not parse as a YAML stream, a real
+    // key:value mapping does. The parse only runs for files the line tier
+    // already judged YAML-majority, and on the sniff prefix.
+    if leads_with_marker || (yaml_line_ratio(nonblank) >= 0.6 && parses_as_yaml_stream(text)) {
         return Family::Yaml;
     }
 
@@ -1424,11 +1433,22 @@ fn classify_structured(text: &str, nonblank: &[&str]) -> Option<Family> {
     if head_lc.contains("<!doctype html") || head_lc.contains("<html") {
         return Some(Family::Html);
     }
-    if head_lc.contains("<?xml") || (trimmed.starts_with('<') && text.contains("</")) {
+    let xml_decl = head_lc.contains("<?xml");
+    if xml_decl || (trimmed.starts_with('<') && text.contains("</")) {
         // xhtml disguised as xml?
         let lc: String = text.to_lowercase();
         if lc.contains("<html") || lc.contains("<body") {
             return Some(Family::Html);
+        }
+        // #1142: markdown that merely OPENS with an HTML fragment — a Hugo
+        // `<!--- … --->` front-matter comment, an `<a name="…"></a>` anchor, a
+        // floated `<div>` — took the XML branch here, and the XML extractor
+        // junk-filed the not-well-formed document (whole chapters and every
+        // `*-spans.md` convention page of one corpus). A whole-file markdown
+        // signature outranks the leading `<`; only declared-`<?xml` documents
+        // are exempt, so XML with embedded markdown CDATA keeps its family.
+        if !xml_decl && markdown_signature(nonblank) {
+            return None;
         }
         return Some(Family::Xml);
     }
@@ -1491,6 +1511,43 @@ fn yaml_like_count(lines: &[&str]) -> usize {
             re.is_match(l) || (t.starts_with("- ") && !checkbox)
         })
         .count()
+}
+
+/// #1142: does this text carry a whole-file markdown signature — at least one
+/// ATX heading plus three further markdown marker lines (list items, table
+/// rows, fences, links/images)? Used only to keep markdown that opens with an
+/// HTML fragment out of the XML family, whose extractor junk-files
+/// not-well-formed documents. Real XML/HTML documents carry no ATX headings,
+/// so the pairing is one-sided on purpose. Measured on the corpus that exposed
+/// the defect: `cover.md` 2 headings + 13 markers, `sec5_authenticators.md`
+/// 77 markers, semconv `http-spans.md` 83 — all junked as XML before, all
+/// text afterwards.
+fn markdown_signature(nonblank: &[&str]) -> bool {
+    let atx = |t: &str| {
+        let hashes = t.chars().take_while(|c| *c == '#').count();
+        (1..=6).contains(&hashes)
+            && t[hashes..].starts_with(' ')
+            && !t[hashes + 1..].trim().is_empty()
+    };
+    let mut has_heading = false;
+    let mut markers = 0usize;
+    for l in nonblank {
+        let t = l.trim_start();
+        if atx(t) {
+            has_heading = true;
+            continue;
+        }
+        let marker = t.starts_with("- ")
+            || t.starts_with("* ")
+            || t.starts_with("+ ")
+            || t.starts_with('|')
+            || t.starts_with("```")
+            || t.contains("](");
+        if marker {
+            markers += 1;
+        }
+    }
+    has_heading && markers >= 3
 }
 
 /// Does `text` parse as a YAML stream of structured documents — i.e. was the
@@ -3452,6 +3509,111 @@ mod tests {
         assert_eq!(
             classify("key: value\nother: 1\nnested:\n  a: 2\n"),
             Family::Yaml
+        );
+    }
+
+    /// #1142 class 1: markdown opening with an HTML fragment (Hugo front-matter
+    /// comment, anchor) must NOT take the XML family — the XML extractor
+    /// junk-files the not-well-formed document. This is the semconv
+    /// `http-spans.md` / `database-spans.md` shape (every `*-spans.md`
+    /// convention page was silently unindexed).
+    #[test]
+    fn markdown_with_leading_html_fragment_stays_text() {
+        let hugo = "<!--- Hugo front matter used to generate the website version of this page:\n\
+                    linkTitle: Spans\n--->\n\n\
+                    # Semantic conventions for HTTP spans\n\n\
+                    **Status**: [Stable][DocumentStatus]\n\n\
+                    - one\n- two\n- three\n\n\
+                    | a | b |\n|---|---|\n| 1 | 2 |\n";
+        assert!(
+            matches!(classify(hugo), Family::TxtProse | Family::TxtLines),
+            "text, not XML: {:?}",
+            classify(hugo)
+        );
+
+        let anchor = "<a name=\"sec5\"></a>\n\n\
+                      ## 5 Authenticator Lifecycle Management\n\n\
+                      See [the spec](spec.md) for details.\n\n\
+                      - verifier action\n- claim\n- assertion\n";
+        assert!(
+            matches!(classify(anchor), Family::TxtProse | Family::TxtLines),
+            "text, not XML: {:?}",
+            classify(anchor)
+        );
+
+        let floated_div = "<div class=\"text-right\" markdown=\"1\">\n\n\
+                           # Digital Identity Guidelines\n\n\
+                           ![](media/div-1.png)\n\n\
+                           - ed1\n- ed2\n- ed3\n";
+        assert!(
+            matches!(classify(floated_div), Family::TxtProse | Family::TxtLines),
+            "text, not XML: {:?}",
+            classify(floated_div)
+        );
+    }
+
+    /// #1142 class 2: labeled prose — a short `id:`/`title:` header followed by
+    /// `Statement:`/`Guidance:` paragraphs (every NIST/OSCAL control file) —
+    /// scores ~0.7 on `yaml_line_ratio` but does not parse as YAML; it must
+    /// stay text instead of being junk-filed by the YAML extractor.
+    #[test]
+    fn labeled_prose_with_yaml_shaped_header_stays_text() {
+        let control = "id: SP_800_171_03.08.04\n\
+                       title: Media Marking\n\
+                       family: Media Protection (SP_800_171_03.08)\n\
+                       class: requirement\n\n\
+                       Statement:\n\
+                       Mark system media that contain CUI to indicate distribution limitations, handling caveats.\n\n\
+                       Guidance:\n\
+                       System media include digital and non-digital media, and marking is human-readable.\n\n\
+                       References:\n\
+                       - MP-03\n";
+        assert!(
+            matches!(classify(control), Family::TxtProse | Family::TxtLines),
+            "text, not YAML: {:?}",
+            classify(control)
+        );
+    }
+
+    /// The guards are one-sided: real XML (no ATX headings) and declared
+    /// `<?xml` documents keep their families, and a mapping that actually
+    /// parses keeps YAML.
+    #[test]
+    fn xml_and_real_yaml_survive_the_1142_guards() {
+        assert_eq!(
+            classify("<root>\n  <a>1</a>\n  <b>2</b>\n</root>"),
+            Family::Xml
+        );
+        assert_eq!(
+            classify("<?xml version='1.0'?>\n<r>\n  <a># not a heading</a>\n</r>"),
+            Family::Xml
+        );
+        assert_eq!(classify("a: 1\nb: 2\nc: 3\n"), Family::Yaml);
+        assert_eq!(
+            classify("key: value\nother: 1\nnested:\n  a: 2\n"),
+            Family::Yaml
+        );
+        // A pure `- item` list IS a valid YAML sequence and stays YAML.
+        assert_eq!(classify("- one\n- two\n- three\n- four\n"), Family::Yaml);
+    }
+
+    #[test]
+    fn markdown_signature_needs_heading_and_three_markers() {
+        fn n(s: &str) -> Vec<&str> {
+            s.lines().filter(|l| !l.trim().is_empty()).collect()
+        }
+        assert!(markdown_signature(&n("# T\n\n- a\n- b\n- c\n")));
+        assert!(
+            !markdown_signature(&n("- a\n- b\n- c\n- d\n")),
+            "no heading"
+        );
+        assert!(
+            !markdown_signature(&n("# T\n\n- a\n- b\n")),
+            "only 2 markers"
+        );
+        assert!(
+            !markdown_signature(&n("#NotAHeading\n\n- a\n- b\n- c\n")),
+            "no space"
         );
     }
 
