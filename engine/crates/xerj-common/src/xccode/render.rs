@@ -117,9 +117,13 @@ fn render_hit(h: &Value, licences: &HashMap<String, String>, opts: &RenderOpts) 
     };
     let mut out = format!("\n─── {loc}  ({shown}{lic_part})\n");
 
+    // `body` is the content field of every family EXCEPT plain text
+    // (`.txt` mirrors put their passage in `text`) — fall back so those
+    // records render a real passage, not an empty one (#1139).
     let body = src
         .get("body")
         .and_then(Value::as_str)
+        .or_else(|| src.get("text").and_then(Value::as_str))
         .unwrap_or("")
         .to_string();
 
