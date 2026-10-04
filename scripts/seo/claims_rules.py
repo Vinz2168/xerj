@@ -1644,9 +1644,10 @@ THING_MATRIX = [
      "cite": "engine/crates/xerj-autoindex/src/extract/xlsx.rs:1",
      "gate": ("Write, SCOPED TO .xlsx. Each sheet becomes a table under its detected header "
               "row; a sheet with no header is indexed as one document. Say what it does not do: "
-              "one table per sheet, merged cells are not expanded, and a formula with no cached "
-              "value (files written by openpyxl or pandas) has no value to index. Not .xls, .xlsb "
-              "or .ods."),
+              "one table per sheet; vertical merges are filled down and a two-row grouped header "
+              "is combined into the column names (Q1_Jan), but a merge across columns is not "
+              "expanded; and a formula with no cached value (files written by openpyxl or "
+              "pandas) has no value to index. Not .xls, .xlsb or .ods."),
      "aliases": [r"\bxlsx\b", r"\bexcel\b", r"spreadsheets?", r"workbooks?"]},
     {"thing": "PowerPoint decks (.pptx)", "status": GREEN,
      "mech": "pptx.rs - one record per slide, slide title, tables, speaker notes",
@@ -1654,6 +1655,17 @@ THING_MATRIX = [
      "gate": ("Write, SCOPED TO .pptx. Text only: one record per slide with its title, table rows "
               "and speaker notes. No images, no OCR of slide pictures, not .ppt or .odp."),
      "aliases": [r"\bpptx\b", r"powerpoint", r"slide decks?"]},
+    # Not in the research doc: man pages had no extractor (a roff page sniffed as plain
+    # text lines, macros and all) until extract/man.rs (#1134). mdoc(7) pages - the BSD
+    # macro set, e.g. ssh(1) - are not parsed and still index as plain text.
+    {"thing": "Man pages (roff man(7))", "status": GREEN,
+     "mech": "man.rs - one record per .SH section, title NAME(SECT), NAME summary, gzip read",
+     "cite": "engine/crates/xerj-autoindex/src/extract/man.rs:1",
+     "gate": ("Write, SCOPED TO man(7) pages, plain or gzipped (.1.gz). Text only: one record per "
+              "section with the page title and the NAME summary. mdoc(7) pages (BSD macros, e.g. "
+              "ssh.1) are NOT parsed - they index as plain text lines. No rendering, no apropos/"
+              "whatis database, no info pages."),
+     "aliases": [r"man ?pages?", r"manpages?", r"roff", r"troff", r"groff"]},
     {"thing": "Legacy / other office formats (.xls, .ppt, .xlsb, OpenDocument)", "status": RED,
      "mech": "no extractor - sniff.rs names .xlsb and OpenDocument with an export hint", "cite": RC + ":378",
      "gate": "No extractor. Tell the reader to save as .xlsx / .pptx / .docx first; do not write a page.",

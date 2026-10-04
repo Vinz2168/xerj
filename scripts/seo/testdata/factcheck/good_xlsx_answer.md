@@ -18,5 +18,5 @@ header row, with numbers, booleans and dates kept as typed fields.
 xerj autoindex ./finance
 ```
 
-A sheet is read as one table, merged cells are not expanded, and a legacy
-`.xls` file must be saved as `.xlsx` first.
+A sheet is read as one table, a merge across columns is not expanded, and a
+legacy `.xls` file must be saved as `.xlsx` first.
