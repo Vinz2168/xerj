@@ -235,10 +235,8 @@ pub fn run_code_query(
     let fetch = diversity_fetch(params.k);
 
     let (mut resp, hits) = match params.mode {
-        Mode::Bm25 => match http.search(
-            &pattern,
-            &bm25_body(&query, fetch, &params.lang, &fields),
-        ) {
+        Mode::Bm25 => match http.search(&pattern, &bm25_body(&query, fetch, &params.lang, &fields))
+        {
             Ok(r) => (r.clone(), hit_list(&r)),
             Err(e) => return CodeOutcome::refused(format!("search failed: {e}"), 2),
         },
@@ -285,10 +283,7 @@ pub fn run_code_query(
                     "BM25 only — no usable semantic_text mapping for `body` could be \
                      discovered under '{pattern}'"
                 ));
-                match http.search(
-                    &pattern,
-                    &bm25_body(&query, fetch, &params.lang, &fields),
-                ) {
+                match http.search(&pattern, &bm25_body(&query, fetch, &params.lang, &fields)) {
                     Ok(r) => (r.clone(), hit_list(&r)),
                     Err(e) => return CodeOutcome::refused(format!("search failed: {e}"), 2),
                 }
@@ -960,11 +955,26 @@ mod tests {
         let (page, dropped) = diversify(hits, 5);
         let files: Vec<&str> = page
             .iter()
-            .map(|h| h.pointer("/_source/ax_file").and_then(Value::as_str).unwrap())
+            .map(|h| {
+                h.pointer("/_source/ax_file")
+                    .and_then(Value::as_str)
+                    .unwrap()
+            })
             .collect();
-        assert_eq!(files, vec!["compatibility", "compatibility", "pagination",
-                               "security", "http-headers"]);
-        assert_eq!(dropped, 6, "8 compatibility hits -> 2 kept, 6 skipped, rank order kept");
+        assert_eq!(
+            files,
+            vec![
+                "compatibility",
+                "compatibility",
+                "pagination",
+                "security",
+                "http-headers"
+            ]
+        );
+        assert_eq!(
+            dropped, 6,
+            "8 compatibility hits -> 2 kept, 6 skipped, rank order kept"
+        );
     }
 
     /// A page that cannot fill is returned SHORT, not padded back up with the
@@ -972,10 +982,12 @@ mod tests {
     #[test]
     fn a_single_files_wall_yields_a_short_page() {
         let hits: Vec<Value> = (0..10)
-            .map(|i| serde_json::json!({
-                "_score": 10.0 - i as f64,
-                "_source": { "ax_file": "spec.md", "body": format!("chunk {i}") }
-            }))
+            .map(|i| {
+                serde_json::json!({
+                    "_score": 10.0 - i as f64,
+                    "_source": { "ax_file": "spec.md", "body": format!("chunk {i}") }
+                })
+            })
             .collect();
         let (page, dropped) = diversify(hits, 5);
         assert_eq!(page.len(), 2);
