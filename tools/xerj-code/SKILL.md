@@ -108,6 +108,11 @@ project's domain, not by size:
 | accessible UI components | `govuk-design-system` | GOV.UK component options and accessibility criteria — the exact option semantics (maxwords vs maxlength, divider text, focus-on-load) |
 | pharma / drug labels | `dailymed` | FDA label sections: indications, contraindications, administration timing |
 | clinical treatment guidance | `cdc-clinical` | CDC STI treatment regimens and doses, syphilis desensitization, measles clinical signs |
+| food-service safety | `fda-food-code` | FDA Food Code 2022 provisions: hand-contact surfaces, Time as a Public Health Control, date marking, bare-hand readiness |
+| traffic control devices | `mutcd` | FHWA MUTCD 11th Ed (Rev 1): sign and signal warrants, markings, work-zone typical applications |
+| building works (England) | `uk-building-regs` | Building Regulations 2010 (SI 2010/2214) per-provision: Parts A–P requirements, Wales variants labelled, 44ZB/44ZC dual numbering documented |
+| EU digital regulation | `eurlex-core` | GDPR, AI Act, DSA, DMA, NIS2 per-article and per-recital from the EUR-Lex Cellar (annexes excluded by design) |
+| accessibility (built environment) | `ada-2010` | ADA 2010 Standards: reach ranges, clear floor space, slope ratios, per-section |
 
 Three rules that keep the choice honest:
 
