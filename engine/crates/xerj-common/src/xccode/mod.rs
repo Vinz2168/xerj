@@ -230,10 +230,14 @@ pub fn run_code_query(
     let mut note: Option<String> = None;
     let mut rrf_scores = false;
 
-    let (resp, hits) = match params.mode {
+    // #1137: fetch deeper than the page so the per-file cap has candidates
+    // to draw on; the page is cut back to `params.k` after diversification.
+    let fetch = diversity_fetch(params.k);
+
+    let (mut resp, hits) = match params.mode {
         Mode::Bm25 => match http.search(
             &pattern,
-            &bm25_body(&query, params.k, &params.lang, &fields),
+            &bm25_body(&query, fetch, &params.lang, &fields),
         ) {
             Ok(r) => (r.clone(), hit_list(&r)),
             Err(e) => return CodeOutcome::refused(format!("search failed: {e}"), 2),
@@ -266,7 +270,7 @@ pub fn run_code_query(
                     "vector only over {} of {total} index(es)",
                     capable.len()
                 ));
-                let body = semantic_body(&query, params.k, &params.lang);
+                let body = semantic_body(&query, fetch, &params.lang);
                 match http.search(&capable.join(","), &body) {
                     Ok(r) => (r.clone(), hit_list(&r)),
                     Err(e) => return CodeOutcome::refused(format!("search failed: {e}"), 2),
@@ -283,7 +287,7 @@ pub fn run_code_query(
                 ));
                 match http.search(
                     &pattern,
-                    &bm25_body(&query, params.k, &params.lang, &fields),
+                    &bm25_body(&query, fetch, &params.lang, &fields),
                 ) {
                     Ok(r) => (r.clone(), hit_list(&r)),
                     Err(e) => return CodeOutcome::refused(format!("search failed: {e}"), 2),
@@ -313,7 +317,7 @@ pub fn run_code_query(
                         } else {
                             capable.join(",")
                         };
-                        let body = hybrid_body(&query, params.k, &params.lang, &fields);
+                        let body = hybrid_body(&query, fetch, &params.lang, &fields);
                         match http.search(&target, &body) {
                             Ok(r) => {
                                 rrf_scores = true;
@@ -355,7 +359,7 @@ pub fn run_code_query(
                                 ));
                                 match http.search(
                                     &pattern,
-                                    &bm25_body(&query, params.k, &params.lang, &fields),
+                                    &bm25_body(&query, fetch, &params.lang, &fields),
                                 ) {
                                     Ok(r) => (r.clone(), hit_list(&r)),
                                     Err(e) => {
@@ -374,9 +378,25 @@ pub fn run_code_query(
         }
     };
 
-    // 5. --json: the raw response stays machine-readable while the exit-code
-    //    contract is unchanged (empty hits STILL exit 1).
+    // 5. #1137: cut the overfetched window back to the page, capping records
+    //    per source file, and patch the diversified page into the response so
+    //    `--json` consumers see the SAME list the prose renderer does (the
+    //    G7 grader is one). A page that shrank says so in the note.
+    let (hits, dropped) = diversify(hits, params.k);
+    if dropped > 0 {
+        let cap = format!(
+            "top-k diversified: ≤{MAX_PER_FILE} records per source file \
+             ({dropped} same-file neighbours skipped)"
+        );
+        note = Some(match note.take() {
+            Some(n) => format!("{n}; {cap}"),
+            None => cap,
+        });
+    }
     if params.as_json {
+        if let Some(hits_arr) = resp.pointer_mut("/hits/hits").and_then(Value::as_array_mut) {
+            *hits_arr = hits.clone();
+        }
         return CodeOutcome {
             text: String::new(),
             warnings,
@@ -436,6 +456,51 @@ pub(crate) fn hit_list(resp: &Value) -> Vec<Value> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
+}
+
+/// Top-k diversity cap (#1137): at most this many records per source FILE in
+/// a result page. The autoindex chunker (`SECTION_CHARS` = 2 KB, 200-char
+/// overlap) turns one lexically dominant file into a wall of near-identical
+/// neighbours that fills the whole top-k — measured 3–4 of 5 slots on the
+/// zalando and otel G7 suites while the expected file never ranked.
+/// Reference coding wants five FILES more than five passages of one.
+pub(crate) const MAX_PER_FILE: usize = 2;
+
+/// Fetch depth that gives the cap candidates to draw on: 10×k, bounded so a
+/// k=50 page does not become a 500-hit fetch, and never below k itself.
+pub(crate) fn diversity_fetch(k: usize) -> usize {
+    k.saturating_mul(10).min(200).max(k)
+}
+
+/// Cap records per `_source.ax_file` at [`MAX_PER_FILE`], truncate to `want`,
+/// preserving rank order. Returns the page and how many same-file neighbours
+/// the cap skipped while filling it. A hit with no `ax_file` is never grouped
+/// (missing provenance must not cost a slot).
+pub(crate) fn diversify(hits: Vec<Value>, want: usize) -> (Vec<Value>, usize) {
+    // Keys are owned: a borrowed &str would pin every hit it came from and
+    // forbid the move into `out` below.
+    let mut per_file: HashMap<String, usize> = HashMap::new();
+    let mut out = Vec::with_capacity(want.min(hits.len()));
+    let mut dropped = 0usize;
+    for h in hits {
+        let key = h
+            .pointer("/_source/ax_file")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if let Some(f) = key {
+            let n = per_file.entry(f).or_insert(0);
+            if *n >= MAX_PER_FILE {
+                dropped += 1;
+                continue;
+            }
+            *n += 1;
+        }
+        out.push(h);
+        if out.len() == want {
+            break;
+        }
+    }
+    (out, dropped)
 }
 
 /// The measured BM25 body: flat `multi_match` over mapping-resolved fields
@@ -634,13 +699,14 @@ mod tests {
         assert_eq!(
             body,
             serde_json::json!({
-                "size": 5,
+                "size": 50,
                 "query": { "bool": { "must": [
                     { "multi_match": { "query": "addReplyNull",
                         "fields": ["body", "defs", "title"] } }
                 ]}}
             }),
-            "mapping-resolved fields (defs_expanded dropped); no highlight, no _source projection"
+            "mapping-resolved fields (defs_expanded dropped); no highlight, no _source \
+             projection; size is the #1137 diversity fetch (10x k=5), cut back to k after"
         );
         assert!(out
             .text
@@ -799,7 +865,8 @@ mod tests {
                 .map(Vec::len),
             Some(2)
         );
-        assert_eq!(hybrid.pointer("/size"), Some(&serde_json::json!(5)));
+        // #1137: the hybrid leg overfetches like every other mode (10x k=5).
+        assert_eq!(hybrid.pointer("/size"), Some(&serde_json::json!(50)));
         // The arms-ran note says BOTH arms and the lexical-only exclusion.
         assert!(
             out.text
@@ -870,5 +937,68 @@ mod tests {
         );
         assert_eq!(out.exit, 2);
         assert!(out.text.contains("search failed"), "{}", out.text);
+    }
+
+    /// #1137: one dominant file's adjacent 2 KB chunks must not fill the
+    /// whole page. 8 hits from `compatibility` + 3 from other files, k=5:
+    /// at most 2 compatibility records survive, the page fills with the
+    /// next-ranked files, and the note says the cap ran.
+    #[test]
+    fn one_file_may_not_fill_the_page() {
+        let mk = |file: &str, i: usize| {
+            serde_json::json!({
+                "_score": 10.0 - i as f64,
+                "_source": { "ax_file": file, "ax_path": file,
+                             "body": format!("passage {i} of {file}") }
+            })
+        };
+        let mut hits: Vec<Value> = (0..8).map(|i| mk("compatibility", i)).collect();
+        hits.push(mk("pagination", 8));
+        hits.push(mk("security", 9));
+        hits.push(mk("http-headers", 10));
+
+        let (page, dropped) = diversify(hits, 5);
+        let files: Vec<&str> = page
+            .iter()
+            .map(|h| h.pointer("/_source/ax_file").and_then(Value::as_str).unwrap())
+            .collect();
+        assert_eq!(files, vec!["compatibility", "compatibility", "pagination",
+                               "security", "http-headers"]);
+        assert_eq!(dropped, 6, "8 compatibility hits -> 2 kept, 6 skipped, rank order kept");
+    }
+
+    /// A page that cannot fill is returned SHORT, not padded back up with the
+    /// very neighbours the cap exists to suppress.
+    #[test]
+    fn a_single_files_wall_yields_a_short_page() {
+        let hits: Vec<Value> = (0..10)
+            .map(|i| serde_json::json!({
+                "_score": 10.0 - i as f64,
+                "_source": { "ax_file": "spec.md", "body": format!("chunk {i}") }
+            }))
+            .collect();
+        let (page, dropped) = diversify(hits, 5);
+        assert_eq!(page.len(), 2);
+        assert_eq!(dropped, 8);
+    }
+
+    /// Missing provenance is not a reason to drop a hit: hits without
+    /// `ax_file` never group together.
+    #[test]
+    fn hits_without_ax_file_never_group() {
+        let hits: Vec<Value> = (0..4)
+            .map(|i| serde_json::json!({ "_score": 4.0 - i as f64, "_source": { "body": "b" } }))
+            .collect();
+        let (page, dropped) = diversify(hits, 5);
+        assert_eq!(page.len(), 4, "no ax_file -> no cap applies");
+        assert_eq!(dropped, 0);
+    }
+
+    /// 10x k, capped at 200, never below k.
+    #[test]
+    fn fetch_depth_bounds() {
+        assert_eq!(diversity_fetch(5), 50);
+        assert_eq!(diversity_fetch(50), 200);
+        assert_eq!(diversity_fetch(1), 10);
     }
 }
