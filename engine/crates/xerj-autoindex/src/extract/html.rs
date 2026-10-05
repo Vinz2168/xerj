@@ -12,11 +12,17 @@ use anyhow::Result;
 use serde_json::{Map, Value};
 use std::path::Path;
 
+/// What the tokenizer reads from one page. The EPUB extractor reads each
+/// chapter through [`parse`] and uses `headings` and `body`.
 #[derive(Default)]
-struct Doc {
-    title: String,
-    headings: Vec<String>,
-    body: String,
+pub(crate) struct Doc {
+    pub(crate) title: String,
+    pub(crate) headings: Vec<String>,
+    pub(crate) body: String,
+    /// `(id, byte offset in body)` for each element carrying an `id` (or an
+    /// `<a name>`), in document order: where that element's text begins. EPUB
+    /// splits a chapter file at its table-of-contents anchors with these.
+    pub(crate) anchors: Vec<(String, usize)>,
     tables: Vec<Vec<Vec<String>>>, // tables → rows → cells
     header_cells: Vec<Vec<bool>>,  // per table: was first row <th>?
 }
@@ -153,7 +159,7 @@ fn dominant_table(doc: &Doc) -> Option<(&Vec<Vec<String>>, bool)> {
     })
 }
 
-fn parse(html: &str) -> Doc {
+pub(crate) fn parse(html: &str) -> Doc {
     let mut doc = Doc::default();
     let bytes = html.as_bytes();
     let mut i = 0usize;
@@ -224,6 +230,11 @@ fn parse(html: &str) -> Doc {
             let (tag_end, self_closing) = scan_tag(bytes, j);
 
             flush_text(&mut cur_text, &text_sink, &mut doc, &mut cur_cell);
+            if !close {
+                if let Some(id) = anchor_id(&html[j..tag_end], &name) {
+                    doc.anchors.push((id, doc.body.len()));
+                }
+            }
 
             // Raw-text elements. Their contents are code, so jump the cursor
             // straight to the literal close tag rather than tokenizing them:
@@ -428,6 +439,65 @@ fn raw_text_end(bytes: &[u8], from: usize, name: &[u8]) -> usize {
         p = at + 1;
     }
     bytes.len()
+}
+
+/// The anchor an opening tag defines: its `id`, or the `name` of an `<a>`
+/// (the pre-HTML5 form many EPUB 2 books still link to). `attrs` is the tag
+/// text after the element name.
+fn anchor_id(attrs: &str, element: &str) -> Option<String> {
+    let b = attrs.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let start = i;
+        while i < b.len() && (b[i].is_ascii_whitespace() || b[i] == b'/') {
+            i += 1;
+        }
+        let key_start = i;
+        while i < b.len() && !b[i].is_ascii_whitespace() && !matches!(b[i], b'=' | b'/') {
+            i += 1;
+        }
+        let key = &attrs[key_start..i];
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let mut value = None;
+        if i < b.len() && b[i] == b'=' {
+            i += 1;
+            while i < b.len() && b[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < b.len() && matches!(b[i], b'"' | b'\'') {
+                let q = b[i];
+                let v = i + 1;
+                i = v;
+                while i < b.len() && b[i] != q {
+                    i += 1;
+                }
+                value = Some(&attrs[v..i]);
+                i = (i + 1).min(b.len());
+            } else {
+                let v = i;
+                while i < b.len() && !b[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                value = Some(&attrs[v..i]);
+            }
+        }
+        if let Some(v) = value {
+            if key.eq_ignore_ascii_case("id")
+                || (element == "a" && key.eq_ignore_ascii_case("name"))
+            {
+                let v = decode_entities(v.trim());
+                if !v.is_empty() {
+                    return Some(v);
+                }
+            }
+        }
+        if i == start {
+            i += 1;
+        }
+    }
+    None
 }
 
 /// End the body's current line (`n` = 1) or paragraph (`n` = 2): drop the
@@ -809,6 +879,28 @@ mod tests {
         );
         let last = body_of(recs.last().unwrap());
         assert!(last.contains("one\ntwo"), "list items stay lines: {last:?}");
+    }
+
+    /// EPUB splits chapter files at table-of-contents anchors, so `parse`
+    /// records where each `id` (and each `<a name>`) begins in the body.
+    #[test]
+    fn anchors_record_ids_and_a_names_where_their_text_begins() {
+        let doc = parse(
+            "<p>intro</p><h2 id=\"c1\">One</h2><p data-id=\"no\" class=x>a</p>             <a name='c2'></a><p id=c3 >b</p><span name=\"no\">c</span>             <div ID = \"Q&amp;A\">d</div>",
+        );
+        let ids: Vec<&str> = doc.anchors.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["c1", "c2", "c3", "Q&A"]);
+        for (id, at) in &doc.anchors {
+            let rest = doc.body[*at..].trim_start();
+            let want = match id.as_str() {
+                "c1" => "One",
+                "c2" | "c3" => "b",
+                _ => "d",
+            };
+            assert!(rest.starts_with(want), "{id} at {at}: {rest:?}");
+        }
+        assert_eq!(anchor_id(" id", "p"), None, "a bare attribute has no value");
+        assert_eq!(anchor_id(" id=\"\"", "p"), None);
     }
 
     #[test]

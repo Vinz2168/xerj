@@ -7,6 +7,7 @@ pub mod code;
 pub mod csv_x;
 pub mod docx;
 pub mod eml;
+pub mod epub;
 pub mod html;
 pub mod json;
 pub mod jsonl;
@@ -213,6 +214,7 @@ pub fn extract(
         Family::Mbox => mbox::extract(path, sn.gzip, limit_bytes, sink),
         Family::Docx => docx::extract(path, sink),
         Family::Pptx => pptx::extract(path, sn.logical_name.as_deref().unwrap_or(path), sink),
+        Family::Epub => epub::extract(path, sn.logical_name.as_deref().unwrap_or(path), sink),
         Family::Man => man::extract(
             path,
             sn.logical_name.as_deref().unwrap_or(path),

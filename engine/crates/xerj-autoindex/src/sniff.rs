@@ -34,6 +34,10 @@ pub enum Family {
     /// Excel workbook: one dataset per worksheet, one record per row under
     /// the sheet's header row, typed from the stored cell values.
     Xlsx,
+    /// EPUB e-book: chapters in reading order (spine documents, cut at their
+    /// table-of-contents anchors), with the book's metadata and each
+    /// chapter's title from the table of contents.
+    Epub,
     /// Man page (roff man(7) source, often gzipped): one record per `.SH`
     /// section, titled from `.TH`. Detected by content, never extension.
     Man,
@@ -77,6 +81,7 @@ impl Family {
             Family::Docx => "docx",
             Family::Pptx => "pptx",
             Family::Xlsx => "xlsx",
+            Family::Epub => "epub",
             Family::Man => "man",
             Family::Sqlite => "sqlite",
             Family::SqlDump => "sqldump",
@@ -95,6 +100,7 @@ impl Family {
             Family::Pdf
                 | Family::Docx
                 | Family::Pptx
+                | Family::Epub
                 | Family::Man
                 | Family::TxtProse
                 | Family::Eml
@@ -236,7 +242,8 @@ fn sniff_bytes(
         return Ok(mk(Family::Sqlite));
     }
     if prefix.starts_with(b"PK\x03\x04") {
-        // zip container: DOCX/PPTX by their main part; another known document
+        // zip container: DOCX/PPTX/XLSX by their main part, EPUB by its
+        // `mimetype` member; another known document
         // container is named for what it is, not as an archive
         let mut kind = "zip";
         if !gzip {
@@ -247,6 +254,7 @@ fn sniff_bytes(
                         "docx" => return Ok(mk(Family::Docx)),
                         "pptx" => return Ok(mk(Family::Pptx)),
                         "xlsx" => return Ok(mk(Family::Xlsx)),
+                        "epub" => return Ok(mk(Family::Epub)),
                         _ => {}
                     }
                 }
@@ -1099,8 +1107,8 @@ fn looks_like_tar_header(prefix: &[u8]) -> bool {
     stored == computed
 }
 
-/// Name a zip container by its members: `"docx"`, `"pptx"` or `"xlsx"`
-/// (extracted), another document format autoindex has no extractor for
+/// Name a zip container by its members: `"docx"`, `"pptx"`, `"xlsx"` or
+/// `"epub"` (extracted), another document format autoindex has no extractor for
 /// (`"xlsb"`, `"odt"`, …), or `"zip"` for anything else.
 ///
 /// Office Open XML, OpenDocument and EPUB are all zips, so the `PK` magic alone
@@ -1145,7 +1153,6 @@ pub fn unsupported_document_advice(binary_kind: &str) -> Option<String> {
         "odt" => ("OpenDocument text", "export it as DOCX or PDF"),
         "ods" => ("OpenDocument spreadsheet", "save it as .xlsx"),
         "odp" => ("OpenDocument presentation", "save it as .pptx"),
-        "epub" => ("EPUB e-book", "convert it to PDF"),
         _ => return None,
     };
     Some(format!(
@@ -4257,7 +4264,7 @@ mod zip_container_sniff_tests {
                 ("mimetype", "application/epub+zip"),
                 ("META-INF/container.xml", "<container/>"),
             ]),
-            binary("epub")
+            (Family::Epub, None)
         );
     }
 
@@ -4283,7 +4290,7 @@ mod zip_container_sniff_tests {
 
     #[test]
     fn unsupported_documents_get_an_export_hint_not_archive_advice() {
-        for k in ["xlsb", "odt", "ods", "odp", "epub"] {
+        for k in ["xlsb", "odt", "ods", "odp"] {
             assert_eq!(archive_advice(k, false), None, "{k}");
             let advice = unsupported_document_advice(k).unwrap();
             assert!(
@@ -4305,7 +4312,9 @@ mod zip_container_sniff_tests {
         assert!(unsupported_document_advice("odp")
             .unwrap()
             .contains(".pptx"));
-        for k in ["zip", "tar", "png", "docx", "pptx", "xlsx", "unknown", ""] {
+        for k in [
+            "zip", "tar", "png", "docx", "pptx", "xlsx", "epub", "unknown", "",
+        ] {
             assert_eq!(unsupported_document_advice(k), None, "{k}");
         }
     }

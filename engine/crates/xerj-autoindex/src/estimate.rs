@@ -121,6 +121,7 @@ pub fn exact_scan_bytes(
         | Family::Code
         | Family::Docx
         | Family::Pptx
+        | Family::Epub
         | Family::Man
         | Family::Eml
         | Family::Pdf => Some(size),
@@ -613,6 +614,7 @@ mod tests {
             Family::Code,
             Family::Docx,
             Family::Pptx,
+            Family::Epub,
             Family::Man,
             Family::Pdf,
         ] {
@@ -704,6 +706,7 @@ mod tests {
             Family::Mbox,
             Family::Docx,
             Family::Pptx,
+            Family::Epub,
             Family::Man,
             Family::Xlsx,
             Family::Sqlite,
