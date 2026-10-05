@@ -13,7 +13,10 @@ The corpus-hub hundred release. The engine window is small — one retrieval
 fix and three extractor PRs — while the reference-coding catalogue reached
 **100 live, licence-reviewed, G7-graded corpora at
 [hub.xerj.org](https://hub.xerj.org)**, every one of them now named in the
-`xerj-code` skill's domain-selection table.
+`xerj-code` skill's domain-selection table (PR
+[#1164](https://github.com/xerj-org/xerj/pull/1164); the five SKILL-row
+additions of the rc.82 window rode in as PR
+[#1157](https://github.com/xerj-org/xerj/pull/1157)).
 
 ### Fixed
 
