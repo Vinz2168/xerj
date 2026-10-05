@@ -279,9 +279,7 @@ fn parse(html: &str) -> Doc {
                         // text never reaches the body any other way, and a
                         // table that is not the dominant one is not emitted
                         // as rows. An empty cell keeps its column.
-                        if !doc.body.is_empty() && !doc.body.ends_with('\n') {
-                            doc.body.push('\n');
-                        }
+                        line_break(&mut doc.body, 2);
                         for row in &cur_table {
                             if row.iter().any(|c| !c.is_empty()) {
                                 doc.body.push_str(&row.join(" | "));
@@ -312,16 +310,16 @@ fn parse(html: &str) -> Doc {
                     cur_row_th.push(name == "th");
                     cur_cell = Some(String::new());
                 }
-                (false, "br")
-                | (false, "p")
-                | (true, "p")
-                | (false, "div")
-                | (true, "div")
-                | (false, "li")
-                | (true, "tr")
-                    if !doc.body.ends_with('\n') && !doc.body.is_empty() =>
-                {
-                    doc.body.push('\n');
+                // Block boundaries are blank lines: `split_sections` packs
+                // paragraphs at `\n\n`, so a single newline here made a page
+                // of paragraphs one paragraph, hard-cut mid-word. Line-level
+                // breaks (`br`, list items, table rows) stay single newlines,
+                // so a list or a table stays one block.
+                (_, "p") | (_, "div") | (true, "ul") | (true, "ol") => {
+                    line_break(&mut doc.body, 2);
+                }
+                (false, "br") | (false, "li") | (true, "tr") => {
+                    line_break(&mut doc.body, 1);
                 }
                 _ => {}
             }
@@ -430,6 +428,20 @@ fn raw_text_end(bytes: &[u8], from: usize, name: &[u8]) -> usize {
         p = at + 1;
     }
     bytes.len()
+}
+
+/// End the body's current line (`n` = 1) or paragraph (`n` = 2): drop the
+/// space `flush_text` leaves after a run of text, then make the body end in
+/// at least `n` newlines. Nothing is added to an empty body.
+fn line_break(body: &mut String, n: usize) {
+    body.truncate(body.trim_end_matches(' ').len());
+    if body.is_empty() {
+        return;
+    }
+    let have = body.len() - body.trim_end_matches('\n').len();
+    for _ in have..n {
+        body.push('\n');
+    }
 }
 
 fn normalize_ws(s: &str) -> String {
@@ -765,6 +777,38 @@ mod tests {
             3,
             "{body:?}"
         );
+    }
+
+    /// `split_sections` packs paragraphs at blank lines. A `<p>` used to end
+    /// with a single newline, so a page of paragraphs was ONE paragraph to it
+    /// and was hard-cut every `SECTION_CHARS` bytes, mid-word; the heading
+    /// before such a run was emitted as a section on its own. Paragraph and
+    /// div ends are now blank lines, so sections end where paragraphs do.
+    #[test]
+    fn sections_of_a_long_page_end_at_paragraph_ends() {
+        let para = |i: usize| format!("Paragraph {i} {} end{i}.", "lorem ipsum dolor ".repeat(24));
+        let html: String = std::iter::once("<html><body><h1>Title</h1>".to_string())
+            .chain((0..10).map(|i| format!("<p>{}</p>", para(i))))
+            .chain(std::iter::once(
+                "<ul><li>one</li><li>two</li></ul><p>tail</p></body></html>".into(),
+            ))
+            .collect();
+        let (stats, recs) = run("long.html", &html);
+        assert!(stats.records > 1, "{} bytes split", html.len());
+        for r in &recs[..recs.len() - 1] {
+            let body = body_of(r).trim_end();
+            assert!(
+                (0..10).any(|i| body.ends_with(&format!("end{i}."))),
+                "section ends mid-paragraph: ...{:?}",
+                &body[body.len().saturating_sub(40)..]
+            );
+        }
+        assert!(
+            body_of(&recs[0]).len() > 100,
+            "the heading is not a section of its own"
+        );
+        let last = body_of(recs.last().unwrap());
+        assert!(last.contains("one\ntwo"), "list items stay lines: {last:?}");
     }
 
     #[test]
