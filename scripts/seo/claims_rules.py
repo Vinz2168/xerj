@@ -1665,7 +1665,7 @@ THING_MATRIX = [
               "section with the page title and the NAME summary. mdoc(7) pages (BSD macros, e.g. "
               "ssh.1) are NOT parsed - they index as plain text lines. No rendering, no apropos/"
               "whatis database, no info pages."),
-     "aliases": [r"man ?pages?", r"manpages?", r"roff", r"troff", r"groff"]},
+     "aliases": [r"\bman ?pages?\b", r"\bmanpages?\b", r"\broff\b", r"\btroff\b", r"\bgroff\b"]},
     {"thing": "Legacy / other office formats (.xls, .ppt, .xlsb, OpenDocument)", "status": RED,
      "mech": "no extractor - sniff.rs names .xlsb and OpenDocument with an export hint", "cite": RC + ":378",
      "gate": "No extractor. Tell the reader to save as .xlsx / .pptx / .docx first; do not write a page.",
