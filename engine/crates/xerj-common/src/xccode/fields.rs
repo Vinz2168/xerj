@@ -57,7 +57,7 @@ pub fn resolve_fields(mapping: Option<&Value>) -> Vec<String> {
             }
         }
     }
-    let out: Vec<String> = FIELDS
+    let mut out: Vec<String> = FIELDS
         .iter()
         .filter(|f| {
             let base = f.split('^').next().unwrap_or(f);
@@ -65,6 +65,15 @@ pub fn resolve_fields(mapping: Option<&Value>) -> Vec<String> {
         })
         .map(|s| s.to_string())
         .collect();
+    // The plain-text extraction family (`.txt` mirrors, logs) puts record
+    // content in `text`, not `body` — every other family (code, markdown,
+    // adoc) uses `body`. Mapping-gated so the unreadable-mapping fallback
+    // above never grows a field an index may not map (the MULTIMATCH_DEFECT
+    // silent-zero). Found via the zalando G7 1/5: all 25 renamed `.txt`
+    // chapters were invisible to `xerj code` while README.md matched.
+    if present.contains("text") {
+        out.push("text".to_string());
+    }
     if out.is_empty() {
         vec!["body".to_string()]
     } else {
@@ -150,6 +159,21 @@ mod tests {
             resolve_fields(Some(&json!("junk"))),
             FIELDS.iter().map(|s| s.to_string()).collect::<Vec<_>>()
         );
+    }
+
+    /// #1139: the `.txt` family's content field is `text` — it joins the
+    /// multi_match list ONLY when an index actually maps it, so the
+    /// unreadable-mapping fallback list above stays exactly FIELDS.
+    #[test]
+    fn text_family_content_joins_only_when_mapped() {
+        let with_text = mapping(&[("i", &["body", "text"], false)]);
+        assert_eq!(
+            resolve_fields(Some(&with_text)),
+            vec!["body".to_string(), "text".to_string()]
+        );
+        // No FIELDS member AND no text -> the ["body"] floor still holds.
+        let thin = mapping(&[("i", &["unrelated"], false)]);
+        assert_eq!(resolve_fields(Some(&thin)), vec!["body".to_string()]);
     }
 
     #[test]

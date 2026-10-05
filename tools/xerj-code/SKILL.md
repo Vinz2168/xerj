@@ -80,8 +80,8 @@ project's domain, not by size:
 | the project is… | start with | why |
 |---|---|---|
 | a search / query engine | `xerj-search` | postings, BM25, merge policy, segment layout, ES wire semantics |
-| vector search / ANN | `xerj-vector` | HNSW build, neighbour heuristics, quantisation, filtered kNN |
-| storage engine / KV | `xerj-storage`, `duckdb`, `rocksdb`, `leveldb`, `badger`, `lmdb` | WAL, crash recovery, compaction, page allocation; LSM-vs-B trees |
+| vector search / ANN | `xerj-vector`, `faiss`, `annoy` | HNSW build, neighbour heuristics, quantisation, filtered kNN; faiss is the reference ANN implementation, annoy the forest variant |
+| storage engine / KV | `xerj-storage`, `duckdb`, `rocksdb`, `leveldb`, `badger`, `lmdb`, `valkey-src` | WAL, crash recovery, compaction, page allocation; LSM-vs-B trees; valkey for an in-memory KV server's data structures |
 | analytical / columnar | `xerj-columnar`, `duckdb`, `arrow-rs`, `parquet-format`, `iceberg` | columnar layout, codecs, vectorised scans, table formats |
 | a database server | `sqlite-src`, `postgres-src` | parsers, planners, executors — the two most-studied codebases in the field |
 | messaging / consensus | `kafka-src`, `rabbitmq`, `nats-server`, `etcd-src`, `raft-rs`, `dragonboat` | log compaction, delivery semantics, quorum/lease correctness |
@@ -90,11 +90,29 @@ project's domain, not by size:
 | QUIC / HTTP / networking | `quinn`, `nghttp2`, `curl-src`, `libuv`, `caddy`, `envoy`, `nginx` | protocol state machines, connection pooling, event loops |
 | compression / serialization | `zstd`, `lz4`, `brotli`, `zlib-ng`, `snappy`, `protobuf`, `flatbuffers`, `capnproto`, `msgpack-c` | format design, blocked/entropy coding, zero-copy schemas |
 | secrets / config serving | `openbao` | KV store with seal/unseal, lease machinery |
-| API design review | `rust-api-guidelines`, `msft-api-guidelines` | naming, error shape, versioning — the two curated guideline sets |
-| protocol/spec conformance | `openapi-spec`, `graphql-spec`, `w3c-css`, `valkey-docs`, `nats-protocol` | the normative text an implementation is judged against |
-| production ops / SRE | `gitlab-runbooks`, `mozilla-ssl-configs`, `twelve-factor` | real incident playbooks, deployed TLS configs, deployment doctrine |
+| API design review | `rust-api-guidelines`, `msft-api-guidelines`, `zalando-restful-api-guidelines`, `google-eng-practices` | naming, error shape, versioning; Zalando's is the most clause-complete REST policy set, google-eng-practices owns code-review doctrine |
+| protocol/spec conformance | `openapi-spec`, `graphql-spec`, `json-schema-spec`, `w3c-css`, `whatwg-specs`, `ecma262`, `nats-protocol`, `kafka-protocol` | the normative text an implementation is judged against — HTML/DOM/URL living standards, ECMAScript grammar, wire-protocol framing |
+| production ops / SRE | `gitlab-runbooks`, `school-of-sre`, `tldr-pages`, `mozilla-ssl-configs`, `twelve-factor` | real incident playbooks, a full SRE course curriculum, command syntax by tool, deployed TLS configs, deployment doctrine |
+| administering Unix systems | `freebsd-handbook`, `openbsd-faq` | rc/ZFS/jail/networking procedures, OpenBSD's canonical FAQ positions |
+| documenting against a hosted API | `github-api-description` | the OpenAPI description of github.rest — field semantics, enum values, preview headers |
+| datastore operations docs | `valkey-docs`, `etcd-docs` | command semantics, config knobs, tuning guidance — the operational reference for each |
+| telemetry / observability wiring | the semconv half of `otel-proto` (candidate — G7 2/5, parked to the semantic lane) | OpenTelemetry semantic conventions for attribute names; lexical rounds could not bridge paraphrase-to-normative-prose |
+| internationalisation | `unicode-cldr` | CLDR locale data structure, calendar/number/date skeletons |
 | security review of dependencies | the `rust-vulns` pack (`xerj corpus add --from` the hub recipe) | real patched-vulna pairs, mined for #1111's defect-class study |
-| non-software (tax, employment, UK law) | `ecfr-title-12`, `ecfr-title-29`, `uk-legislation` | consolidated current regulation, section-per-file |
+| vulnerability / weakness taxonomy | `mitre-cwe`, `mitre-capec` | CWE weakness definitions and CAPEC attack patterns, id-level |
+| triaging an active campaign | `cisa-alerts` | CISA advisory IOCs, required actions and mitigations (2025-05..2026-10 window) |
+| querying endpoint visibility | `osquery-config-examples` | real deployed osquery packs and scheduled-query shapes |
+| non-software (tax, employment, UK law) | `ecfr-title-12`, `ecfr-title-29`, `ecfr-title-26`, `uk-legislation` | consolidated current regulation, section-per-file |
+| aviation (FARs) | `ecfr-title-14` | 14 CFR section-per-file: visibility minimums, transponder airspace, inspection intervals, right-of-way |
+| maritime rules of the road | `navrules` | COMDTINST M16672.2D per-rule text — risk of collision, narrow channels, crossing situations, lights and sound signals |
+| accessible UI components | `govuk-design-system` | GOV.UK component options and accessibility criteria — the exact option semantics (maxwords vs maxlength, divider text, focus-on-load) |
+| pharma / drug labels | `dailymed` | FDA label sections: indications, contraindications, administration timing |
+| clinical treatment guidance | `cdc-clinical` | CDC STI treatment regimens and doses, syphilis desensitization, measles clinical signs |
+| food-service safety | `fda-food-code` | FDA Food Code 2022 provisions: hand-contact surfaces, Time as a Public Health Control, date marking, bare-hand readiness |
+| traffic control devices | `mutcd` | FHWA MUTCD 11th Ed (Rev 1): sign and signal warrants, markings, work-zone typical applications |
+| building works (England) | `uk-building-regs` | Building Regulations 2010 (SI 2010/2214) per-provision: Parts A–P requirements, Wales variants labelled, 44ZB/44ZC dual numbering documented |
+| EU digital regulation | `eurlex-core` | GDPR, AI Act, DSA, DMA, NIS2 per-article and per-recital from the EUR-Lex Cellar (annexes excluded by design) |
+| accessibility (built environment) | `ada-2010` | ADA 2010 Standards: reach ranges, clear floor space, slope ratios, per-section |
 
 Three rules that keep the choice honest:
 
