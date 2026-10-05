@@ -38,6 +38,10 @@ pub enum Family {
     /// table-of-contents anchors), with the book's metadata and each
     /// chapter's title from the table of contents.
     Epub,
+    /// Jupyter notebook (any kernel): one record per Markdown-heading section
+    /// of cells, code fenced in the kernel's language, text outputs capped.
+    /// Detected by content, before the JSON classifier.
+    Ipynb,
     /// Man page (roff man(7) source, often gzipped): one record per `.SH`
     /// section, titled from `.TH`. Detected by content, never extension.
     Man,
@@ -82,6 +86,7 @@ impl Family {
             Family::Pptx => "pptx",
             Family::Xlsx => "xlsx",
             Family::Epub => "epub",
+            Family::Ipynb => "ipynb",
             Family::Man => "man",
             Family::Sqlite => "sqlite",
             Family::SqlDump => "sqldump",
@@ -101,6 +106,7 @@ impl Family {
                 | Family::Docx
                 | Family::Pptx
                 | Family::Epub
+                | Family::Ipynb
                 | Family::Man
                 | Family::TxtProse
                 | Family::Eml
@@ -372,6 +378,13 @@ fn sniff_bytes(
         // `.TH`. Checked before the text heuristics, which would otherwise
         // see the page as txt-lines — or, for sqlite3(1)/psql(1), whose
         // examples hold `CREATE TABLE …;`, as a SQL dump.
+        // A Jupyter notebook is JSON; without this it reached the generic
+        // JSON extractor (one record per cell, a dataset per notebook).
+        if crate::extract::ipynb::looks_like_notebook(body) {
+            let mut s = mk(Family::Ipynb);
+            s.encoding = encoding;
+            return Ok(s);
+        }
         if crate::extract::man::looks_like_man(body) {
             let mut s = mk(Family::Man);
             s.encoding = encoding;

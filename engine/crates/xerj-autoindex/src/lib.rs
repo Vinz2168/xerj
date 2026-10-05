@@ -2352,6 +2352,7 @@ fn scan_file(
             | Family::Docx
             | Family::Pptx
             | Family::Epub
+            | Family::Ipynb
             | Family::Man
     );
     if whole_file && size > max_file_gb * GB {

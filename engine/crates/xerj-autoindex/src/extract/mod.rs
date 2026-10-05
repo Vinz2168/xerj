@@ -9,6 +9,7 @@ pub mod docx;
 pub mod eml;
 pub mod epub;
 pub mod html;
+pub mod ipynb;
 pub mod json;
 pub mod jsonl;
 pub mod logs;
@@ -215,6 +216,12 @@ pub fn extract(
         Family::Docx => docx::extract(path, sink),
         Family::Pptx => pptx::extract(path, sn.logical_name.as_deref().unwrap_or(path), sink),
         Family::Epub => epub::extract(path, sn.logical_name.as_deref().unwrap_or(path), sink),
+        Family::Ipynb => ipynb::extract(
+            path,
+            sn.logical_name.as_deref().unwrap_or(path),
+            sn.gzip,
+            sink,
+        ),
         Family::Man => man::extract(
             path,
             sn.logical_name.as_deref().unwrap_or(path),
