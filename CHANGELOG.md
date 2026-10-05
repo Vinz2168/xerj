@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The vector leg of `xerj code` hybrid/semantic retrieval** (issues
+  [#1145](https://github.com/xerj-org/xerj/issues/1145) and
+  [#1148](https://github.com/xerj-org/xerj/issues/1148), PR
+  [#1153](https://github.com/xerj-org/xerj/pull/1153) by
+  [thomas-villani](https://github.com/thomas-villani)) — the semantic
+  clause went out with no `k`, so the parser default (10) capped the
+  vector pool whatever the request size said: `--mode semantic -k 20`
+  returned 10 hits, and hybrid fused BM25@50 with vector@10. The clause
+  now carries the fetch window as `k`. And `--lang` sat beside the
+  semantic clause in `bool.must`, a shape the engine's vector dispatch
+  does not peel — the request silently fell through to the lexical path
+  and answered 200 with zero hits. The language constraint now rides in
+  `bool.filter`, on both hybrid legs, keeping the semantic clause the
+  bool's single `must` — the exact shape the dispatcher peels.
 - **Corpus generation hygiene** (issue
   [#1136](https://github.com/xerj-org/xerj/issues/1136)) — stale index
   generations no longer survive beside a corpus, silently poisoning its
@@ -24,6 +38,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to. `xerj code` now also prints a stderr notice when a corpus has no
   verified build recorded and the query is widening to the whole
   namespace.
+- **HTML tables and paragraph boundaries in autoindex** (PR
+  [#1154](https://github.com/xerj-org/xerj/pull/1154) by
+  [thomas-villani](https://github.com/thomas-villani)) — a table on a
+  page indexed as one document lost its text twice over: it was not the
+  dominant table (so not emitted as rows) and cell text never reached
+  the body. Small tables — option lists, version matrices, the common
+  case on documentation pages — were silently unindexed. The rows now
+  go to the body in place, one ` | `-joined line per row, the shape
+  PPTX tables already use. And `<p>`/`<div>`/list ends now end a
+  paragraph, so `split_sections` breaks pages at paragraph ends instead
+  of hard-cutting every 2 KB mid-word behind a heading emitted as its
+  own empty section.
 
 ## [1.0.0-rc.82] - 2026-10-05
 
