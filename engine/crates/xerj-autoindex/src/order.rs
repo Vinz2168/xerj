@@ -188,6 +188,7 @@ pub fn band(rel: &str, family: Family) -> Band {
         | Family::Docx
         | Family::Pptx
         | Family::Epub
+        | Family::Ipynb
         | Family::Man
         | Family::Eml
         | Family::Mbox => Band::SourceAndDocs,
@@ -226,7 +227,8 @@ pub fn band_from_family_str(rel: &str, family: &str) -> Band {
         // docs, so a RESUMED run queued every email behind the bulk data the
         // planning run had put it ahead of. The agreement test did not catch it
         // because its family list was written by hand and omitted `Eml` too.
-        "code" | "txt-prose" | "html" | "pdf" | "docx" | "pptx" | "epub" | "man" | "unity"
+        "code" | "txt-prose" | "html" | "pdf" | "docx" | "pptx" | "epub" | "ipynb" | "man"
+        | "unity"
         | "eml" | "mbox" => Band::SourceAndDocs,
         "yaml" | "json" | "xml" | "unity-meta" => Band::Config,
         "csv" | "jsonl" | "sqlite" | "sqldump" | "xlsx" | "bvh" => Band::Data,

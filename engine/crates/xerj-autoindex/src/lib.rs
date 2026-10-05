@@ -2336,6 +2336,7 @@ fn scan_file(
         // owner nothing about why their mail is not searchable.
         let reason = sniff::archive_advice(&kind, sn.gzip)
             .or_else(|| sniff::unsupported_document_advice(&kind))
+            .or_else(|| sniff::unsupported_data_advice(&kind))
             .unwrap_or_else(|| format!("binary content ({kind})"));
         out.junk = Some(("junk".into(), reason));
         out.sniffed = Some(sn);
@@ -2352,6 +2353,7 @@ fn scan_file(
             | Family::Docx
             | Family::Pptx
             | Family::Epub
+            | Family::Ipynb
             | Family::Man
     );
     if whole_file && size > max_file_gb * GB {

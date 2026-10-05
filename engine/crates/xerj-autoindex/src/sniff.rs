@@ -38,6 +38,10 @@ pub enum Family {
     /// table-of-contents anchors), with the book's metadata and each
     /// chapter's title from the table of contents.
     Epub,
+    /// Jupyter notebook (any kernel): one record per Markdown-heading section
+    /// of cells, code fenced in the kernel's language, text outputs capped.
+    /// Detected by content, before the JSON classifier.
+    Ipynb,
     /// Man page (roff man(7) source, often gzipped): one record per `.SH`
     /// section, titled from `.TH`. Detected by content, never extension.
     Man,
@@ -82,6 +86,7 @@ impl Family {
             Family::Pptx => "pptx",
             Family::Xlsx => "xlsx",
             Family::Epub => "epub",
+            Family::Ipynb => "ipynb",
             Family::Man => "man",
             Family::Sqlite => "sqlite",
             Family::SqlDump => "sqldump",
@@ -101,6 +106,7 @@ impl Family {
                 | Family::Docx
                 | Family::Pptx
                 | Family::Epub
+                | Family::Ipynb
                 | Family::Man
                 | Family::TxtProse
                 | Family::Eml
@@ -372,6 +378,13 @@ fn sniff_bytes(
         // `.TH`. Checked before the text heuristics, which would otherwise
         // see the page as txt-lines — or, for sqlite3(1)/psql(1), whose
         // examples hold `CREATE TABLE …;`, as a SQL dump.
+        // A Jupyter notebook is JSON; without this it reached the generic
+        // JSON extractor (one record per cell, a dataset per notebook).
+        if crate::extract::ipynb::looks_like_notebook(body) {
+            let mut s = mk(Family::Ipynb);
+            s.encoding = encoding;
+            return Ok(s);
+        }
         if crate::extract::man::looks_like_man(body) {
             let mut s = mk(Family::Man);
             s.encoding = encoding;
@@ -488,7 +501,37 @@ const MAGIC_TABLE: &[MagicRow] = &[
     (b"7z\xbc\xaf\x27\x1c", "7z", accept),
     (b"Rar!\x1a\x07", "rar", accept),
     (b"\xfd7zXZ\x00", "xz", accept),
+    // Data-science containers. Never opened: reading Parquet, Arrow or HDF5
+    // takes a large format library, and a pickle runs code when loaded. Naming
+    // the kind lets the run say how to make the file indexable
+    // (`unsupported_data_advice`) instead of "binary content (unknown)".
+    // `ARROW1\0\0`, `\x93NUMPY`, `\x89HDF\r\n\x1a\n` carry a byte text cannot
+    // contain; `PAR1` and the pickle opcode are qualified.
+    (b"PAR1", "parquet", parquet_page_header),
+    (b"ARROW1\x00\x00", "arrow", accept),
+    (b"\x93NUMPY", "npy", accept),
+    (b"\x89HDF\r\n\x1a\n", "hdf5", accept),
+    (b"\x80", "pickle", pickle_protocol),
 ];
+
+/// Parquet: `PAR1` is four printable letters, so the file's first page header
+/// has to follow it — a Thrift compact struct whose first two fields are i32s,
+/// each introduced by the byte `0x15` (field delta 1, type i32), with a
+/// one-byte varint between them. `0x15` is a control byte prose does not
+/// contain. Measured on files written by pyarrow (snappy, zstd and
+/// uncompressed) and by Chroma.
+fn parquet_page_header(prefix: &[u8]) -> bool {
+    prefix.len() >= 7 && prefix[4] == 0x15 && prefix[6] == 0x15
+}
+
+/// Python pickle, protocols 2-5: the PROTO opcode `0x80` and its version byte;
+/// protocols 4 and 5 then open a FRAME (`0x95`). `0x80` cannot start UTF-8
+/// text, and a version byte of 2-5 is a control character in any single-byte
+/// encoding (a cp1252 note opening with `€` is followed by a printable byte).
+/// Protocols 0 and 1 have no header at all and are not recognized.
+fn pickle_protocol(prefix: &[u8]) -> bool {
+    prefix.len() >= 3 && (2..=5).contains(&prefix[1]) && (prefix[1] < 4 || prefix[2] == 0x95)
+}
 
 /// Magic-byte signature taken as sufficient on its own.
 ///
@@ -1129,6 +1172,10 @@ fn zip_container_kind<R: Read + std::io::Seek>(z: &mut zip::ZipArchive<R>) -> &'
             return kind;
         }
     }
+    // numpy.savez: a zip of `.npy` members.
+    if !z.is_empty() && z.file_names().all(|n| n.ends_with(".npy")) {
+        return "npz";
+    }
     let mut mime = Vec::with_capacity(64);
     if let Ok(e) = z.by_name("mimetype") {
         e.take(64).read_to_end(&mut mime).ok();
@@ -1157,6 +1204,35 @@ pub fn unsupported_document_advice(binary_kind: &str) -> Option<String> {
     };
     Some(format!(
         "unsupported document format ({what}): autoindex has no extractor for it yet — \
+         {how} to index it now"
+    ))
+}
+
+/// What to tell the user about a data-science container autoindex recognizes
+/// but does not read, or `None` for any other binary kind.
+///
+/// Reading Parquet, Arrow or HDF5 would add a large format library for files
+/// whose owners can export them in one line, so the reason names the export.
+/// A pickle is never loaded at all: unpickling runs code chosen by whoever
+/// wrote the file.
+pub fn unsupported_data_advice(binary_kind: &str) -> Option<String> {
+    let (what, how) = match binary_kind {
+        "parquet" => ("Parquet", "export it to CSV or JSON Lines"),
+        "arrow" => ("Arrow IPC / Feather", "export it to CSV or JSON Lines"),
+        "npy" | "npz" => ("NumPy array", "save the arrays you need as CSV"),
+        "hdf5" => ("HDF5", "export the datasets you need to CSV"),
+        "pickle" => {
+            return Some(
+                "Python pickle: autoindex never loads pickles (loading one runs code \
+                 chosen by whoever wrote the file) — export the object to CSV or JSON \
+                 from code you trust to index it"
+                    .into(),
+            )
+        }
+        _ => return None,
+    };
+    Some(format!(
+        "unsupported data format ({what}): autoindex has no reader for it — \
          {how} to index it now"
     ))
 }
@@ -4316,6 +4392,77 @@ mod zip_container_sniff_tests {
             "zip", "tar", "png", "docx", "pptx", "xlsx", "epub", "unknown", "",
         ] {
             assert_eq!(unsupported_document_advice(k), None, "{k}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod data_container_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn sniffed(bytes: &[u8], name: &str) -> Sniffed {
+        let p = Path::new(name);
+        sniff_bytes(bytes, p, p, false).unwrap()
+    }
+
+    /// Prefixes copied from real files: pyarrow 17 (Parquet snappy/zstd/none,
+    /// Feather v2), a Chroma Parquet store, numpy.save, h5py, pickle.dumps.
+    #[test]
+    fn data_containers_are_named_from_real_file_prefixes() {
+        for (bytes, kind) in [
+            (&b"PAR1\x15\x04\x150\x15.rest"[..], "parquet"),
+            (&b"PAR1\x15\x00\x15\x5crest"[..], "parquet"),
+            (&b"ARROW1\x00\x00\xff\xffrest"[..], "arrow"),
+            (&b"\x93NUMPY\x01\x00v\x00rest"[..], "npy"),
+            (&b"\x89HDF\r\n\x1a\n\x00\x00rest"[..], "hdf5"),
+            (&b"\x80\x02}q\x00X\x01\x00rest"[..], "pickle"),
+            (&b"\x80\x05\x95\n\x00\x00\x00\x00rest"[..], "pickle"),
+        ] {
+            let s = sniffed(bytes, "data.bin");
+            assert_eq!(s.family, Family::Binary, "{kind}");
+            assert_eq!(s.binary_kind.as_deref(), Some(kind));
+        }
+        // A protocol-4 opcode without its FRAME, and protocol 0 (no header):
+        // not claimed as pickles.
+        for bytes in [&b"\x80\x04}rest of it"[..], &b"(dp0\nS'k'\nI1\ns."[..]] {
+            assert_ne!(
+                sniffed(bytes, "x.bin").binary_kind.as_deref(),
+                Some("pickle")
+            );
+        }
+    }
+
+    #[test]
+    fn a_zip_of_npy_members_is_an_npz() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("arrays.npz");
+        {
+            let mut w = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+            let opts = zip::write::SimpleFileOptions::default();
+            for m in ["x.npy", "y.npy"] {
+                w.start_file(m, opts).unwrap();
+                w.write_all(b"\x93NUMPY\x01\x00").unwrap();
+            }
+            w.finish().unwrap();
+        }
+        assert_eq!(sniff(&path).unwrap().binary_kind.as_deref(), Some("npz"));
+    }
+
+    #[test]
+    fn data_containers_get_an_export_hint() {
+        for k in ["parquet", "arrow", "npy", "npz", "hdf5"] {
+            let advice = unsupported_data_advice(k).unwrap();
+            assert!(
+                advice.starts_with("unsupported data format (")
+                    && advice.contains("to index it now"),
+                "{k}: {advice}"
+            );
+        }
+        let pickle = unsupported_data_advice("pickle").unwrap();
+        assert!(pickle.contains("never loads pickles"), "{pickle}");
+        for k in ["zip", "png", "xlsx", "unknown", ""] {
+            assert_eq!(unsupported_data_advice(k), None, "{k}");
         }
     }
 }
