@@ -1078,12 +1078,16 @@ fn count_under(node: &dyn CorpusNode, prefix: &str) -> Option<u64> {
 /// glob is not enough: `xc-battle-*` also matches the sibling corpus
 /// `battle-terse`, and retiring a sibling's indices is not a mistake this
 /// command gets to make.
-fn corpus_indices(node: &dyn CorpusNode, name: &str, root: &Path) -> Vec<String> {
-    // Any error lists nothing, which errs toward KEEPING an index (nothing is
-    // retired that was not listed), never toward deleting one.
-    let rows = node
-        .list_indices(&format!("xc-{name}-*"))
-        .unwrap_or_default();
+/// The namespace listing plus whether the node actually answered. An error
+/// lists nothing — which errs toward KEEPING an index (nothing is retired
+/// that was not listed), never toward deleting one — but the caller now gets
+/// to SAY so instead of a silent empty list reading as "nothing to retire"
+/// (#1136: generations survived exactly that way).
+fn corpus_indices(node: &dyn CorpusNode, name: &str, root: &Path) -> (Vec<String>, bool) {
+    let rows = match node.list_indices(&format!("xc-{name}-*")) {
+        Ok(rows) => rows,
+        Err(_) => return (Vec::new(), false),
+    };
     let mut siblings: Vec<String> = Vec::new();
     for (folder, strip) in [(root.join("corpora"), ""), (root.join("state"), ".json")] {
         if let Ok(entries) = std::fs::read_dir(&folder) {
@@ -1100,12 +1104,94 @@ fn corpus_indices(node: &dyn CorpusNode, name: &str, root: &Path) -> Vec<String>
             }
         }
     }
-    rows.into_iter()
-        .filter(|idx| {
-            idx.starts_with(&format!("xc-{name}-"))
-                && !siblings.iter().any(|s| idx.starts_with(s.as_str()))
-        })
-        .collect()
+    (
+        rows.into_iter()
+            .filter(|idx| {
+                idx.starts_with(&format!("xc-{name}-"))
+                    && !siblings.iter().any(|s| idx.starts_with(s.as_str()))
+            })
+            .collect(),
+        true,
+    )
+}
+
+/// The generation prefix of a stamped index (`xc-<corpus>-b<stamp>` → itself),
+/// or `None` for an unstamped legacy index (`xc-<corpus>-<dataset>`), where
+/// the segment after the corpus name is a dataset name, not a build stamp.
+/// Digits-only between `b` and the next `-` is the stamp shape; a dataset
+/// named like a stamp has never been a shape the autoindex emits.
+fn stamped_prefix(name: &str, idx: &str) -> Option<String> {
+    let rest = idx.strip_prefix(&format!("xc-{name}-b"))?;
+    let stamp = rest.split('-').next()?;
+    (!stamp.is_empty() && stamp.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| format!("xc-{name}-b{stamp}"))
+}
+
+/// Retire every index in `names` that belongs to a stamped generation, plus
+/// that generation's catalog scope. Returns how many indices were deleted.
+/// Used by the legacy arm: the ledger names no build there, so stamped
+/// generations are unreachable by construction — `xerj code` queries the bare
+/// namespace and mixes their documents into every answer (#1136).
+fn retire_stamped(node: &dyn CorpusNode, name: &str, names: &[String]) -> usize {
+    let doomed: Vec<String> = names
+        .iter()
+        .filter(|idx| stamped_prefix(name, idx).is_some())
+        .cloned()
+        .collect();
+    if doomed.is_empty() {
+        return 0;
+    }
+    let scopes: std::collections::BTreeSet<String> = doomed
+        .iter()
+        .filter_map(|idx| stamped_prefix(name, idx))
+        .collect();
+    println!(
+        "xerj corpus index: retiring {} stale-generation indices this corpus cannot reach \
+         (the ledger names no build):",
+        doomed.len()
+    );
+    for idx in &doomed {
+        println!("xerj corpus index:   {idx}");
+    }
+    let deleted = doomed.len() - delete_indices(node, &doomed);
+    for scope in scopes {
+        node.delete_catalog_scope(&scope);
+    }
+    deleted
+}
+
+/// Say what still sits under `xc-<name>-` outside the prefix readers are now
+/// pinned to — the visibility half of #1136: a retirement that half-failed
+/// (or a listing that came back empty at the wrong moment) is a poison the
+/// next G7-grade query would otherwise measure for us.
+fn report_leftovers(node: &dyn CorpusNode, name: &str, root: &Path, keep: &str) {
+    let (left, listed_ok) = corpus_indices(node, name, root);
+    if !listed_ok {
+        eprintln!(
+            "xerj corpus index: could not re-list this corpus's indices to check for stale \
+             generations — run `xerj corpus list` against the node when it answers."
+        );
+        return;
+    }
+    let left: Vec<String> = left.into_iter().filter(|i| !i.starts_with(keep)).collect();
+    if left.is_empty() {
+        return;
+    }
+    eprintln!(
+        "xerj corpus index: WARNING — {} stale indices remain under xc-{name}- outside \
+         what `xerj code` now reads ({keep}-*):",
+        left.len()
+    );
+    for idx in left.iter().take(5) {
+        eprintln!("xerj corpus index:   {idx}");
+    }
+    if left.len() > 5 {
+        eprintln!("xerj corpus index:   … and {} more", left.len() - 5);
+    }
+    eprintln!(
+        "xerj corpus index: delete them by exact name, or re-run `xerj corpus index {name} \
+         --fresh` when the node is reachable."
+    );
 }
 
 fn delete_indices(node: &dyn CorpusNode, names: &[String]) -> usize {
@@ -1283,7 +1369,7 @@ fn corpus_index_flow(
     // node-does-not-hold), update (reconcile the recorded build in place), or
     // legacy (a corpus indexed before builds existed).
     let mut mode = "legacy";
-    let old_indices = corpus_indices(node, name, root);
+    let (old_indices, _listed_ok) = corpus_indices(node, name, root);
     if fresh {
         mode = "build";
     } else if old_build.is_some()
@@ -1317,8 +1403,20 @@ fn corpus_index_flow(
     match mode {
         "build" => {
             // Listed BEFORE the build so "old" can never include what this
-            // run creates.
-            let old_indices = corpus_indices(node, name, root);
+            // run creates. A listing the node never answered is LOUD here:
+            // an empty list would read as "nothing to retire" and let stale
+            // generations survive the swap (#1136).
+            let (old_indices, listed_ok) = corpus_indices(node, name, root);
+            if !listed_ok {
+                eprintln!(
+                    "xerj corpus index: could not list this corpus's existing indices — the \
+                     swap will still build and verify, but NOTHING on the node will be retired;"
+                );
+                eprintln!(
+                    "xerj corpus index: stale generations may remain beside the new one. \
+                     Re-run `xerj corpus index {name} --fresh` when the node answers a listing."
+                );
+            }
             // One-second resolution: a second --fresh inside the same second
             // would reuse the prefix of the build it is replacing. The id
             // must be new — not the recorded build, not a state dir that
@@ -1418,7 +1516,13 @@ fn corpus_index_flow(
                 // Remove only what THIS run created: the set-diff against the
                 // pre-run listing, intersected with this build's prefix, BY
                 // EXACT NAME — never a wildcard, never new_prefix itself.
-                let after = corpus_indices(node, name, root);
+                let (after, after_ok) = corpus_indices(node, name, root);
+                if !after_ok {
+                    eprintln!(
+                        "xerj corpus index: could not re-list indices after the failed build — \
+                         its indices (if any were written) are kept, not deleted blind."
+                    );
+                }
                 let doomed: Vec<String> = after
                     .into_iter()
                     .filter(|idx| !old_indices.contains(idx))
@@ -1463,6 +1567,10 @@ fn corpus_index_flow(
                     old_index_prefix.as_deref().unwrap_or(&format!("xc-{name}")),
                 );
             }
+            // Whatever the retirement above could not reach (a failed
+            // delete, or a listing that came back empty before the build) is
+            // named here instead of silently poisoning the namespace.
+            report_leftovers(node, name, root, &new_prefix);
             // Earlier builds' state directories are dead weight once their
             // indices are gone.
             if state_root.join(name).is_dir() {
@@ -1535,6 +1643,20 @@ fn corpus_index_flow(
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "?".to_string());
             let _ = state::write_state(root, name, url, rc as i64, salvaged, None, None, None);
+            // The ledger now names no build, so no stamped generation is
+            // reachable — retire any that are still live. This is the #1136
+            // leak in its measured shape: tldr-pages carried an unstamped
+            // 38,554-doc generation beside stamped ones because a legacy
+            // run never looked at what it was superseding.
+            let (now_live, live_ok) = corpus_indices(node, name, root);
+            if live_ok {
+                retire_stamped(node, name, &now_live);
+            } else {
+                eprintln!(
+                    "xerj corpus index: could not list this corpus's indices after the run — \
+                     stale generations (if any) were NOT retired; re-run when the node answers."
+                );
+            }
             report(name, rc, &docs_s);
             0
         }
@@ -1814,6 +1936,9 @@ mod tests {
         /// This exact index name's DELETE fails (once — the flow warns and
         /// continues; a persistently failing node is the crash-between case).
         fail_delete: std::cell::RefCell<Option<String>>,
+        /// Every `list_indices` answers `Err` — an unreachable node (#1136:
+        /// a silent empty listing read as "nothing to retire").
+        fail_listing: std::cell::Cell<bool>,
         ops: std::cell::RefCell<Vec<String>>,
     }
 
@@ -1823,6 +1948,7 @@ mod tests {
                 indices: std::cell::RefCell::new(Vec::new()),
                 counts: std::cell::RefCell::new(HashMap::new()),
                 fail_delete: std::cell::RefCell::new(None),
+                fail_listing: std::cell::Cell::new(false),
                 ops: std::cell::RefCell::new(Vec::new()),
             }
         }
@@ -1865,6 +1991,9 @@ mod tests {
 
     impl CorpusNode for FakeNode {
         fn list_indices(&self, glob: &str) -> Result<Vec<String>, String> {
+            if self.fail_listing.get() {
+                return Err("node unreachable".into());
+            }
             Ok(glob_match(&self.indices.borrow(), glob))
         }
         fn count(&self, dash_glob: &str) -> Count {
@@ -2312,6 +2441,91 @@ mod tests {
         assert_eq!(st.index_prefix, None, "legacy state records no build");
         assert!(node.live("xc-kv-000"));
         assert!(node.ops.borrow().iter().all(|o| !o.starts_with("delete:")));
+    }
+
+    #[test]
+    fn a_legacy_run_retires_stamped_generations_it_cannot_reach() {
+        let root = corpus_root("kv");
+        let node = FakeNode::new();
+        // the measured #1136 shape: an unstamped legacy index beside stamped
+        // generations from builds the (missing/legacy) ledger does not name
+        node.indices
+            .borrow_mut()
+            .extend(["xc-kv-000", "xc-kv-b111-000", "xc-kv-b222-001"].map(String::from));
+
+        let auto = FakeAuto::ok(&node);
+        let rc = run_flow(&node, &auto, &|| T0, &root, "kv", false);
+
+        assert_eq!(rc, 0);
+        assert!(node.live("xc-kv-000"), "the legacy run's own index stays");
+        assert!(
+            !node.live("xc-kv-b111-000") && !node.live("xc-kv-b222-001"),
+            "stamped generations the ledger cannot reach are retired"
+        );
+        let ops = node.ops.borrow();
+        assert!(ops.contains(&"delete:xc-kv-b111-000".to_string()));
+        assert!(ops.contains(&"delete:xc-kv-b222-001".to_string()));
+        // one catalog-scope delete per distinct generation, not per index
+        assert!(ops.contains(&"catalog:xc-kv-b111".to_string()));
+        assert!(ops.contains(&"catalog:xc-kv-b222".to_string()));
+        assert_eq!(
+            ops.iter().filter(|o| o.starts_with("catalog:")).count(),
+            2,
+            "no catalog delete for the kept unstamped index"
+        );
+    }
+
+    #[test]
+    fn a_build_run_deletes_nothing_blind_when_the_node_never_answered_a_listing() {
+        let root = corpus_root("kv");
+        let node = FakeNode::new();
+        // a live generation the flow will never see: every listing fails
+        node.indices.borrow_mut().push("xc-kv-b1-000".into());
+        node.fail_listing.set(true);
+
+        let auto = FakeAuto::ok(&node);
+        let rc = run_flow(&node, &auto, &|| T0, &root, "kv", true);
+
+        assert_eq!(rc, 0, "build + verify still succeed");
+        assert!(
+            node.ops.borrow().iter().all(|o| !o.starts_with("delete:")),
+            "an unanswerable listing retires nothing — never delete blind"
+        );
+        assert!(
+            node.live("xc-kv-b1-000"),
+            "the unseen generation is kept, named in the epilogue instead"
+        );
+    }
+
+    #[test]
+    fn a_generation_whose_delete_fails_is_named_in_the_epilogue() {
+        let root = corpus_root("kv");
+        let old_prefix = record_build(&root, "kv", "b1", Some("/tmp/s1"));
+        let node = FakeNode::new();
+        node.indices.borrow_mut().push(format!("{old_prefix}-000"));
+        node.seed_count(&format!("{old_prefix}-*"), Count::Number(500));
+        // the node refuses to delete exactly the old generation's index
+        node.fail_delete
+            .borrow_mut()
+            .replace(format!("{old_prefix}-000"));
+
+        let auto = FakeAuto::ok(&node);
+        let rc = run_flow(&node, &auto, &|| T0 + 10, &root, "kv", true);
+
+        assert_eq!(rc, 0, "a failed retire does not fail the swap");
+        assert!(
+            node.live(&format!("{old_prefix}-000")),
+            "the refused delete leaves the old generation on the node"
+        );
+        // and the leftovers report re-listed the namespace to name it
+        assert!(
+            node.ops
+                .borrow()
+                .iter()
+                .filter(|o| o.starts_with("delete:"))
+                .count()
+                >= 1
+        );
     }
 
     // ── corpus add --from <pack> (harvested consumption) ────────────────────
