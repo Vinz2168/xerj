@@ -515,8 +515,11 @@ pub(crate) fn bm25_body(query: &str, k: usize, lang: &Option<String>, fields: &[
 
 /// The vector-only body. Aimed ONLY at indices whose `body` is semantic_text
 /// (a semantic query against plain text 400s the whole wildcard).
+///
+/// The clause carries `k` = the fetch window: without it the parser cuts the
+/// vector pool to 10 whatever `size` says (#1145).
 pub(crate) fn semantic_body(query: &str, k: usize, lang: &Option<String>) -> Value {
-    let q = serde_json::json!({ "semantic": { "field": "body", "query": query } });
+    let q = serde_json::json!({ "semantic": { "field": "body", "query": query, "k": k } });
     let query = match lang {
         Some(lg) => serde_json::json!({
             "bool": { "must": [q, { "match": { "language": lg } }] }
@@ -549,8 +552,11 @@ pub(crate) fn hybrid_body(
     let bm = wrap(serde_json::json!({
         "multi_match": { "query": query, "fields": fields }
     }));
+    // `k` on the semantic clause: the vector leg's pool is cut to its own
+    // `k` (parser default 10), not to `size`, so without it the #1137
+    // overfetch widens the BM25 leg alone (#1145).
     let sem = wrap(serde_json::json!({
-        "semantic": { "field": "body", "query": query }
+        "semantic": { "field": "body", "query": query, "k": k }
     }));
     serde_json::json!({
         "size": k,
@@ -873,6 +879,28 @@ mod tests {
             out.text.contains("rrf 4.20"),
             "hybrid scores render as rrf: {}",
             out.text
+        );
+    }
+
+    /// #1145: a `semantic` clause without `k` is cut to the parser default
+    /// (10), so the vector leg must carry the same window as `size` — else
+    /// `--mode semantic -k 20` returns 10 hits and hybrid fuses BM25@50 with
+    /// vector@10 (the #1137 overfetch widened the BM25 leg alone).
+    #[test]
+    fn the_vector_leg_carries_the_fetch_window_as_k() {
+        let sem = semantic_body("q", 50, &None);
+        assert_eq!(sem.pointer("/size"), Some(&serde_json::json!(50)));
+        assert_eq!(
+            sem.pointer("/query/semantic/k"),
+            Some(&serde_json::json!(50))
+        );
+
+        let fields = vec!["body".to_string()];
+        let hy = hybrid_body("q", 50, &None, &fields);
+        assert_eq!(
+            hy.pointer("/query/hybrid/queries/1/query/semantic/k"),
+            Some(&serde_json::json!(50)),
+            "{hy}"
         );
     }
 
