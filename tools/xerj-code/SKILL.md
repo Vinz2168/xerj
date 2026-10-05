@@ -81,7 +81,7 @@ project's domain, not by size:
 |---|---|---|
 | a search / query engine | `xerj-search` | postings, BM25, merge policy, segment layout, ES wire semantics |
 | vector search / ANN | `xerj-vector`, `faiss`, `annoy` | HNSW build, neighbour heuristics, quantisation, filtered kNN; faiss is the reference ANN implementation, annoy the forest variant |
-| storage engine / KV | `xerj-storage`, `duckdb`, `rocksdb`, `leveldb`, `badger`, `lmdb`, `valkey-src` | WAL, crash recovery, compaction, page allocation; LSM-vs-B trees; valkey for an in-memory KV server's data structures |
+| storage engine / KV | `xerj-storage`, `duckdb`, `rocksdb`, `leveldb`, `badger`, `lmdb`, `pebble`, `valkey-src` | WAL, crash recovery, compaction, page allocation; LSM-vs-B trees; pebble for L0 sub-levels and range-deletion semantics; valkey for an in-memory KV server's data structures |
 | analytical / columnar | `xerj-columnar`, `duckdb`, `arrow-rs`, `parquet-format`, `iceberg` | columnar layout, codecs, vectorised scans, table formats |
 | a database server | `sqlite-src`, `postgres-src` | parsers, planners, executors — the two most-studied codebases in the field |
 | messaging / consensus | `kafka-src`, `rabbitmq`, `nats-server`, `etcd-src`, `raft-rs`, `dragonboat` | log compaction, delivery semantics, quorum/lease correctness |
@@ -100,6 +100,10 @@ project's domain, not by size:
 | internationalisation | `unicode-cldr` | CLDR locale data structure, calendar/number/date skeletons |
 | security review of dependencies | the `rust-vulns` pack (`xerj corpus add --from` the hub recipe) | real patched-vulna pairs, mined for #1111's defect-class study |
 | vulnerability / weakness taxonomy | `mitre-cwe`, `mitre-capec` | CWE weakness definitions and CAPEC attack patterns, id-level |
+| adversary techniques / detection engineering | `mitre-attck` | ATT&CK v19.2 per-technique records: technique ids, tactics, detection data sources, procedure examples (enterprise/mobile/ics; software and group objects out of scope) |
+| patch-priority triage | `cisa-kev` | the Known Exploited Vulnerabilities catalogue, one record per CVE — exploitation status in the wild, binding remediation dates |
+| web application security how-to | `owasp-cheatsheets` | the Cheat Sheet Series' countermeasure recipes per topic — session management, authentication secrets, error handling, upload handling |
+| planning a web app penetration test | `owasp-wstg` | the Web Security Testing Guide v4.2 catalogue: per-test objectives and method, organised by category (authn, authz, session, input handling) |
 | triaging an active campaign | `cisa-alerts` | CISA advisory IOCs, required actions and mitigations (2025-05..2026-10 window) |
 | querying endpoint visibility | `osquery-config-examples` | real deployed osquery packs and scheduled-query shapes |
 | non-software (tax, employment, UK law) | `ecfr-title-12`, `ecfr-title-29`, `ecfr-title-26`, `uk-legislation` | consolidated current regulation, section-per-file |
