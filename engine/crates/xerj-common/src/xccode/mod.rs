@@ -200,6 +200,18 @@ pub fn run_code_query(
     };
 
     let prefix = state::query_prefix(&st);
+    // Legacy state (indexed before builds existed) names no verified build,
+    // so the query widens to the whole `xc-<corpus>` namespace — and whatever
+    // stale generations live there are mixed into the answers (#1136). Say
+    // so at the point it happens; stderr, because stdout is the parsed
+    // hit list. `corpus index <name> --fresh` pins one verified build.
+    if st.index_prefix.is_none() {
+        eprintln!(
+            "xerj code: notice: corpus '{corpus}' has no verified build recorded — querying \
+             the whole xc-{corpus} namespace; `xerj corpus index {corpus} --fresh` pins one \
+             verified build"
+        );
+    }
 
     // 3. Not-loaded-here: in state/ yet 0 live indices on THIS node. A
     //    distinct, actionable diagnosis (exit 3) — collapsing it into

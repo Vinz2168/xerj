@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Corpus generation hygiene** (issue
+  [#1136](https://github.com/xerj-org/xerj/issues/1136)) — stale index
+  generations no longer survive beside a corpus, silently poisoning its
+  namespace. Three changes in `xerj corpus index` / `xerj code`:
+  a legacy-mode run (a state file that names no build) now retires the
+  stamped generations it supersedes — the measured shape was
+  `tldr-pages` carrying an unstamped 38,554-document generation beside
+  two stamped ones, mixed into every `xerj code` answer; a build whose
+  namespace listing the node never answered says so loudly and retires
+  nothing instead of reading the empty list as "nothing to retire"; and
+  every verified `--fresh` swap ends with an epilogue naming whatever
+  still sits under `xc-<corpus>-` outside the build readers are pinned
+  to. `xerj code` now also prints a stderr notice when a corpus has no
+  verified build recorded and the query is widening to the whole
+  namespace.
+
 ## [1.0.0-rc.82] - 2026-10-05
 
 The documents-people-actually-have release. Three extractor PRs from a
