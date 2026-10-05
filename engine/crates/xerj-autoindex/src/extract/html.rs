@@ -274,6 +274,20 @@ fn parse(html: &str) -> Doc {
                         cur_table.push(std::mem::take(&mut cur_row));
                     }
                     if !cur_table.is_empty() {
+                        // The rows also go to the body, in place, one
+                        // ` | `-joined line per row as PPTX tables do: cell
+                        // text never reaches the body any other way, and a
+                        // table that is not the dominant one is not emitted
+                        // as rows. An empty cell keeps its column.
+                        if !doc.body.is_empty() && !doc.body.ends_with('\n') {
+                            doc.body.push('\n');
+                        }
+                        for row in &cur_table {
+                            if row.iter().any(|c| !c.is_empty()) {
+                                doc.body.push_str(&row.join(" | "));
+                                doc.body.push('\n');
+                            }
+                        }
                         doc.header_cells
                             .push(vec![table_header_flags.first().copied().unwrap_or(false)]);
                         doc.tables.push(std::mem::take(&mut cur_table));
@@ -716,27 +730,40 @@ mod tests {
         );
     }
 
-    /// DEFECT, pinned as CURRENT behaviour.
-    ///
-    /// A table under the 5-row dominance threshold loses its content twice
-    /// over: it is not emitted as rows, and `flush_text` has already diverted
-    /// every cell into `cur_cell` instead of `doc.body`, so the cells are not
-    /// in the document record either. Small tables — the common case on a
-    /// documentation page — are silently unindexed.
+    /// A table that is not emitted as rows (under the 5-row dominance
+    /// threshold here) used to lose its content twice over: `flush_text`
+    /// diverts every cell into `cur_cell`, so the cells never reached
+    /// `doc.body` either. Its rows now land in the body where the table
+    /// stood, one ` | `-joined line per row, as PPTX tables do.
     #[test]
-    fn a_table_below_the_dominance_threshold_leaves_its_cells_unindexed() {
+    fn a_table_below_the_dominance_threshold_keeps_its_rows_in_the_body() {
         let (stats, recs) = run(
             "small.html",
             "<html><body><h1>Head</h1><p>prose</p>\
-             <table><tr><td>cellA</td><td>cellB</td></tr></table>\
+             <table><tr><th>Region</th><th>Q3</th></tr>\
+             <tr><td>North</td><td>12</td></tr>\
+             <tr><td>  </td><td></td></tr>\
+             <tr><td>South <b>East</b></td><td></td></tr></table>\
              <p>after</p></body></html>",
         );
         assert_eq!(stats.records, 1, "falls back to the document record");
         let body = body_of(&recs[0]);
-        assert!(body.contains("prose") && body.contains("after"));
-        assert!(
-            !body.contains("cellA") && !body.contains("cellB"),
-            "small-table cells are now indexed — flip this assertion: {body:?}"
+        let lines: Vec<&str> = body.lines().map(str::trim).collect();
+        let at = |s: &str| {
+            lines
+                .iter()
+                .position(|l| *l == s)
+                .unwrap_or_else(|| panic!("no line {s:?} in {body:?}"))
+        };
+        // In place, in order: after the prose before it, before the prose
+        // after it. An empty cell keeps its column; an all-empty row is
+        // dropped.
+        let (head, north, south) = (at("Region | Q3"), at("North | 12"), at("South East |"));
+        assert!(at("prose") < head && head < north && north < south && south < at("after"));
+        assert_eq!(
+            lines.iter().filter(|l| l.contains('|')).count(),
+            3,
+            "{body:?}"
         );
     }
 
