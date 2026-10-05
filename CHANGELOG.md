@@ -7,6 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.82] - 2026-10-05
+
+The documents-people-actually-have release. Three extractor PRs from a
+first-time contributor extend autoindex to the formats that were still
+read-as-text: Unix man pages, and the two spreadsheet shapes real
+workbooks ship — vertically merged cells and two-row grouped headers.
+Every code change in the window came through the community surface:
+the extractor work is
+[thomas-villani](https://github.com/thomas-villani)'s first contributions
+to the project, and the window also carries the `xerj code` retrieval
+fixes and two field reports.
+
+### Added
+
+- **Man page extraction** — roff `man(7)` sources read as documents, one
+  record per `.SH` section: the `.TH` title (`LS(1)`), the NAME summary,
+  font escapes dropped, `\(em`-class specials become the characters they
+  name, no-fill blocks keep their layout, and a tbl table becomes one
+  ` | `-joined line per row. Enough of the roff request language is read
+  (`.ds` strings, `.if`/`.ie`/`.el` conditionals, `.de` macro bodies) that
+  pod2man's preamble needs no special case; mdoc(7) pages and `.so` stubs
+  stay text, as before. Ported from the man parser in all2md
+  (`parsers/man.py`, MIT), reduced to plain text with attribution
+  (PR [#1134](https://github.com/xerj-org/xerj/pull/1134),
+  thomas-villani).
+- **XLSX merged cells fill down** — a cell merged DOWN over several rows
+  (a pandas MultiIndex export, a category label beside its line items)
+  stores its value only in the top row; every covered row now gets it, so
+  `region: East` matches all of East's rows and a `terms` aggregation
+  counts them. Merges across columns are deliberately not expanded
+  (PR [#1132](https://github.com/xerj-org/xerj/pull/1132),
+  thomas-villani).
+- **XLSX two-row grouped headers** — a header two rows deep (group labels
+  above the column names, pandas' MultiIndex columns) names each column
+  from both rows: `Q1_Jan`, `Q1_Feb`. Three-or-more-row headers keep
+  their two lowest rows; on sheets over 64 MB the sample keeps one
+  (PR [#1133](https://github.com/xerj-org/xerj/pull/1133),
+  thomas-villani, stacked on #1132).
+- **Docs: extracted formats** — `.pptx`/`.xlsx` listed as extracted
+  formats across the docs and the retired "no XLSX/PPTX extractor"
+  caveats removed
+  (PR [#1130](https://github.com/xerj-org/xerj/pull/1130),
+  thomas-villani).
+- **The xerj-code skill points at the whole hub** — per-project corpus
+  selection now walks the live registry instead of a hand-listed few
+  (PR [#1126](https://github.com/xerj-org/xerj/pull/1126)), and the
+  domain-selection table covers every live hub corpus
+  (PRs [#1143](https://github.com/xerj-org/xerj/pull/1143),
+  [#1149](https://github.com/xerj-org/xerj/pull/1149),
+  [#1150](https://github.com/xerj-org/xerj/pull/1150)).
+
+### Fixed
+
+- **`xerj code` top-k crowding** — one large file's adjacent 2 KB chunks
+  no longer crowd every other source out of the top-k: at most 2 records
+  per source file (issue [#1137](https://github.com/xerj-org/xerj/issues/1137),
+  fixed by PR [#1140](https://github.com/xerj-org/xerj/pull/1140) — the
+  failure class was measured as G7 retrieval fails before the fix).
+- **`xerj code` txt-family search** — the txt extraction family puts its
+  content in a `text` field the BM25 leg never searched, so passages
+  rendered empty; the field is searched now (issue
+  [#1139](https://github.com/xerj-org/xerj/issues/1139), fixed by PR
+  [#1140](https://github.com/xerj-org/xerj/pull/1140)).
+- **Markdown sniffing** — markdown whose body starts with YAML-shaped
+  keys or an HTML prefix classified as Yaml or Xml and indexed as junk;
+  it is Txt now, with guards on the sniffs that mistook it
+  (PRs [#1142](https://github.com/xerj-org/xerj/pull/1142) and
+  [#1144](https://github.com/xerj-org/xerj/pull/1144)).
+- **`.odp` advice** — the unsupported-format hint now tells OpenDocument
+  presentation owners to save as `.pptx` (one record per slide, with
+  slide titles and notes) rather than export to PDF
+  (PR [#1131](https://github.com/xerj-org/xerj/pull/1131),
+  thomas-villani).
+
+### Community
+
+- Field reports: a second reference-coding report from
+  [alessandropcostabr](https://github.com/alessandropcostabr)
+  (PR [#1141](https://github.com/xerj-org/xerj/pull/1141)) and a
+  doc-sort field report from
+  [Ravandevil25](https://github.com/Ravandevil25)
+  (PR [#1128](https://github.com/xerj-org/xerj/pull/1128)), whose CLA
+  signature landed with it (PR
+  [#1129](https://github.com/xerj-org/xerj/pull/1129)) — the `_doc`
+  arrival-order fix that report describes is reviewed and waiting on its
+  own CLA signature (PR
+  [#1127](https://github.com/xerj-org/xerj/pull/1127)).
+- Release-download metrics chore for 2026-10-04 (2,956 assets, 1,651
+  binaries — direct commit, `[skip ci]`).
+
 ## [1.0.0-rc.81] - 2026-10-03
 
 The agent-intake release — everything between rc.80 and this cut serves the

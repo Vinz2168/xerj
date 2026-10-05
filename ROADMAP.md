@@ -2,14 +2,19 @@
 
 This roadmap tracks capabilities that are **planned but not yet fully implemented**, so the project's public claims stay honest about what ships today versus what is coming. Status is verified against the actual code and by real API requests to the release binary, not aspirational.
 
-Last reviewed: 2026-10-03 (against `v1.0.0-rc.81` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.81 release-cut roll: the open-defects shortlist was
-re-verified against the live tracker at cut time — **four open** (#1091,
-#1092, #1094 from the rc.80 gate runs; #1100 from the console review);
-#1093 was closed inside the window by PR
-[#1112](https://github.com/xerj-org/xerj/pull/1112) (strict unknown-field
-refusal) and moves to the CHANGELOG — the lesson of 2026-09-21, when several
+Last reviewed: 2026-10-05 (against `v1.0.0-rc.82` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.82 release-cut roll: the open-defects shortlist was
+re-verified against the live tracker at cut time — **nine open** (#1091,
+#1092, #1094 from the rc.80 gate runs; #1100 from the console review;
+#1136 and #1145–#1148, the corpus-namespace and `xerj code` retrieval
+defects filed from the corpus-hub G7 work inside this window); #1137 and
+#1139 were closed inside the window by PR
+[#1140](https://github.com/xerj-org/xerj/pull/1140) and move to the
+CHANGELOG — the lesson of 2026-09-21, when several
 entries went stale within hours of that review, is why the shortlist is
-checked live at the cut rather than desk-carried. Later the same day the tracker was emptied: everything open after the cut — #1038, #1030, #1031, #1032 — was closed (the two shipped-half epics are in the rc.78 record below, the two defects are recorded below as deferred, not fixed), leaving zero open issues. The 2026-09-26 desk review (PR [#1036](https://github.com/xerj-org/xerj/pull/1036)) stands as recorded: it closed the CHANGELOG-gap GA item (the rc.19–rc.70 backfill, PR [#1035](https://github.com/xerj-org/xerj/pull/1035)), marked the stage-2 object-storage item done ([#965](https://github.com/xerj-org/xerj/issues/965) wired in rc.77), and corrected the mail-ingest memory line to the post-[#1002](https://github.com/xerj-org/xerj/pull/1002) reality. The *Shipping today* claims were last live-verified against rc.76 (unchanged by this pass), and *The zero-token direction* below was verified separately on 2026-09-18, against `main` @ `4d8dadbf`.
+checked live at the cut rather than desk-carried. The rc.81 roll's record
+stands as written: four open at that cut, with #1093 closed inside the
+window by PR [#1112](https://github.com/xerj-org/xerj/pull/1112) (strict
+unknown-field refusal). Later the same day the tracker was emptied: everything open after the cut — #1038, #1030, #1031, #1032 — was closed (the two shipped-half epics are in the rc.78 record below, the two defects are recorded below as deferred, not fixed), leaving zero open issues. The 2026-09-26 desk review (PR [#1036](https://github.com/xerj-org/xerj/pull/1036)) stands as recorded: it closed the CHANGELOG-gap GA item (the rc.19–rc.70 backfill, PR [#1035](https://github.com/xerj-org/xerj/pull/1035)), marked the stage-2 object-storage item done ([#965](https://github.com/xerj-org/xerj/issues/965) wired in rc.77), and corrected the mail-ingest memory line to the post-[#1002](https://github.com/xerj-org/xerj/pull/1002) reality. The *Shipping today* claims were last live-verified against rc.76 (unchanged by this pass), and *The zero-token direction* below was verified separately on 2026-09-18, against `main` @ `4d8dadbf`.
 
 ## Follow the roadmap
 
@@ -40,7 +45,19 @@ The release-by-release record of how all of this landed is [CHANGELOG.md](./CHAN
 
 ## Next release — [v1.0.0](https://github.com/xerj-org/xerj/milestone/2)
 
-The GA window. **rc.81 was cut on 2026-10-03** — its full contents are the
+The GA window. **rc.82 was cut on 2026-10-05** — the
+documents-people-actually-have release: man-page extraction plus the two
+spreadsheet shapes real workbooks ship (vertically merged XLSX cells,
+two-row grouped headers), all three
+[thomas-villani](https://github.com/thomas-villani)'s first contributions
+to the project; the `xerj code` retrieval fixes (issues #1137 and #1139
+closed by PR [#1140](https://github.com/xerj-org/xerj/pull/1140), the
+markdown sniff guards
+[#1142](https://github.com/xerj-org/xerj/pull/1142)/[#1144](https://github.com/xerj-org/xerj/pull/1144));
+the xerj-code skill pointing at the whole hub
+([#1126](https://github.com/xerj-org/xerj/pull/1126)); and two field
+reports whose CLA signatures extend the contributor list. **rc.81 was
+cut on 2026-10-03** — its full contents are the
 [CHANGELOG.md](./CHANGELOG.md) entry, not this file. It is **the
 agent-intake release**: the zero-experience E2E harness and its four
 defect fixes, `.pptx`/`.xlsx` extraction, the #1122 abort-under-memory-
@@ -78,7 +95,7 @@ and the console review's), the #1062 wrong-and-confident detection gate, the
 `xerj-decide-v1` Hugging Face publication (operator credentials), and the GA
 bar itself — *The road to v1.0.0 GA* below.
 
-**Open defects.** Four, all live on the tracker at rc.81 cut time — the
+**Open defects.** Nine, all live on the tracker at rc.82 cut time — the
 shortlist the release-notes gate checks. From the rc.80 gate runs:
 [#1091](https://github.com/xerj-org/xerj/issues/1091) (hybrid first stage
 13–26 s/query on the 57,638-doc FiQA index),
@@ -88,11 +105,25 @@ stemmer) and [#1094](https://github.com/xerj-org/xerj/issues/1094) (decision
 flywheel write-back freezes once the history index has BM25 support). From
 the rc.80 console knowledge-surface review:
 [#1100](https://github.com/xerj-org/xerj/issues/1100) (second-brain
-belief-time frame rendered on non-note corpora). **Closed inside the rc.81
-window and recorded in the CHANGELOG, not carried here:** #1093 (unknown
-lookup fields — strict refusal shipped with PR
-[#1112](https://github.com/xerj-org/xerj/pull/1112)); its siblings #1098 and
-#1099 were closed by #1095 inside rc.80.
+belief-time frame rendered on non-note corpora). Filed from the corpus-hub
+G7 work inside the rc.82 window:
+[#1136](https://github.com/xerj-org/xerj/issues/1136) (stale index
+generations survive `--fresh` swaps; a state file with `index_prefix=null`
+queries all of them) and the `xerj code` retrieval quartet
+[#1145](https://github.com/xerj-org/xerj/issues/1145) (`k` never sent on
+the semantic clause),
+[#1146](https://github.com/xerj-org/xerj/issues/1146) (hybrid drops
+lexical-only indices from the BM25 leg too),
+[#1147](https://github.com/xerj-org/xerj/issues/1147) (corpus-index ingest
+throughput caps corpus builds at ~10⁵ records/node-day, measured) and
+[#1148](https://github.com/xerj-org/xerj/issues/1148) (`--lang` silently
+disables the vector leg). **Closed inside the rc.82 window and recorded in
+the CHANGELOG, not carried here:** #1137 and #1139 (per-file top-k diversity
+and the txt-family search field, both fixed by PR
+[#1140](https://github.com/xerj-org/xerj/pull/1140)). **Closed inside the
+rc.81 window:** #1093 (unknown lookup fields — strict refusal shipped with
+PR [#1112](https://github.com/xerj-org/xerj/pull/1112)); its siblings #1098
+and #1099 were closed by #1095 inside rc.80.
 
 ## The road to [v1.0.0 GA](https://github.com/xerj-org/xerj/milestone/2)
 
