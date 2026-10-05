@@ -520,9 +520,11 @@ pub(crate) fn bm25_body(query: &str, k: usize, lang: &Option<String>, fields: &[
 /// vector pool to 10 whatever `size` says (#1145).
 pub(crate) fn semantic_body(query: &str, k: usize, lang: &Option<String>) -> Value {
     let q = serde_json::json!({ "semantic": { "field": "body", "query": query, "k": k } });
+    // `--lang` rides in `filter`: the engine sends a bool to the vector path
+    // only when the semantic clause is its sole must/should clause (#1148).
     let query = match lang {
         Some(lg) => serde_json::json!({
-            "bool": { "must": [q, { "match": { "language": lg } }] }
+            "bool": { "must": [q], "filter": [{ "match": { "language": lg } }] }
         }),
         None => q,
     };
@@ -541,10 +543,13 @@ pub(crate) fn hybrid_body(
 ) -> Value {
     // `--lang` must constrain BOTH legs (xc.py semantics): a language filter
     // on BM25 only lets the vector leg surface docs the user filtered out.
+    // It is a `filter`, not a second `must`: a semantic clause beside a
+    // sibling in `must` falls through to the lexical path and matches
+    // nothing (#1148). Both legs take the same shape.
     let wrap = |q: Value| -> Value {
         match lang {
             Some(lg) => serde_json::json!({
-                "bool": { "must": [q, { "match": { "language": lg } }] }
+                "bool": { "must": [q], "filter": [{ "match": { "language": lg } }] }
             }),
             None => q,
         }
@@ -902,6 +907,35 @@ mod tests {
             Some(&serde_json::json!(50)),
             "{hy}"
         );
+    }
+
+    /// #1148: the engine dispatches a bool to the vector path only when the
+    /// semantic clause is its ONE must/should clause (bool.filter is merged
+    /// into the semantic filter); a `match` beside it in `must` fell through
+    /// to the lexical path and answered 200 with zero hits. `--lang` must
+    /// therefore ride in `filter`, on both hybrid legs.
+    #[test]
+    fn lang_is_a_filter_so_the_semantic_clause_stays_alone_in_must() {
+        let lang = Some("rust".to_string());
+        let want_filter = serde_json::json!([{ "match": { "language": "rust" } }]);
+
+        let sem = semantic_body("q", 50, &lang);
+        let must = sem.pointer("/query/bool/must").and_then(Value::as_array);
+        assert_eq!(must.map(Vec::len), Some(1), "{sem}");
+        assert!(must.unwrap()[0].get("semantic").is_some(), "{sem}");
+        assert_eq!(sem.pointer("/query/bool/filter"), Some(&want_filter));
+
+        let fields = vec!["body".to_string()];
+        let hy = hybrid_body("q", 50, &lang, &fields);
+        for (leg, clause) in [(0, "multi_match"), (1, "semantic")] {
+            let q = hy
+                .pointer(&format!("/query/hybrid/queries/{leg}/query"))
+                .unwrap();
+            let must = q.pointer("/bool/must").and_then(Value::as_array);
+            assert_eq!(must.map(Vec::len), Some(1), "leg {leg}: {q}");
+            assert!(must.unwrap()[0].get(clause).is_some(), "leg {leg}: {q}");
+            assert_eq!(q.pointer("/bool/filter"), Some(&want_filter), "leg {leg}");
+        }
     }
 
     #[test]
