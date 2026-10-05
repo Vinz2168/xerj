@@ -542,6 +542,12 @@ catalog → verify.
     dataset per sheet, one record per row under the detected header row, cell types
     kept; one table per sheet; vertical merges filled down, a two-row grouped header
     combined into the column names (Q1_Jan), merges across columns not expanded),
+    EPUB (one record per chapter in reading order: spine documents cut at their
+    table-of-contents anchors, chapter_title from the toc, book title/author/
+    language/date from the package; DRM-encrypted chapters skipped), Jupyter
+    notebooks (any kernel; one record per Markdown-heading section with heading
+    and heading_path, code fenced in the kernel language, text outputs capped at
+    40 lines; images and HTML-only outputs skipped; nothing executed),
     man pages (roff man(7), plain or gzipped; one record per section, titled
     NAME(SECT); mdoc(7) pages stay plain text), HTML, XML, YAML, plain
     text, mail (`.eml` and mbox mailboxes —
