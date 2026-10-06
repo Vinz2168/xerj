@@ -1143,7 +1143,7 @@ RULES = [
         "evidence": [RC + ":346", RC + ":374"],
         "rewrite": "Pick a GREEN row instead, or file the extractor as an issue first. Of the "
                    "four missing extractors with the clearest demand (XLSX/PPTX, mbox/email, "
-                   "OCR/images, EPUB), OCR/images and EPUB are still missing.",
+                   "OCR/images, EPUB), only OCR/images is still missing.",
     },
     {
         "id": "FC-THING-AMBER",
@@ -1559,8 +1559,17 @@ THING_MATRIX = [
     {"thing": "Obsidian vault / wikilinks", "status": AMBER, "mech": "txt.rs + detect/wikilink.rs, detect/mdlink.rs",
      "cite": RC + ":365", "gate": "Verify wikilink graph extraction on a real vault before publishing.",
      "aliases": [r"obsidian", r"wikilink", r"\bvault\b", r"zettelkasten"]},
-    {"thing": "Jupyter notebooks", "status": AMBER, "mech": ".ipynb is JSON -> json.rs", "cite": RC + ":366",
-     "gate": "Verify cell-level extraction. Do not claim notebook-aware handling.",
+    # The research doc (RC:366) has notebooks AMBER as "JSON -> json.rs". #1162 added
+    # extract/ipynb.rs: notebooks are detected by content and extracted per heading
+    # section, so the row is GREEN. `--check-matrix` reports drift by design.
+    {"thing": "Jupyter notebooks", "status": GREEN,
+     "mech": "ipynb.rs - one record per Markdown-heading section, any kernel",
+     "cite": "engine/crates/xerj-autoindex/src/extract/ipynb.rs:1",
+     "gate": ("Write, SCOPED TO .ipynb (nbformat 3 and 4; Jupyter, VS Code, Colab). One record per "
+              "Markdown-heading section: heading, heading_path, first cell number, kernel language; "
+              "code fenced, text outputs capped at 40 lines / 4 KiB. Say what it does not do: images "
+              "and HTML-only outputs are not indexed, nothing is executed, notebooks over 64 MiB are "
+              "junk, and .Rmd/.qmd or Jupytext/marimo .py notebooks are not read as notebooks."),
      "aliases": [r"jupyter", r"\bipynb\b", r"\bnotebooks?\b"]},
     {"thing": "Slack export", "status": AMBER, "mech": "Slack ships JSON -> json.rs", "cite": RC + ":367",
      "gate": "Verify on a real export. Scope copy to 'the JSON files Slack gives you', not 'Slack integration'.",
@@ -1632,7 +1641,14 @@ THING_MATRIX = [
      "aliases": [r"takeout"]},
     {"thing": "Screenshots / scanned docs / OCR", "status": RED, "mech": "no extractor", "cite": RC + ":376",
      "gate": "Paperless-ngx owns this.", "aliases": [r"\bocr\b", r"scanned docs?", r"screenshots?", r"scanned documents?"]},
-    {"thing": "Ebooks (EPUB)", "status": RED, "mech": "no extractor", "cite": RC + ":377", "gate": "-",
+    # RC:377 has EPUB RED (no extractor); #1159 added extract/epub.rs.
+    {"thing": "Ebooks (EPUB)", "status": GREEN,
+     "mech": "epub.rs - one record per chapter, spine order, cut at toc anchors",
+     "cite": "engine/crates/xerj-autoindex/src/extract/epub.rs:1",
+     "gate": ("Write, SCOPED TO EPUB 2 and 3. Text only: one record per chapter in reading order with "
+              "chapter_title from the table of contents and the book's title/author/language/date. Say "
+              "what it does not do: DRM-protected chapters are skipped (never decrypted), image-only "
+              "or fixed-layout books are junk (no OCR), and .mobi/.azw/.fb2 are not read."),
      "aliases": [r"\bepub\b", r"\bebooks?\b"]},
     # The research doc (RC:378) lists "Excel / PowerPoint" as ONE red row. #1117
     # added extract/pptx.rs and #1124 added extract/xlsx.rs, so the row is split
@@ -1665,14 +1681,19 @@ THING_MATRIX = [
               "section with the page title and the NAME summary. mdoc(7) pages (BSD macros, e.g. "
               "ssh.1) are NOT parsed - they index as plain text lines. No rendering, no apropos/"
               "whatis database, no info pages."),
-     "aliases": [r"man ?pages?", r"manpages?", r"roff", r"troff", r"groff"]},
+     "aliases": [r"\bman ?pages?\b", r"\bmanpages?\b", r"\broff\b", r"\btroff\b", r"\bgroff\b"]},
     {"thing": "Legacy / other office formats (.xls, .ppt, .xlsb, OpenDocument)", "status": RED,
      "mech": "no extractor - sniff.rs names .xlsb and OpenDocument with an export hint", "cite": RC + ":378",
      "gate": "No extractor. Tell the reader to save as .xlsx / .pptx / .docx first; do not write a page.",
      "aliases": [r"\bxls\b", r"\bppt\b", r"\bxlsb\b", r"\bods\b", r"\bodp\b", r"\bodt\b",
                  r"opendocument"]},
-    {"thing": "Parquet", "status": RED, "mech": "no extractor", "cite": RC + ":379", "gate": "-",
-     "aliases": [r"parquet"]},
+    # Still no reader (RC:379). Since #1162 sniff.rs NAMES Parquet, Arrow/Feather, NumPy,
+    # HDF5 and pickle files and junks them with an export hint; a pickle is never loaded.
+    {"thing": "Parquet / Arrow / HDF5 / NumPy / pickle data files", "status": RED,
+     "mech": "no extractor - sniff.rs names them with an export-to-CSV hint", "cite": RC + ":379",
+     "gate": "No extractor. Tell the reader to export to CSV or JSON Lines first; do not write a page.",
+     "aliases": [r"parquet", r"\bfeather\b", r"\bhdf5\b", r"\bnpy\b", r"\bnpz\b",
+                 r"\bpickles?\b"]},
     {"thing": "Audio / video transcripts", "status": RED, "mech": "no extractor", "cite": RC + ":380", "gate": "-",
      "aliases": [r"audio", r"\bvideo\b", r"podcasts?", r"\bmp3\b", r"\bmp4\b"]},
 ]

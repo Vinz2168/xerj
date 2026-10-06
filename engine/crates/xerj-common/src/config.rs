@@ -355,6 +355,29 @@ impl Config {
         // control port (issue #75).
         self.cluster.validate()?;
 
+        // The cluster port must not collide with this node's own data
+        // listeners (#1171). A collision makes the cluster transport's bind
+        // fail at boot and the node degrades to single-node while
+        // /_cluster/health stays green — refusing here turns that trap into
+        // a boot-time error. (Cross-process port collisions can only be
+        // caught at bind time; this check catches the self-inflicted class.)
+        if self.cluster.enabled {
+            let cluster_port = self.cluster.port;
+            let listeners = [
+                ("rest_port", self.server.rest_port),
+                ("grpc_port", self.server.grpc_port),
+                ("es_compat_port", self.server.es_compat_port),
+            ];
+            let collision = listeners.iter().find(|(_, p)| *p == cluster_port);
+            if let Some((name, _)) = collision {
+                return Err(XerjError::config(format!(
+                    "cluster.port ({cluster_port}) collides with server.{name} — the cluster \
+                     transport would fail to bind and the node would silently degrade to \
+                     single-node mode (issue #1171)"
+                )));
+            }
+        }
+
         // Logging: format must be one of the two supported line formats.
         let fmt = self.logging.format.as_str();
         if !fmt.eq_ignore_ascii_case("text") && !fmt.eq_ignore_ascii_case("json") {
@@ -1752,9 +1775,14 @@ pub struct ClusterConfig {
     /// Each node in the cluster must expose this port and it must be reachable
     /// from all peers.
     pub port: u16,
-    /// Peer nodes in `"<node_id>=<host>:<port>"` format.
+    /// Peer nodes in `"<host>:<port>=<host>:<port>"` format — the label must
+    /// equal the address. A node's cluster id IS its socket address and
+    /// replies are routed by looking the sender's id up in this list, so a
+    /// differing label makes vote replies undeliverable and the node loses
+    /// every election with no diagnostic of its own (issue #1171; refused
+    /// at [`ClusterConfig::validate`]).
     ///
-    /// Example: `["n2=10.0.0.2:9300", "n3=10.0.0.3:9300"]`
+    /// Example: `["10.0.0.2:9300=10.0.0.2:9300", "10.0.0.3:9300=10.0.0.3:9300"]`
     pub peers: Vec<String>,
     /// Raft tick interval in milliseconds (default: `50`).
     ///
@@ -1845,8 +1873,53 @@ impl ClusterConfig {
                     Self::MIN_AUTH_SECRET_LEN
                 )))
             }
-            Some(_) => Ok(()),
+            Some(_) => self.validate_peers(),
         }
+    }
+
+    /// Validate peer entries beyond the shared-secret rules: every entry
+    /// must parse, and its label must equal its address (#1171).
+    ///
+    /// The cluster transport keys its reply map by peer label and routes
+    /// replies through `peers.get(candidate_id)` — and a node's Raft id IS
+    /// its listen address (derived in the server boot). A friendly label
+    /// (`n2=10.0.0.2:9300`) therefore makes the node's vote reply
+    /// undeliverable: it becomes an eternal candidate, re-electing every
+    /// ~200 ms, and the only diagnostic lands in the *rejecting* node's
+    /// log (`unknown peer: …`), never its own. Refusing at config load
+    /// turns that silent runtime churn into a boot-time error.
+    fn validate_peers(&self) -> Result<(), crate::XerjError> {
+        for peer in &self.peers {
+            match peer.split_once('=') {
+                Some((id, addr)) => {
+                    let addr = addr.trim();
+                    if let Err(e) = addr.parse::<std::net::SocketAddr>() {
+                        return Err(crate::XerjError::config(format!(
+                            "cluster.peers entry {peer:?} has an unparseable address ({e}); \
+                             expected \"<host:port>=<host:port>\" with the same address on both \
+                             sides of the '='"
+                        )));
+                    }
+                    if id.trim() != addr {
+                        return Err(crate::XerjError::config(format!(
+                            "cluster.peers entry {peer:?}: the label must equal the address. \
+                             Node ids in the cluster are socket addresses and replies are \
+                             routed by looking the sender's id up in the peer list, so a label \
+                             that differs from the address makes this node's vote replies \
+                             undeliverable — it will lose every election with no diagnostic of \
+                             its own (issue #1171). Write the entry as \"{addr}={addr}\""
+                        )));
+                    }
+                }
+                None => {
+                    return Err(crate::XerjError::config(format!(
+                        "cluster.peers entry {peer:?} is malformed: expected \
+                         \"<host:port>=<host:port>\" (the label must equal the address)"
+                    )))
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -3531,6 +3604,79 @@ mod tests {
         Config::default()
             .validate()
             .expect("defaults must validate");
+    }
+
+    // ── Cluster peers / ports: fail at load, not as silent runtime churn
+    //    (issue #1171) ────────────────────────────────────────────────────
+
+    #[test]
+    fn cluster_peer_label_must_equal_its_address() {
+        // A friendly label makes vote replies undeliverable (replies are
+        // routed by looking the sender's id up in the peer list, and ids
+        // ARE addresses) — the node then loses every election with no
+        // diagnostic of its own. Measured: 51+ elections in ~15 s.
+        let err = Config::from_toml_str(
+            "[cluster]\nenabled = true\nauth_secret = \"0123456789abcdef0123\"\n\
+             peers = [\"n2=10.0.0.2:9300\"]\n",
+        )
+        .expect_err("a peer label that differs from its address must be refused at load");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("label must equal the address"),
+            "error must name the rule, got: {msg}"
+        );
+        assert!(
+            msg.contains("10.0.0.2:9300=10.0.0.2:9300"),
+            "error must show the corrected entry, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cluster_peer_label_matching_address_is_accepted() {
+        Config::from_toml_str(
+            "[cluster]\nenabled = true\nauth_secret = \"0123456789abcdef0123\"\n\
+             peers = [\"10.0.0.2:9300=10.0.0.2:9300\", \"10.0.0.3:9300=10.0.0.3:9300\"]\n",
+        )
+        .expect("label==address peer entries must load");
+    }
+
+    #[test]
+    fn cluster_malformed_peer_entry_is_rejected() {
+        let err = Config::from_toml_str(
+            "[cluster]\nenabled = true\nauth_secret = \"0123456789abcdef0123\"\n\
+             peers = [\"10.0.0.2:9300\"]\n",
+        )
+        .expect_err("a peer entry without label=address must be refused");
+        assert!(
+            err.to_string().contains("malformed"),
+            "error must say malformed, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cluster_port_colliding_with_a_data_listener_is_rejected() {
+        // The bind would fail at boot and the node would silently degrade
+        // to single-node with a green /_cluster/health — refuse at load.
+        let err = Config::from_toml_str(
+            "[server]\nes_compat_port = 9300\n[cluster]\nenabled = true\n\
+             auth_secret = \"0123456789abcdef0123\"\nport = 9300\n",
+        )
+        .expect_err("cluster.port colliding with a data listener must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("collides with server.es_compat_port") && msg.contains("#1171"),
+            "error must name the colliding listener, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cluster_port_distinct_from_data_listeners_is_accepted() {
+        Config::from_toml_str(
+            "[server]\nrest_port = 18000\ngrpc_port = 18001\nes_compat_port = 18002\n\
+             [cluster]\nenabled = true\nauth_secret = \"0123456789abcdef0123\"\nport = 19300\n\
+             peers = [\"10.0.0.2:19300=10.0.0.2:19300\"]\n",
+        )
+        .expect("a distinct cluster port must load");
     }
 
     #[test]
