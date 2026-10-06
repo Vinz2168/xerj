@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`xerj corpus index` reported a converged state as a failure and an
+  uncountable node as "no new records"** (issue
+  [#1173](https://github.com/xerj-org/xerj/issues/1173)) — the resume
+  cleanup's `_delete_by_query` against an index a namespace swap had already
+  retired answered 404 and killed the run (a missing index cannot hold the
+  stale documents the cleanup exists to remove); 404 is now the answer
+  "deleted nothing", the same rule `_count` and `_cat/indices` already
+  follow. And when a failed run's before/after counts could not be read from
+  the node, the tool asserted "wrote no new records" — that claim now
+  requires both counts to be known; an unreadable count prints UNKNOWN.
+
 ## [1.0.0-rc.83] - 2026-10-06
 
 The corpus-hub hundred release. The engine window is small — one retrieval
