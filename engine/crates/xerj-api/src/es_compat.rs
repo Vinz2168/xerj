@@ -10094,6 +10094,33 @@ fn mapping_source_disabled(state: &AppState, index: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Who a search served: `"machine"` or `"user"` (#1109). Decided by the
+/// server from what the request itself IS, so no client input can mark its
+/// own traffic machine and dodge the `xerj gain` user hit-rate stat:
+///
+/// * `size == 0` — a counting probe. It asks for no hits back; the canonical
+///   issuer is autoindex's verification step, which reads back exact group
+///   counts that way (#1105). A human looking for documents always wants
+///   hits, and the ES-YAML suite's `size: 0` aggregation requests are tool
+///   traffic by the same definition.
+/// * the target is the autoindex catalog — a maintenance index no person
+///   searches; every query against it comes from `xerj autoindex`'s sweeps
+///   (`xerj gain` itself reads it the same way).
+///
+/// Everything a client CAN set — headers, principal, query body apart from
+/// these two semantics — is deliberately not consulted. The spoofable
+/// `X-Xerj-Internal` header proposal was rejected during #1107 and this is
+/// the replacement: classification from request shape, not request claim.
+/// A superuser running `size: 10` against a data index is classified user,
+/// because that is what the request is.
+fn search_actor_class(size: usize, index: &str) -> &'static str {
+    if size == 0 || index == xerj_common::AUTOINDEX_CATALOG_INDEX {
+        "machine"
+    } else {
+        "user"
+    }
+}
+
 async fn search_impl(
     state: AppState,
     index: String,
@@ -13185,7 +13212,13 @@ async fn search_impl(
     // "anonymous" until issue #329 — the API-key operations had been passing a
     // real `principal.label()` since #201, so the plumbing existed and this one
     // site simply did not use it.
-    state.engine.audit.append(
+    state.engine.audit.append_as(
+        // #1109: the machine/user split is decided HERE, server-side, from
+        // what the request itself is — never from anything a client can set
+        // (the spoofable `X-Xerj-Internal` header was considered and
+        // rejected during #1107, and that decision stands). See
+        // `search_actor_class` for exactly which requests are machine.
+        search_actor_class(body.size, index.as_str()),
         "search",
         principal.label(),
         index.as_str(),
@@ -45829,5 +45862,36 @@ mod cluster_topology_honesty_tests {
         // the headline, not a reason to hide the second problem.
         assert_eq!(body["xerj_cluster_transport"], "degraded");
         assert_eq!(body["number_of_nodes"], 1);
+    }
+}
+
+#[cfg(test)]
+mod search_actor_class_tests {
+    use super::*;
+
+    /// #1109: the two machine classes, pinned. `size == 0` is a counting
+    /// probe; the catalog index is a maintenance index. Both classifications
+    /// hold regardless of who issued the request — the server cannot see
+    /// intent, only shape, and shape is what these tests fix.
+    #[test]
+    fn counting_probes_and_catalog_sweeps_are_machine() {
+        assert_eq!(search_actor_class(0, "ax-logs"), "machine");
+        assert_eq!(search_actor_class(10, "autoindex-catalog"), "machine");
+        assert_eq!(search_actor_class(0, "autoindex-catalog"), "machine");
+    }
+
+    /// The anti-spoof property, stated as a test: a superuser-scale page on
+    /// an ordinary data index is USER traffic, and nothing about the
+    /// principal, headers, or query body changes that — the function's
+    /// signature literally has no room for client input beyond page size and
+    /// target index, which is the point.
+    #[test]
+    fn ordinary_searches_stay_user_no_matter_the_caller() {
+        assert_eq!(search_actor_class(10, "ax-logs"), "user");
+        assert_eq!(search_actor_class(1, "ax-logs"), "user");
+        assert_eq!(search_actor_class(10_000, "ax-logs"), "user");
+        // A catalog-named DATA index must not be caught by the exact-name
+        // match — only the maintenance index itself is machine.
+        assert_eq!(search_actor_class(10, "autoindex-catalog-copy"), "user");
     }
 }
