@@ -7,10 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.86] - 2026-10-06
+
 ### Security
 
 - **Audit records now carry a server-derived `actor` class (`user`/`machine`)** (issue
-  [#1109](https://github.com/xerj-org/xerj/issues/1109)) — the audit log's
+  [#1109](https://github.com/xerj-org/xerj/issues/1109), PR
+  [#1194](https://github.com/xerj-org/xerj/pull/1194)) — the audit log's
   search entries said WHO ran a query but not WHO IT SERVED, so the only way
   `xerj gain` could exclude autoindex's own machine traffic (#1105) was to
   re-derive it client-side from the note string (`size=0` probes) and the
@@ -32,8 +35,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Raw-JSON corpora answered "No passage matches" for every query**
+  (issue [#1158](https://github.com/xerj-org/xerj/issues/1158), PR
+  [#1185](https://github.com/xerj-org/xerj/pull/1185)) — a raw-JSON
+  corpus (advisory mirrors, OSV records) maps none of the standard
+  content fields (`body`, `text`, …); the `xerj code` field resolver
+  then fell to its "never an empty list" floor, `["body"]` — a field no
+  index in the corpus maps, and on this engine an unmapped
+  `multi_match` field collapses a multi-token query to zero hits with
+  no error. The corpus built clean (193k docs) and was then invisible:
+  0 hits under `xerj code` while the same indices returned 10,000+ hits
+  queried directly (ghsa-db round-1 G7 0/5 was this). When no standard
+  field is mapped, the floor is now the corpus's OWN text-typed
+  properties (`ax_*` provenance excluded, sorted, capped at 24), and
+  the passage renderer's last resort becomes the source's longest
+  non-empty string field instead of an empty passage under a healthy
+  header. Measured A/B on an advisory-shaped mapping: `fields=["body"]`
+  → 0 hits (the defect); `fields=["details","summary"]` → 8 hits (the
+  fix). Works retroactively on already-built corpora; the build-time
+  half (extractor-side passage + a zero-text warning at index time)
+  stays open on the issue.
+
 - **`embedding.mode = "proxy"` with an unusable endpoint silently ran
-  lexical** (issue [#1189](https://github.com/xerj-org/xerj/issues/1189)) —
+  lexical** (issue [#1189](https://github.com/xerj-org/xerj/issues/1189), PR
+  [#1193](https://github.com/xerj-org/xerj/pull/1193)) —
   an empty `default_endpoint` or a typo'd URL (`htp://…`) produced a
   startup WARN and a lexical embedder; indexing and semantic search then
   "succeeded" while writing lexical feature-hash vectors into the index, and
@@ -47,7 +72,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is visible where the work happens.
 
 - **`embedding.batch_size` was never read** (issue
-  [#1190](https://github.com/xerj-org/xerj/issues/1190)) — the setting
+  [#1190](https://github.com/xerj-org/xerj/issues/1190), PR
+  [#1193](https://github.com/xerj-org/xerj/pull/1193)) — the setting
   documented "Maximum documents per embedding API call (default: 64)" but
   no code read it: one `_bulk` of 20 documents left the proxy as a single
   request with 20 inputs, and an autoindex run was observed sending a
@@ -62,7 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vectors keep input order across chunk boundaries.
 
 - **Long BM25 queries silently fell back to per-segment IDF/avgdl**
-  (issue [#1186](https://github.com/xerj-org/xerj/issues/1186)) — the
+  (issue [#1186](https://github.com/xerj-org/xerj/issues/1186), PR
+  [#1188](https://github.com/xerj-org/xerj/pull/1188)) — the
   index-wide statistics pre-pass (#188) budgeted `(fields + terms) ×
   segments ≤ 4096`, so a many-term query on a multi-segment index crossed
   the cap, the pre-pass silently declined, and every segment scored
@@ -82,7 +109,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bit-for-bit.
 
 - **`xerj code --mode hybrid` dropped lexical-only indices from the BM25
-  leg** (issue [#1146](https://github.com/xerj-org/xerj/issues/1146)) — on
+  leg** (issue [#1146](https://github.com/xerj-org/xerj/issues/1146), PR
+  [#1177](https://github.com/xerj-org/xerj/pull/1177), Vincenzo Lombardo) — on
   a corpus where only some indices map `body` as `semantic_text`, the fused
   request went to the capable set alone (a semantic leg 400s on plain
   text), so every lexical-only index vanished from both legs while the note
@@ -95,7 +123,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build: hybrid -k 20 → 20 hits (19 lexical-only + 1 semantic).
 
 - **An index's analysis configuration could not be verified over the wire**
-  (issue [#1092](https://github.com/xerj-org/xerj/issues/1092)) — search
+  (issue [#1092](https://github.com/xerj-org/xerj/issues/1092), PR
+  [#1184](https://github.com/xerj-org/xerj/pull/1184), Vincenzo Lombardo) — search
   honoured a declared `analysis.analyzer.default`, but nothing an agent can
   read said so. `GET /{index}/_settings` and `GET /{index}` replayed an
   in-memory copy of the create body: after a restart it was empty, so the
@@ -117,12 +146,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offsets and positions match on all 24 probed requests. Only the wording of
   the reason differs on 3 of the 400s.
 
-- **`sort: [{"_doc": ...}]` is arrival order, not `_id` order** — the `_doc`
+- **`sort: [{"_doc": ...}]` is arrival order, not `_id` order** (PR
+  [#1127](https://github.com/xerj-org/xerj/pull/1127), Saurav Kumar) — the `_doc`
   sort key projected the document id string, so `_doc` pages ranked
   lexicographically by `_id` (matching neither ES index order nor XERJ's own
   stored order). The key is now the document's `seq_no`: numeric arrival
   order, unique per live doc (no ties), and a working `search_after` cursor.
   `_id` sort still echoes the id string.
+
+### Community
+
+- Two field reports, two fixes, and one first-time contributor landed in
+  this window. Vinz2168 reported the hybrid BM25-leg defect on a real
+  mixed-mapping corpus and verified the fix on it
+  ([#1178](https://github.com/xerj-org/xerj/pull/1178)); the same reporter's
+  `_settings`/`_analyze` work (#1092 above) went in through a maintainer
+  rebase ([#1184](https://github.com/xerj-org/xerj/pull/1184)). Thomas
+  Villani measured `xerj code` as a file-localization retriever over
+  SWE-bench Lite and published the numbers
+  ([#1187](https://github.com/xerj-org/xerj/pull/1187)). Saurav Kumar
+  (Ravandevil25, whose `_doc` field report and CLA landed in rc.85) had
+  his `_doc` arrival-order fix (#1127 above) merge after its CLA wait —
+  his first code contribution to the project.
+- Release-download metrics chore for 2026-10-06 (3,114 assets, 1,730
+  binaries — direct commit, `[skip ci]`).
 
 ## [1.0.0-rc.85] - 2026-10-06
 

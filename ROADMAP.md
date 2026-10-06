@@ -2,22 +2,33 @@
 
 This roadmap tracks capabilities that are **planned but not yet fully implemented**, so the project's public claims stay honest about what ships today versus what is coming. Status is verified against the actual code and by real API requests to the release binary, not aspirational.
 
-Last reviewed: 2026-10-06 (against `v1.0.0-rc.85` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.85 release-cut roll: the open-defects shortlist was
-re-verified against the live tracker at cut time — **ten open** (#1091,
-#1092, #1094 from the rc.80 gate runs; #1100 from the console review;
-#1146 and #1147, the kNN-recall and build-throughput classes;
-#1158, the missing `text` field that made raw JSON/JSONL mirrors invisible
-to `xerj code` passage search; #1122, reopened 2026-10-05 when the
-reference node died at its memory ceiling with no panic line; #1170,
-the leader-wiring class filed from the rc.83 3-node ring tests; and
-#1173's throughput half). #1168 — the election-churn root cause
-(self in the peer set: a 3-node ring computed a 4-member majority and
-double-counted its own vote) — was closed inside the window by PR
-[#1179](https://github.com/xerj-org/xerj/pull/1179), measured at a
-~250 ms leader failover with zero subsequent elections over 240 s, and
-moves to the CHANGELOG; PR [#1180](https://github.com/xerj-org/xerj/pull/1180)
-made the clustering page match that reality (replication is roadmap, not
-shipped). The rc.84 cut's record stands as written: eleven open at that
+Last reviewed: 2026-10-06 (against `v1.0.0-rc.86` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.86 release-cut roll: the open-defects shortlist was
+re-verified against the live tracker at cut time — **eleven open**
+(#1091 and #1094 from the rc.80 gate runs; #1100 from the console
+review; #1147, the build-throughput class; #1158's build-time half;
+#1122, reopened 2026-10-05 when the reference node died at its memory
+ceiling with no panic line; #1170, the leader-wiring class filed from
+the rc.83 3-node ring tests; #1173's throughput half; and three filed
+from the corpus-program work since rc.85 — #1108 the detections gate,
+#1110 the generalization proof, #1183 the finalize-catalog deadlock).
+**Six closed inside the rc.86 window and recorded in the CHANGELOG, not
+carried here:** #1109 (server-derived audit `actor` — PR
+[#1194](https://github.com/xerj-org/xerj/pull/1194)), #1189 and #1190
+(embed-mode proxy fail-closed and the unwired `batch_size` — PR
+[#1193](https://github.com/xerj-org/xerj/pull/1193)), #1186 (the BM25
+stats probe budget split by cost class — PR
+[#1188](https://github.com/xerj-org/xerj/pull/1188)), #1146 (hybrid
+keeping lexical-only indices in the BM25 leg — PR
+[#1177](https://github.com/xerj-org/xerj/pull/1177), an external
+contributor's first merged fix) and #1092 (`_settings`/`_analyze`
+echoing real analysis — PR
+[#1184](https://github.com/xerj-org/xerj/pull/1184), same contributor).
+The rc.85 cut's record stands as written: ten open at that cut, with
+#1168 — the election-churn root cause (self in the peer set) — closed
+inside its window by PR [#1179](https://github.com/xerj-org/xerj/pull/1179)
+and the clustering page corrected by PR
+[#1180](https://github.com/xerj-org/xerj/pull/1180). The rc.84 cut's
+record stands as written: eleven open at that
 cut, with #1169 and #1171 — the fabricated-topology and
 invisible-degraded-boot cluster defects — closed inside its window by
 PRs [#1172](https://github.com/xerj-org/xerj/pull/1172) and
@@ -61,7 +72,37 @@ The release-by-release record of how all of this landed is [CHANGELOG.md](./CHAN
 
 ## Next release — [v1.0.0](https://github.com/xerj-org/xerj/milestone/2)
 
-The GA window. **rc.84 was cut on 2026-10-06** — the
+The GA window. **rc.86 was cut on 2026-10-06** — the
+audit-and-config honesty window: every audit entry now carries a
+server-derived `actor` class (`user`/`machine`) that no client input can
+influence (#1109, PR [#1194](https://github.com/xerj-org/xerj/pull/1194)
+— the class is inside the hash chain, and `xerj gain` stops parsing
+notes to guess it); an explicit `embedding.mode = "proxy"` fails closed
+at startup instead of silently running lexical (#1189), and
+`embedding.batch_size` actually reaches the proxy (#1190) — both PR
+[#1193](https://github.com/xerj-org/xerj/pull/1193); long BM25 queries
+stop silently falling back to per-segment IDF/avgdl (#1186, PR
+[#1188](https://github.com/xerj-org/xerj/pull/1188)); raw-JSON corpora
+stopped answering every `xerj code` query with "No passage matches"
+(#1158's query-time half, PR
+[#1185](https://github.com/xerj-org/xerj/pull/1185) — the build-time
+half stays open); and two external-contributor fixes landed: hybrid
+keeps lexical-only indices in the BM25 leg (#1146, PR
+[#1177](https://github.com/xerj-org/xerj/pull/1177), Vinz2168) and
+`_settings`/`_analyze` echo the analysis actually in force (#1092, PR
+[#1184](https://github.com/xerj-org/xerj/pull/1184), same contributor,
+via maintainer rebase). `sort: [{"_doc": ...}]` pages in arrival order
+(PR [#1127](https://github.com/xerj-org/xerj/pull/1127), Saurav Kumar's
+first merged code). In flight past the cut: phase-B bulk coalescing for
+#1147 (PR [#1195](https://github.com/xerj-org/xerj/pull/1195) — the
+per-file round-trip ceiling, A/B'd on two corpus shapes with no
+regression). **rc.85 was cut on 2026-10-06** — the cluster-ring-works
+window: #1168's self-in-peers election churn fixed by PR
+[#1179](https://github.com/xerj-org/xerj/pull/1179) (measured ~250 ms
+leader failover, zero subsequent elections over 240 s) and the
+clustering docs made to match reality by PR
+[#1180](https://github.com/xerj-org/xerj/pull/1180) (replication is
+roadmap, not shipped). **rc.84 was cut on 2026-10-06** — the
 tell-the-truth window: cluster endpoints stopped fabricating ring topology
 and report real membership with honest waits (#1169, PR
 [#1172](https://github.com/xerj-org/xerj/pull/1172)), a degraded
@@ -140,28 +181,44 @@ and the console review's), the #1062 wrong-and-confident detection gate, the
 `xerj-decide-v1` Hugging Face publication (operator credentials), and the GA
 bar itself — *The road to v1.0.0 GA* below.
 
-**Open defects.** Eight, all live on the tracker at rc.83 cut time — the
+**Open defects.** Eleven, all live on the tracker at rc.86 cut time — the
 shortlist the release-notes gate checks. From the rc.80 gate runs:
 [#1091](https://github.com/xerj-org/xerj/issues/1091) (hybrid first stage
-13–26 s/query on the 57,638-doc FiQA index),
-[#1092](https://github.com/xerj-org/xerj/issues/1092) (`_settings` does not
-echo the analysis block; `_analyze` shows the standard path under a declared
-stemmer) and [#1094](https://github.com/xerj-org/xerj/issues/1094) (decision
-flywheel write-back freezes once the history index has BM25 support). From
-the rc.80 console knowledge-surface review:
+13–26 s/query on the 57,638-doc FiQA index) and
+[#1094](https://github.com/xerj-org/xerj/issues/1094) (decision
+flywheel write-back freezes once the history index has BM25 support).
+From the rc.80 console knowledge-surface review:
 [#1100](https://github.com/xerj-org/xerj/issues/1100) (second-brain
-belief-time frame rendered on non-note corpora). Filed from the corpus-hub
-G7 work: [#1146](https://github.com/xerj-org/xerj/issues/1146) (hybrid
-drops lexical-only indices from the BM25 leg too) and
-[#1147](https://github.com/xerj-org/xerj/issues/1147) (corpus-index ingest
-throughput caps corpus builds at ~10⁵ records/node-day, measured — the
-osv-ecosystems corpus is deferred on exactly this number). Reopened or
-still open from the rc.81/82 windows:
-[#1158](https://github.com/xerj-org/xerj/issues/1158) (the missing `text`
-field that made raw-JSON/JSONL mirrors invisible to `xerj code` passage
-search) and [#1122](https://github.com/xerj-org/xerj/issues/1122) (reopened
-2026-10-05 when the reference node died at its memory ceiling with no panic
-line). **Closed inside the rc.83 window and recorded in the CHANGELOG, not
+belief-time frame rendered on non-note corpora). From the corpus-hub G7
+work: [#1147](https://github.com/xerj-org/xerj/issues/1147) (corpus-index
+ingest throughput caps corpus builds at ~10⁵ records/node-day, measured —
+the osv-ecosystems corpus is deferred on exactly this number; the
+wire-side coalescing half is in flight as PR
+[#1195](https://github.com/xerj-org/xerj/pull/1195)). From the rc.81/82
+windows: [#1158](https://github.com/xerj-org/xerj/issues/1158) (the
+build-time half — the query-time half shipped in rc.86) and
+[#1122](https://github.com/xerj-org/xerj/issues/1122) (reopened
+2026-10-05 when the reference node died at its memory ceiling with no
+panic line). From the cluster-mode testing:
+[#1170](https://github.com/xerj-org/xerj/issues/1170) (the Raft ring is
+never connected to the engine) and
+[#1173](https://github.com/xerj-org/xerj/issues/1173) (resume-after-death
+crawl throughput, its honesty half shipped in rc.84). Filed from the
+corpus-program work:
+[#1108](https://github.com/xerj-org/xerj/issues/1108) (the #1062
+wrong-and-confident detection gate, unmeasured),
+[#1110](https://github.com/xerj-org/xerj/issues/1110) (the
+generalization proof: second-domain pack + fresh-machine replay) and
+[#1183](https://github.com/xerj-org/xerj/issues/1183) (corpus index
+finalize-catalog deadlocking all 297 threads on a fresh build).
+**Closed inside the rc.86 window and recorded in the CHANGELOG, not
+carried here:** #1109, #1189, #1190, #1186, #1146 and #1092 (PRs
+[#1194](https://github.com/xerj-org/xerj/pull/1194),
+[#1193](https://github.com/xerj-org/xerj/pull/1193),
+[#1188](https://github.com/xerj-org/xerj/pull/1188),
+[#1177](https://github.com/xerj-org/xerj/pull/1177) and
+[#1184](https://github.com/xerj-org/xerj/pull/1184)). **Closed inside
+the rc.83 window and recorded in the CHANGELOG, not
 carried here:** #1136 (stale index generations surviving `--fresh` swaps —
 a state file with `index_prefix=null` queried all of them; fixed by PR
 [#1156](https://github.com/xerj-org/xerj/pull/1156)) and two of the `xerj
