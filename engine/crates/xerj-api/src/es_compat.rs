@@ -423,11 +423,14 @@ async fn cluster_health_inner(
     // replicated-closed semantics keep the *cluster* status driven by
     // replicas only. Our tests cover both — we currently only track a single
     // "closed" flag per index and don't differentiate the closed-replication
-    // mode.
+    // mode. A degraded cluster transport is yellow too (#1171): the node is
+    // serving, but not as the clustered node the operator configured.
+    let cluster_transport_degraded =
+        state.cluster_transport == crate::state::ClusterTransportStatus::Degraded;
     let unassigned_primaries = selected_failed.len() as u32;
     let status = if unassigned_primaries > 0 {
         "red"
-    } else if unassigned_replicas > 0 {
+    } else if unassigned_replicas > 0 || cluster_transport_degraded {
         "yellow"
     } else {
         "green"
@@ -539,7 +542,17 @@ async fn cluster_health_inner(
     // the multinode smoke suite would "converge" on a single node; that
     // suite now skips with a recorded reason instead of passing against a
     // fabricated topology (yaml/smoke/smoke_test_multinode/10_basic.yml).
-    let nodes = configured_node_count(&state.config);
+    //
+    // A degraded transport (#1171) drops the count to the 1 node actually
+    // serving: the configured peers are unreachable by construction — the
+    // transport that would reach them failed to bind — so counting them
+    // here would be the same fabrication #1169 removed, wearing the
+    // degraded state as a topology.
+    let nodes = if cluster_transport_degraded {
+        1
+    } else {
+        configured_node_count(&state.config)
+    };
     let wait_for_nodes_unmet = match wait_for_nodes {
         NodesWait::AtLeast(n) => nodes < n,
         NodesWait::AtMost(n) => nodes > n,
@@ -564,6 +577,15 @@ async fn cluster_health_inner(
         "task_max_waiting_in_queue_millis": 0,
         "active_shards_percent_as_number": if idx_count == 0 { 100.0 } else { (active as f64) / (idx_count as f64) * 100.0 },
     });
+    // The one-word reason yellow is yellow when the transport is degraded
+    // (#1171): status says *what*, this says *why*, and a client polling
+    // health sees the difference between "replicas unassigned" and "you are
+    // not clustered at all". Extra fields are additive on this wire — ES
+    // clients ignore unknowns — and the ES-YAML assertions are
+    // match-shaped, so it appears only when it is true.
+    if cluster_transport_degraded {
+        resp["xerj_cluster_transport"] = json!("degraded");
+    }
 
     // `level=indices` or `level=shards` — include a per-index breakdown.
     let level = params.level.as_deref().unwrap_or("cluster");
@@ -45459,5 +45481,109 @@ mod cluster_topology_honesty_tests {
         assert_eq!(body["master_node"], "local");
         let nodes = body["nodes"].as_object().expect("nodes map");
         assert_eq!(nodes.len(), 1);
+    }
+
+    // ── #1171: the degraded transport must surface in health ────────────
+    use crate::state::ClusterTransportStatus;
+
+    /// #1171: a configured ring whose transport failed to bind (or whose
+    /// cluster-state storage was unavailable) used to be indistinguishable
+    /// from a healthy node — one ERROR line at boot, then `green` forever.
+    /// The boot path now records the outcome on `AppState`; health must say
+    /// yellow, count only the 1 node actually serving, and carry the
+    /// one-word marker that says *why* it is yellow.
+    #[tokio::test]
+    async fn degraded_transport_health_is_yellow_one_node_and_marked() {
+        let mut state = ring3();
+        state.cluster_transport = ClusterTransportStatus::Degraded;
+        let app = crate::router::build_es_compat_router(state);
+
+        let (status_code, body) = get(&app, "/_cluster/health").await;
+        assert_eq!(status_code, StatusCode::OK);
+        assert_eq!(body["status"], "yellow");
+        // The configured peers are unreachable by construction — the
+        // transport that would reach them failed to bind — so counting the
+        // configured 3 here would be the same fabrication #1169 removed,
+        // wearing the degraded state as a topology.
+        assert_eq!(body["number_of_nodes"], 1);
+        assert_eq!(body["number_of_data_nodes"], 1);
+        assert_eq!(body["xerj_cluster_transport"], "degraded");
+    }
+
+    /// A degraded node must not "converge" on the ring it was configured
+    /// for: asking 2 nodes of the 1 actually serving times out with the
+    /// real count — the honest-wait semantics of #1169, seen from the
+    /// degraded side.
+    #[tokio::test]
+    async fn degraded_transport_waits_time_out_on_the_ring_it_cannot_join() {
+        let mut state = ring3();
+        state.cluster_transport = ClusterTransportStatus::Degraded;
+        let app = crate::router::build_es_compat_router(state);
+
+        let (status_code, body) = get(&app, "/_cluster/health?wait_for_nodes=2").await;
+        assert_eq!(status_code, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(body["timed_out"], true);
+        assert_eq!(body["number_of_nodes"], 1, "count stays the serving 1");
+        assert_eq!(body["xerj_cluster_transport"], "degraded");
+
+        // The serving node alone still satisfies `wait_for_nodes=1`.
+        let (status_code, body) = get(&app, "/_cluster/health?wait_for_nodes=1").await;
+        assert_eq!(status_code, StatusCode::OK);
+        assert_eq!(body["timed_out"], false);
+    }
+
+    /// The marker appears only when it is true: a disabled node (green
+    /// single-node by design) and a running ring both answer without it —
+    /// a client polling for the field sees it exactly when the node is
+    /// degraded, never as an always-present `xerj_*` stub.
+    #[tokio::test]
+    async fn the_degraded_marker_appears_only_when_degraded() {
+        for state in [
+            state_with_cluster(false, &[], 9300),
+            ring3(), // enabled -> Running seed: a configured ring that came up
+        ] {
+            let app = crate::router::build_es_compat_router(state);
+            let (status_code, body) = get(&app, "/_cluster/health").await;
+            assert_eq!(status_code, StatusCode::OK);
+            assert!(
+                body.get("xerj_cluster_transport").is_none(),
+                "marker must be absent, got {}",
+                body["xerj_cluster_transport"]
+            );
+        }
+    }
+
+    /// Red outranks degraded-yellow: an unopenable index is an unassigned
+    /// PRIMARY, strictly worse than serving single-node against a ring. The
+    /// failed-index entry is inserted directly — the same
+    /// `{name, reason, failed_at_ms}` record boot discovery inserts for a
+    /// corrupt-on-disk index — so the precedence of the status chain is
+    /// pinned without hand-crafting an unopenable directory.
+    #[tokio::test]
+    async fn an_unopenable_index_still_outranks_the_degraded_marker() {
+        let mut state = ring3();
+        state.cluster_transport = ClusterTransportStatus::Degraded;
+        state.engine.failed_indices.insert(
+            "broken".to_string(),
+            xerj_engine::engine::FailedIndex {
+                name: "broken".to_string(),
+                reason: "manifest unparseable (test fixture)".to_string(),
+                failed_at_ms: 0,
+                retries: 0,
+            },
+        );
+        let app = crate::router::build_es_compat_router(state);
+
+        let (status_code, body) = get(&app, "/_cluster/health").await;
+        assert_eq!(status_code, StatusCode::OK);
+        assert_eq!(
+            body["status"], "red",
+            "an unassigned primary is the worse fact"
+        );
+        assert_eq!(body["unassigned_primary_shards"], 1);
+        // The marker still tells the operator about the transport — red is
+        // the headline, not a reason to hide the second problem.
+        assert_eq!(body["xerj_cluster_transport"], "degraded");
+        assert_eq!(body["number_of_nodes"], 1);
     }
 }
