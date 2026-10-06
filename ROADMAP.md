@@ -2,20 +2,27 @@
 
 This roadmap tracks capabilities that are **planned but not yet fully implemented**, so the project's public claims stay honest about what ships today versus what is coming. Status is verified against the actual code and by real API requests to the release binary, not aspirational.
 
-Last reviewed: 2026-10-06 (against `v1.0.0-rc.84` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.84 release-cut roll: the open-defects shortlist was
-re-verified against the live tracker at cut time — **eleven open** (#1091,
+Last reviewed: 2026-10-06 (against `v1.0.0-rc.85` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.85 release-cut roll: the open-defects shortlist was
+re-verified against the live tracker at cut time — **ten open** (#1091,
 #1092, #1094 from the rc.80 gate runs; #1100 from the console review;
 #1146 and #1147, the kNN-recall and build-throughput classes;
 #1158, the missing `text` field that made raw JSON/JSONL mirrors invisible
 to `xerj code` passage search; #1122, reopened 2026-10-05 when the
-reference node died at its memory ceiling with no panic line; #1168 and
-#1170, the cluster liveness and leader-wiring classes filed from the rc.83
-3-node ring tests; and #1173's throughput half). #1169 and #1171 —
-the fabricated-topology and invisible-degraded-boot cluster defects —
-were closed inside the window by PRs
-[#1172](https://github.com/xerj-org/xerj/pull/1172) and
-[#1175](https://github.com/xerj-org/xerj/pull/1175) and move to the
-CHANGELOG — the lesson of 2026-09-21, when several
+reference node died at its memory ceiling with no panic line; #1170,
+the leader-wiring class filed from the rc.83 3-node ring tests; and
+#1173's throughput half). #1168 — the election-churn root cause
+(self in the peer set: a 3-node ring computed a 4-member majority and
+double-counted its own vote) — was closed inside the window by PR
+[#1179](https://github.com/xerj-org/xerj/pull/1179), measured at a
+~250 ms leader failover with zero subsequent elections over 240 s, and
+moves to the CHANGELOG; PR [#1180](https://github.com/xerj-org/xerj/pull/1180)
+made the clustering page match that reality (replication is roadmap, not
+shipped). The rc.84 cut's record stands as written: eleven open at that
+cut, with #1169 and #1171 — the fabricated-topology and
+invisible-degraded-boot cluster defects — closed inside its window by
+PRs [#1172](https://github.com/xerj-org/xerj/pull/1172) and
+[#1175](https://github.com/xerj-org/xerj/pull/1175). The lesson of
+2026-09-21, when several
 entries went stale within hours of that review, is why the shortlist is
 checked live at the cut rather than desk-carried. The rc.83 roll's record
 stands as written: eight open at that cut, with #1136 closed inside the
