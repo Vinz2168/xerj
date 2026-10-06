@@ -36023,8 +36023,7 @@ mod embedding_identity_tests {
                 ..Default::default()
             };
             let err = embedding_execution_identity(&broken)
-                .err()
-                .expect("explicit proxy with an unusable endpoint must error");
+                .expect_err("explicit proxy with an unusable endpoint must error");
             let msg = format!("{err}");
             assert!(
                 msg.contains("embedding.mode=proxy"),
@@ -36064,9 +36063,11 @@ mod embedding_identity_tests {
                 default_endpoint: endpoint.into(),
                 ..Default::default()
             };
+            // `Embedder` is not Debug, so plain `expect_err` cannot print
+            // the Ok side; map it away first.
             let err = make_embedder(&cfg)
-                .err()
-                .expect("explicit proxy with an unusable endpoint must error");
+                .map(|_| ())
+                .expect_err("explicit proxy with an unusable endpoint must error");
             let msg = format!("{err}");
             assert!(
                 msg.contains("embedding.mode=proxy"),
