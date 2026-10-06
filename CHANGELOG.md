@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`xerj code --mode hybrid` dropped lexical-only indices from the BM25
+  leg** (issue [#1146](https://github.com/xerj-org/xerj/issues/1146)) — on
+  a corpus where only some indices map `body` as `semantic_text`, the fused
+  request went to the capable set alone (a semantic leg 400s on plain
+  text), so every lexical-only index vanished from both legs while the note
+  said "BM25 over N index(es)": 1 hit under hybrid where `--mode bm25`
+  returned 20. The lexical-only indices now get the same native `hybrid`
+  with its BM25 leg alone; the engine fuses per index, so both responses
+  carry RRF scores on one scale and are merged by `_score` the way the
+  engine merges indices — no client-side fusion. The note names them
+  ("lexical-only (BM25 leg only, merged by score)"). Same repro, rc.83
+  build: hybrid -k 20 → 20 hits (19 lexical-only + 1 semantic).
 - **Cluster endpoints fabricated topology** (issue
   [#1169](https://github.com/xerj-org/xerj/issues/1169)) —
   `GET /_cluster/health?wait_for_nodes=N` echoed `N` back as
