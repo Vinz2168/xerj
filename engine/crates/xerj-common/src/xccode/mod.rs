@@ -313,12 +313,11 @@ pub fn run_code_query(
                         (Value::Null, Vec::new())
                     }
                     Ok(_) => {
-                        // ONE fused request: the engine's native top-level
-                        // `hybrid` (RRF k=60) — no client-side fusion. Aimed
-                        // at the comma-joined CAPABLE set when only some
-                        // indices map `body` as semantic_text: a semantic leg
-                        // posted at a wildcard covering plain-text indices
-                        // 400s the WHOLE request.
+                        // The engine's native top-level `hybrid` (RRF k=60) —
+                        // no client-side fusion. Aimed at the comma-joined
+                        // CAPABLE set when only some indices map `body` as
+                        // semantic_text: a semantic leg posted at a wildcard
+                        // covering plain-text indices 400s the WHOLE request.
                         let target = if capable.len() == total {
                             pattern.clone()
                         } else {
@@ -333,28 +332,54 @@ pub fn run_code_query(
                                      vector over {} of {total}",
                                     capable.len()
                                 );
-                                if capable.len() < total {
-                                    let excluded: Vec<String> = mapping
+                                let lexical_only: Vec<String> = if capable.len() < total {
+                                    mapping
                                         .as_ref()
-                                        .and_then(|m| {
-                                            m.as_object().map(|obj| {
-                                                obj.keys()
-                                                    .filter(|k| !capable.contains(&k.to_string()))
-                                                    .cloned()
-                                                    .collect::<Vec<_>>()
-                                            })
+                                        .and_then(Value::as_object)
+                                        .map(|obj| {
+                                            obj.keys()
+                                                .filter(|k| !capable.contains(k))
+                                                .cloned()
+                                                .collect()
                                         })
-                                        .unwrap_or_default();
-                                    if !excluded.is_empty() {
-                                        n.push_str(&format!(
-                                            "; lexical-only (excluded from the vector arm): \
-                                             {}",
-                                            excluded.join(", ")
-                                        ));
+                                        .unwrap_or_default()
+                                } else {
+                                    Vec::new()
+                                };
+                                if lexical_only.is_empty() {
+                                    note = Some(n);
+                                    (r.clone(), hit_list(&r))
+                                } else {
+                                    // #1146: the lexical-only indices still
+                                    // owe the BM25 leg. The engine fuses PER
+                                    // INDEX and merges indices by `_score`,
+                                    // so the same `hybrid` with its BM25 leg
+                                    // alone returns RRF scores on the same
+                                    // scale — merging the two responses by
+                                    // score is the engine's own cross-index
+                                    // step, not a second fusion.
+                                    let lex_body =
+                                        hybrid_bm25_leg_body(&query, fetch, &params.lang, &fields);
+                                    match http.search(&lexical_only.join(","), &lex_body) {
+                                        Ok(lex) => {
+                                            n.push_str(&format!(
+                                                "; lexical-only (BM25 leg only, merged by \
+                                                 score): {}",
+                                                lexical_only.join(", ")
+                                            ));
+                                            note = Some(n);
+                                            let merged = merge_by_score(r, &lex, fetch);
+                                            let hits = hit_list(&merged);
+                                            (merged, hits)
+                                        }
+                                        Err(e) => {
+                                            return CodeOutcome::refused(
+                                                format!("search failed: {e}"),
+                                                2,
+                                            )
+                                        }
                                     }
                                 }
-                                note = Some(n);
-                                (r.clone(), hit_list(&r))
                             }
                             Err(_) => {
                                 // The vector arm failed, not the corpus:
@@ -553,38 +578,106 @@ pub(crate) fn hybrid_body(
     lang: &Option<String>,
     fields: &[String],
 ) -> Value {
-    // `--lang` must constrain BOTH legs (xc.py semantics): a language filter
-    // on BM25 only lets the vector leg surface docs the user filtered out.
-    // It is a `filter`, not a second `must`: a semantic clause beside a
-    // sibling in `must` falls through to the lexical path and matches
-    // nothing (#1148). Both legs take the same shape.
-    let wrap = |q: Value| -> Value {
-        match lang {
-            Some(lg) => serde_json::json!({
-                "bool": { "must": [q], "filter": [{ "match": { "language": lg } }] }
-            }),
-            None => q,
-        }
-    };
-    let bm = wrap(serde_json::json!({
-        "multi_match": { "query": query, "fields": fields }
-    }));
     // `k` on the semantic clause: the vector leg's pool is cut to its own
     // `k` (parser default 10), not to `size`, so without it the #1137
     // overfetch widens the BM25 leg alone (#1145).
-    let sem = wrap(serde_json::json!({
-        "semantic": { "field": "body", "query": query, "k": k }
-    }));
+    let sem = with_lang(
+        serde_json::json!({ "semantic": { "field": "body", "query": query, "k": k } }),
+        lang,
+    );
+    hybrid_request(k, vec![bm25_leg(query, lang, fields), sem])
+}
+
+/// [`hybrid_body`] with its BM25 leg alone, for the lexical-only indices of
+/// a mixed corpus (#1146). Still a native `hybrid`, so the engine stamps the
+/// same per-index RRF score (`1/(k+rank)`) the full request does and the two
+/// responses merge by `_score` exactly as the engine merges indices.
+pub(crate) fn hybrid_bm25_leg_body(
+    query: &str,
+    k: usize,
+    lang: &Option<String>,
+    fields: &[String],
+) -> Value {
+    hybrid_request(k, vec![bm25_leg(query, lang, fields)])
+}
+
+fn bm25_leg(query: &str, lang: &Option<String>, fields: &[String]) -> Value {
+    with_lang(
+        serde_json::json!({ "multi_match": { "query": query, "fields": fields } }),
+        lang,
+    )
+}
+
+/// `--lang` must constrain BOTH legs (xc.py semantics): a language filter
+/// on BM25 only lets the vector leg surface docs the user filtered out.
+/// It is a `filter`, not a second `must`: a semantic clause beside a
+/// sibling in `must` falls through to the lexical path and matches
+/// nothing (#1148). Both legs take the same shape.
+fn with_lang(q: Value, lang: &Option<String>) -> Value {
+    match lang {
+        Some(lg) => serde_json::json!({
+            "bool": { "must": [q], "filter": [{ "match": { "language": lg } }] }
+        }),
+        None => q,
+    }
+}
+
+fn hybrid_request(k: usize, legs: Vec<Value>) -> Value {
+    let queries: Vec<Value> = legs
+        .into_iter()
+        .map(|q| serde_json::json!({ "query": q }))
+        .collect();
     serde_json::json!({
         "size": k,
         "query": { "hybrid": {
-            "queries": [
-                { "query": bm },
-                { "query": sem }
-            ],
+            "queries": queries,
             "fusion": { "method": "rrf", "k": RRF_K }
         }}
     })
+}
+
+/// Merge two search responses the way the engine merges the indices of one
+/// multi-index search: `_score` descending, stable — so each response keeps
+/// its own rank order on a tie — with `_index` breaking cross-response ties
+/// so the page does not depend on which request was sent first. Cut to
+/// `size`; `hits.total` is the sum of both; the rest is `first`'s.
+pub(crate) fn merge_by_score(mut first: Value, second: &Value, size: usize) -> Value {
+    let mut hits = hit_list(&first);
+    hits.extend(hit_list(second));
+    let score = |h: &Value| h.get("_score").and_then(Value::as_f64).unwrap_or(f64::MIN);
+    let index = |h: &Value| {
+        h.get("_index")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned()
+    };
+    hits.sort_by(|a, b| {
+        score(b)
+            .total_cmp(&score(a))
+            .then_with(|| index(a).cmp(&index(b)))
+    });
+    hits.truncate(size);
+
+    let total_of = |r: &Value| r.pointer("/hits/total/value").and_then(Value::as_u64);
+    let gte = |r: &Value| r.pointer("/hits/total/relation").and_then(Value::as_str) == Some("gte");
+    let total = match (total_of(&first), total_of(second)) {
+        (Some(a), Some(b)) => Some(serde_json::json!({
+            "value": a + b,
+            "relation": if gte(&first) || gte(second) { "gte" } else { "eq" }
+        })),
+        _ => None,
+    };
+    let max_score = hits.first().and_then(|h| h.get("_score")).cloned();
+    if let Some(h) = first.get_mut("hits").and_then(Value::as_object_mut) {
+        h.insert("hits".into(), Value::Array(hits));
+        if let Some(t) = total {
+            h.insert("total".into(), t);
+        }
+        if let Some(m) = max_score {
+            h.insert("max_score".into(), m);
+        }
+    }
+    first
 }
 
 /// `xerj corpus list` needs per-corpus live counts without the full pipeline;
@@ -624,6 +717,8 @@ mod tests {
         searches: std::sync::Mutex<Vec<(String, Value)>>,
         live: Vec<String>,
         fail_search: bool,
+        // Per-target answers (#1146); a target not listed gets `hits`.
+        hits_by_target: HashMap<String, Vec<Value>>,
     }
 
     impl FakeHttp {
@@ -646,6 +741,7 @@ mod tests {
                 searches: std::sync::Mutex::new(Vec::new()),
                 live: vec!["xc-kv-b1-000".to_string()],
                 fail_search: false,
+                hits_by_target: HashMap::new(),
             }
         }
     }
@@ -673,7 +769,8 @@ mod tests {
             if self.fail_search {
                 return Err("transport: connection refused".to_string());
             }
-            Ok(serde_json::json!({ "hits": { "hits": self.hits } }))
+            let hits = self.hits_by_target.get(index).unwrap_or(&self.hits);
+            Ok(serde_json::json!({ "hits": { "hits": hits } }))
         }
     }
 
@@ -895,6 +992,83 @@ mod tests {
         assert!(
             out.text.contains("rrf 4.20"),
             "hybrid scores render as rrf: {}",
+            out.text
+        );
+    }
+
+    /// #1146: with a mixed mapping the fused request may only go to the
+    /// semantic_text indices (a semantic leg 400s on plain text), but the
+    /// lexical-only indices must still answer the BM25 leg — before this fix
+    /// hybrid returned 1 hit where `--mode bm25` returned 20, while the note
+    /// claimed "BM25 over 2 index(es)".
+    #[test]
+    fn hybrid_keeps_lexical_only_indices_in_the_bm25_leg() {
+        let root = root_with_state();
+        let mut http = FakeHttp::new();
+        http.mapping = serde_json::json!({
+            "xc-kv-b1-000": { "mappings": { "properties": { "body": { "type": "semantic_text" } } } },
+            "xc-kv-b1-001": { "mappings": { "properties": { "body": { "type": "text" } } } }
+        });
+        // Per-index RRF scores as the engine stamps them: 1/(60+rank).
+        let hit = |idx: &str, file: &str, score: f64| {
+            serde_json::json!({ "_index": idx, "_score": score,
+                "_source": { "ax_path": file, "ax_file": file, "body": "retry handler" } })
+        };
+        http.hits_by_target.insert(
+            "xc-kv-b1-000".into(),
+            vec![hit("xc-kv-b1-000", "corpus.json", 2.0 / 61.0)],
+        );
+        http.hits_by_target.insert(
+            "xc-kv-b1-001".into(),
+            vec![
+                hit("xc-kv-b1-001", "m1.py", 1.0 / 61.0),
+                hit("xc-kv-b1-001", "m2.py", 1.0 / 62.0),
+            ],
+        );
+        let mut p = CodeParams::new("kv", "retry handler");
+        p.mode = Mode::Hybrid;
+        p.as_json = true;
+        let out = run_code_query(&root, &http, "u", &p, "`--stale-ok`");
+        assert_eq!(out.exit, 0);
+
+        let reqs = http.searches.lock().unwrap().clone();
+        // [0] preflight, [1] fused over the capable set, [2] the BM25 leg
+        // alone over the lexical-only set — still a native `hybrid` so its
+        // scores are RRF on the same scale as [1]'s.
+        assert_eq!(reqs.len(), 3, "{reqs:?}");
+        assert_eq!(reqs[1].0, "xc-kv-b1-000");
+        assert_eq!(reqs[2].0, "xc-kv-b1-001");
+        let lex = &reqs[2].1;
+        let legs = lex
+            .pointer("/query/hybrid/queries")
+            .and_then(Value::as_array);
+        assert_eq!(legs.map(Vec::len), Some(1), "BM25 leg only: {lex}");
+        assert!(legs.unwrap()[0].pointer("/query/multi_match").is_some());
+        assert_eq!(
+            lex.pointer("/query/hybrid/fusion"),
+            reqs[1].1.pointer("/query/hybrid/fusion"),
+            "same fusion as the capable request"
+        );
+        assert_eq!(lex.pointer("/size"), Some(&serde_json::json!(50)));
+
+        // Merged by _score descending, the engine's own cross-index order.
+        let files: Vec<&str> = out.json.as_ref().unwrap()["hits"]["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["_source"]["ax_file"].as_str().unwrap())
+            .collect();
+        assert_eq!(files, ["corpus.json", "m1.py", "m2.py"]);
+
+        // The prose path says which leg ran where.
+        p.as_json = false;
+        let out = run_code_query(&root, &http, "u", &p, "`--stale-ok`");
+        assert!(
+            out.text.contains(
+                "BM25 over 2 index(es), vector over 1 of 2; lexical-only (BM25 leg only, \
+                 merged by score): xc-kv-b1-001"
+            ),
+            "{}",
             out.text
         );
     }
