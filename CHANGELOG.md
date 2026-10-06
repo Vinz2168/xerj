@@ -33,9 +33,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   election with no diagnostic of its own) and `cluster.port` colliding
   with this node's own rest/grpc/es_compat port (which degraded the node
   to single-node with green health).
+- **A degraded cluster boot was invisible after the first log line**
+  (issue [#1171](https://github.com/xerj-org/xerj/issues/1171), remaining
+  half) — a configured ring whose TCP transport failed to bind, or whose
+  cluster-state storage was unavailable, degraded to single-node with one
+  ERROR line at boot and then `status: green` forever on
+  `/_cluster/health`: the operator believed the node was clustered and
+  no API could say otherwise. The boot outcome is now recorded on the
+  application state (`ClusterTransportStatus`: Disabled / Running /
+  Degraded) before the first router exists, and health answers from it:
+  `status: yellow`, `number_of_nodes: 1` (the node actually serving —
+  counting the unreachable configured peers would be the same fabrication
+  #1169 removed), and an additive `xerj_cluster_transport: "degraded"`
+  marker that says *why* it is yellow, present exactly when true. Waits
+  stay honest from the degraded side too (`wait_for_nodes=2` of the one
+  serving node → 408 with the real count), and red still outranks the
+  degraded-yellow (an unopenable index remains the headline, with the
+  transport marker beside it).
 - **`xerj corpus index` reported a converged state as a failure and an
   uncountable node as "no new records"** (issue
-  [#1173](https://github.com/xerj-org/xerj/issues/1173)) — the resume
+  [#1173](https://github.com/xerj-org/xerj/issues/1173), honesty half —
+  the crawl-throughput half stays open) — the resume
   cleanup's `_delete_by_query` against an index a namespace swap had already
   retired answered 404 and killed the run (a missing index cannot hold the
   stale documents the cleanup exists to remove); 404 is now the answer
