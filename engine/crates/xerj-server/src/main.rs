@@ -2502,6 +2502,26 @@ async fn async_main() -> Result<()> {
         // (`SocketAddr::parse`, just above), not the unparseable `::1:9300`.
         let node_id = listen_addr.to_string();
 
+        // The documented `peers` convention lists the FULL membership on
+        // every node — "the current node's id is inferred from the entry
+        // whose address matches its own" (docs/clustering) — so this node's
+        // own entry is expected to be in the map. Self is not a peer: left
+        // in, the Raft node counted 4 members of a 3-node ring (majority 3 =
+        // unanimity, no fault tolerance) and every node sent its own
+        // RequestVote back to itself over loopback TCP, counting its own
+        // vote twice — the measured result was a ring that churned through
+        // a new election every few hundred ms forever after ANY node died
+        // (#1168). Removed here, once, so the transport peer map and the
+        // Raft peer list agree. The cluster crate also excludes self
+        // defensively on both layers.
+        if peers.remove(&node_id).is_some() {
+            info!(
+                node = %node_id,
+                "cluster.peers included this node's own address — excluded from the peer set \
+                 (self is not a peer)"
+            );
+        }
+
         let tick = std::time::Duration::from_millis(cfg.cluster.tick_ms);
 
         match TcpTransport::new(node_id.clone(), listen_addr, peers, cluster_secret).await {
@@ -2511,6 +2531,7 @@ async fn async_main() -> Result<()> {
                     .peers
                     .iter()
                     .filter_map(|p| p.split_once('=').map(|(id, _)| id.to_string()))
+                    .filter(|id| id != &node_id)
                     .collect();
 
                 let node = ClusterNode::new(node_id.clone(), peer_ids, Box::new(transport));

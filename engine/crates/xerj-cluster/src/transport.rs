@@ -332,6 +332,32 @@ impl TcpTransport {
     ) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<(String, RaftMessage)>(1024);
 
+        // A peer entry naming this node's own address is excluded (#1168).
+        // The documented config convention lists the full membership on every
+        // node, so a self entry is expected in the input — but a node that
+        // sends its own RequestVote back to itself over loopback TCP counts
+        // its own vote twice and inflates the wire message rate for nothing.
+        let mut self_entry_removed = false;
+        let peers: HashMap<String, SocketAddr> = peers
+            .into_iter()
+            .filter(|(_id, addr)| {
+                if *addr == listen_addr {
+                    self_entry_removed = true;
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        if self_entry_removed {
+            warn!(
+                node = %node_id,
+                %listen_addr,
+                "peer list included this node's own address — excluded (a node sending to \
+                 itself double-counts its own vote)"
+            );
+        }
+
         // One sender task per peer (#1168). Spawned here, before the listener
         // binds, so a send can be enqueued the moment the transport exists.
         let mut outbound = HashMap::with_capacity(peers.len());

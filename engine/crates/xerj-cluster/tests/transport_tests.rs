@@ -446,3 +446,163 @@ async fn a_dead_peer_is_backed_off_not_retried_every_message() {
          (ladder predicts ~4, pre-fix behaviour was ~100)"
     );
 }
+
+/// A peers map naming the transport's own listen address (the documented
+/// full-membership convention) must not produce a peer the node can send to:
+/// pre-fix, a node addressing its own RequestVote over loopback TCP counted
+/// its own vote twice (#1168).
+#[tokio::test]
+async fn a_peers_entry_naming_self_is_excluded_from_the_transport() {
+    use xerj_cluster::node::ClusterTransport;
+
+    let addr_a = free_addr().await;
+    let addr_b = free_addr().await;
+
+    // Full membership, self first — the config shape every node ships.
+    let mut peers_a = HashMap::new();
+    peers_a.insert("node-a".to_string(), addr_a);
+    peers_a.insert("node-b".to_string(), addr_b);
+
+    let transport_a = TcpTransport::new(
+        "node-a".to_string(),
+        addr_a,
+        peers_a,
+        ClusterSecret::new("shared-cluster-secret-for-tests").unwrap(),
+    )
+    .await
+    .expect("create transport A");
+
+    // Self is no longer a known peer …
+    let err = transport_a
+        .send("node-a", request_vote(1))
+        .await
+        .expect_err("sending to self must be rejected");
+    assert!(
+        err.to_string().contains("unknown peer"),
+        "expected unknown-peer error, got: {err:#}"
+    );
+
+    // … and never became a one-shot target either.
+    let direct = transport_a.send_to("node-a", &request_vote(1)).await;
+    assert!(direct.is_err(), "send_to(self) must fail");
+
+    // The real peer still works.
+    let mut peers_b = HashMap::new();
+    peers_b.insert("node-a".to_string(), addr_a);
+    let transport_b = TcpTransport::new(
+        "node-b".to_string(),
+        addr_b,
+        peers_b,
+        ClusterSecret::new("shared-cluster-secret-for-tests").unwrap(),
+    )
+    .await
+    .expect("create transport B");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    transport_a
+        .send("node-b", request_vote(7))
+        .await
+        .expect("enqueue to the real peer");
+    let (from, msg) = tokio::time::timeout(Duration::from_secs(2), async {
+        transport_b.recv().await.expect("recv error")
+    })
+    .await
+    .expect("message to the real peer must still arrive");
+    assert_eq!(from, "node-a");
+    assert!(matches!(msg, RaftMessage::RequestVote { term: 7, .. }));
+}
+
+/// The #1168 acceptance scenario at ring level: three nodes whose membership
+/// lists include every member (self included, the documented convention),
+/// a leader elected, then the leader's runner dropped mid-flight — a dead
+/// node. The two survivors must converge on exactly one leader and go quiet:
+/// no new terms, no re-election, for seconds afterward.
+///
+/// Pre-fix this churned forever: majority was 3 of 3 real nodes (unanimity),
+/// and each survivor only ever "won" an election by double-counting its own
+/// vote, so the survivors leapfrogged terms every ~250 ms — measured 94 terms
+/// in 4 minutes on rc.83, still unstable with the transport fix alone.
+#[tokio::test]
+async fn ring_with_full_membership_lists_survives_leader_death() {
+    use tokio::sync::watch;
+
+    let bus = InMemoryBus::new();
+    // Full membership on every node, self INCLUDED — what the server used to
+    // pass straight through (#1168), and what RaftNode::new now filters.
+    let membership = ["n1", "n2", "n3"];
+
+    let mk_node = |id: &'static str| async {
+        let transport = InMemoryTransport::new(id.to_string(), bus.clone()).await;
+        let peers: Vec<String> = membership.iter().map(|s| s.to_string()).collect();
+        ClusterNode::new(id.to_string(), peers, Box::new(transport))
+    };
+
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let tick = Duration::from_millis(5);
+    let mut runners = vec![
+        ClusterRunner::new(mk_node("n1").await, tick, shutdown_rx.clone()),
+        ClusterRunner::new(mk_node("n2").await, tick, shutdown_rx.clone()),
+        ClusterRunner::new(mk_node("n3").await, tick, shutdown_rx.clone()),
+    ];
+
+    // Phase 1 — elect a leader (drive all three loops concurrently).
+    {
+        let mut it = std::mem::take(&mut runners).into_iter();
+        let (mut x, mut y, mut z) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+        tokio::select! {
+            _ = x.run() => {}
+            _ = y.run() => {}
+            _ = z.run() => {}
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+        }
+        runners = vec![x, y, z];
+    }
+    let leader_count = runners.iter().filter(|r| r.is_leader()).count();
+    assert_eq!(leader_count, 1, "exactly one leader before the failure");
+
+    // Phase 2 — kill the leader by dropping its runner (transport dropped →
+    // its InMemory receiver closes → peers' sends to it fail = dead node).
+    let leader_idx = runners
+        .iter()
+        .position(|r| r.is_leader())
+        .expect("phase 1 asserted a leader");
+    drop(runners.remove(leader_idx));
+    assert_eq!(runners.len(), 2, "two survivors");
+
+    // Phase 2a — the survivors elect exactly one new leader.
+    {
+        let mut it = std::mem::take(&mut runners).into_iter();
+        let (mut a, mut b) = (it.next().unwrap(), it.next().unwrap());
+        tokio::select! {
+            _ = a.run() => {}
+            _ = b.run() => {}
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+        }
+        runners = vec![a, b];
+    }
+    let leader_count = runners.iter().filter(|r| r.is_leader()).count();
+    assert_eq!(
+        leader_count, 1,
+        "survivors must converge on exactly one leader after the leader dies"
+    );
+    let terms_2a: Vec<u64> = runners.iter().map(|r| r.node.raft.current_term()).collect();
+
+    // Phase 2b — and go quiet: two more seconds, same terms, same leadership.
+    {
+        let mut it = std::mem::take(&mut runners).into_iter();
+        let (mut a, mut b) = (it.next().unwrap(), it.next().unwrap());
+        tokio::select! {
+            _ = a.run() => {}
+            _ = b.run() => {}
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+        }
+        runners = vec![a, b];
+    }
+    let terms_2b: Vec<u64> = runners.iter().map(|r| r.node.raft.current_term()).collect();
+    assert_eq!(
+        terms_2a, terms_2b,
+        "the surviving pair must be election-stable: terms kept advancing => churn (#1168)"
+    );
+    let leader_count = runners.iter().filter(|r| r.is_leader()).count();
+    assert_eq!(leader_count, 1, "still exactly one leader at the end");
+}
