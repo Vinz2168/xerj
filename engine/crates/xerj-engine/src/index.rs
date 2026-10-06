@@ -8262,6 +8262,12 @@ pub struct Index {
     /// (pre-existing, split) behaviour rather than silently changing how
     /// its unflushed documents match.
     segment_default_analyzer_honored: bool,
+    /// #1092 — which `analysis` spelling built [`Self::registry`]
+    /// (`Canonical` for every index this build creates; possibly
+    /// `LegacyShorthandOnly` for a pre-#204 index reopened with documents).
+    /// Kept so the API can report the analysis block actually in force
+    /// rather than the one merely declared — see [`Self::analysis_in_force`].
+    analysis_binding: AnalysisBinding,
     data_dir: PathBuf,
     /// Doc count threshold for auto-flush (default: 10,000).
     flush_doc_threshold: usize,
@@ -9090,6 +9096,7 @@ impl Index {
             query_cache_misses: Arc::new(AtomicU64::new(0)),
             registry,
             segment_default_analyzer_honored: true,
+            analysis_binding: AnalysisBinding::Canonical,
             data_dir: index_dir,
             flush_doc_threshold,
             flush_byte_threshold,
@@ -9563,6 +9570,7 @@ impl Index {
             query_cache_misses: Arc::new(AtomicU64::new(0)),
             registry,
             segment_default_analyzer_honored,
+            analysis_binding,
             data_dir: index_dir,
             flush_doc_threshold,
             flush_byte_threshold,
@@ -24504,6 +24512,62 @@ impl Index {
     /// Get the index-level settings.
     pub async fn get_settings(&self) -> Value {
         self.settings.read().await.clone()
+    }
+
+    /// The `analysis` block this index's analyzer registry was built from —
+    /// resolved with the binding the index was opened under, so a pre-#204
+    /// index whose canonical `index.analysis` block is declared but NOT
+    /// honoured reports `None` rather than an analyzer that analyses nothing
+    /// (#1092). Read from the persisted `settings.json` copy, so it survives a
+    /// restart (the API's display map does not).
+    pub async fn analysis_in_force(&self) -> Option<Value> {
+        let settings = self.settings.read().await;
+        let root = settings.pointer("/settings").unwrap_or(&settings);
+        AnalyzerRegistry::analysis_block_with_binding(root, self.analysis_binding).cloned()
+    }
+
+    /// `_analyze` against this index (#1092): run `text` through the pipeline
+    /// a search on this index would actually use, and return its name with
+    /// the tokens.
+    ///
+    /// * `analyzer` named → that analyzer from the index's own registry
+    ///   (custom analyzers from settings, then the built-ins).
+    /// * else `field` named → the analyzer the FTS writer indexes that field
+    ///   with ([`build_fts_field_configs`]): the text analyzer for a `text`
+    ///   field, `keyword` for every other mapped type, and the registry's
+    ///   `default` (else `standard`) for an unmapped field, as the writer's
+    ///   unconfigured-field fallback does.
+    /// * neither → the index's text analyzer: the declared `default` when this
+    ///   index's segments honour it, else `standard`
+    ///   ([`Self::segment_text_analyzer`], #937).
+    ///
+    /// `Err` carries the reason for an unknown analyzer name.
+    pub async fn analyze(
+        &self,
+        analyzer: Option<&str>,
+        field: Option<&str>,
+        text: &str,
+    ) -> std::result::Result<(String, Vec<xerj_fts::analyzer::Token>), String> {
+        let name: String = match (analyzer, field) {
+            (Some(a), _) => a.to_string(),
+            (None, Some(f)) => {
+                let schema = self.schema.read().await;
+                match schema.schema.field(f).map(|fc| fc.field_type) {
+                    Some(FieldType::Text) => self.segment_text_analyzer().to_string(),
+                    Some(_) => "keyword".to_string(),
+                    None if self.registry.get_analyzer("default").is_some() => {
+                        "default".to_string()
+                    }
+                    None => "standard".to_string(),
+                }
+            }
+            (None, None) => self.segment_text_analyzer().to_string(),
+        };
+        let pipeline = self
+            .registry
+            .get_analyzer(&name)
+            .ok_or_else(|| format!("failed to find analyzer [{name}]"))?;
+        Ok((name, pipeline.analyze(text)))
     }
 
     /// Update the index-level settings.

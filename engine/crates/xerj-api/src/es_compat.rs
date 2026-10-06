@@ -2042,15 +2042,10 @@ async fn get_index_inner(
         };
 
         // Settings: replay what was written (normalized to strings), merged
-        // with engine defaults. Creation timestamps are synthesized because
-        // we don't persist them yet (TODO).
-        let stored_settings = state
-            .engine
-            .index_settings
-            .get(name)
-            .map(|v| v.clone())
-            .unwrap_or(Value::Null);
-        let settings_inner = merge_settings_defaults(&stored_settings, name, human);
+        // with engine defaults; `analysis` is the block in force (#1092).
+        // Creation timestamps are synthesized because we don't persist them
+        // yet (TODO).
+        let settings_inner = index_settings_response(&state, name, idx.as_ref(), human).await;
 
         let mut index_obj = serde_json::Map::new();
         if want_aliases {
@@ -2066,6 +2061,52 @@ async fn get_index_inner(
     }
 
     Json(Value::Object(body)).into_response()
+}
+
+/// The `settings` object `GET /{index}` and `GET /{index}/_settings` serve.
+///
+/// Two fixes over replaying the display map alone (#1092):
+///
+/// * The display map (`engine.index_settings`) lives in memory only, so after a
+///   restart it is empty and every create-time setting vanished from the
+///   response. A live index with no display entry falls back to its persisted
+///   `settings.json` copy — what the index was created with.
+/// * `analysis` is reported from the engine, not echoed: whatever spelling the
+///   caller used (`settings.analysis` beside an `index` block was dropped
+///   outright), the response carries `index.analysis` = the block the index's
+///   analyzer registry was actually built from, and nothing for a pre-#204
+///   index whose declared block is not honoured. An agent verifying "is my
+///   stemmer on?" over the wire gets the answer search would give.
+///
+/// A failed index (`idx == None`) keeps the display-map-only behaviour.
+async fn index_settings_response(
+    state: &AppState,
+    name: &str,
+    idx: Option<&std::sync::Arc<xerj_engine::Index>>,
+    human: bool,
+) -> Value {
+    let mut stored = state
+        .engine
+        .index_settings
+        .get(name)
+        .map(|v| v.clone())
+        .unwrap_or(Value::Null);
+    if stored.is_null() {
+        if let Some(i) = idx {
+            stored = i.get_settings().await;
+        }
+    }
+    let mut settings = merge_settings_defaults(&stored, name, human);
+    if let Some(i) = idx {
+        let in_force = i.analysis_in_force().await;
+        if let Some(inner) = settings.get_mut("index").and_then(Value::as_object_mut) {
+            inner.retain(|k, _| k != "analysis" && !k.starts_with("analysis."));
+            if let Some(a) = in_force {
+                inner.insert("analysis".to_string(), a);
+            }
+        }
+    }
+    settings
 }
 
 /// Normalize a raw user-provided settings blob to the ES response shape.
@@ -2767,13 +2808,8 @@ pub async fn get_settings(
     }
     let mut out = serde_json::Map::new();
     for name in &targets {
-        let stored = state
-            .engine
-            .index_settings
-            .get(name)
-            .map(|v| v.clone())
-            .unwrap_or(Value::Null);
-        let settings = merge_settings_defaults(&stored, name, false);
+        let idx = state.engine.get_index(name).ok();
+        let settings = index_settings_response(&state, name, idx.as_ref(), false).await;
         out.insert(name.clone(), json!({ "settings": settings }));
     }
     Json(Value::Object(out)).into_response()
@@ -21120,8 +21156,26 @@ pub async fn cat_nodes(
 #[derive(Debug, Deserialize)]
 pub struct EsAnalyzeBody {
     pub text: Option<Value>,
-    #[serde(default = "default_analyzer")]
-    pub analyzer: String,
+    /// Absent = the index's own text analyzer on `/{index}/_analyze` (its
+    /// declared `default`, #1092), `standard` on the global endpoint.
+    #[serde(default)]
+    pub analyzer: Option<String>,
+    /// Analyse as this field of the index is indexed (#1092).
+    #[serde(default)]
+    pub field: Option<String>,
+    /// Ad-hoc chain parts (`tokenizer`, `filter`, `char_filter`): each a
+    /// name or an inline definition, built into a one-off `custom` analyzer
+    /// by the same registry code index creation uses (#1092). `normalizer`
+    /// is refused with a 400 rather than silently answered with another
+    /// analyzer's tokens.
+    #[serde(default)]
+    pub tokenizer: Option<Value>,
+    #[serde(default)]
+    pub filter: Option<Value>,
+    #[serde(default)]
+    pub char_filter: Option<Value>,
+    #[serde(default)]
+    pub normalizer: Option<Value>,
     /// When true, returns step-by-step output of each pipeline stage.
     ///
     /// Shows: tokenizer output → lowercase → stopwords → stemmer.
@@ -21130,8 +21184,120 @@ pub struct EsAnalyzeBody {
     pub explain: bool,
 }
 
-fn default_analyzer() -> String {
-    "standard".to_string()
+fn analyze_illegal_argument(reason: String) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": {
+                "root_cause": [{ "type": "illegal_argument_exception", "reason": reason }],
+                "type": "illegal_argument_exception",
+                "reason": reason,
+            },
+            "status": 400,
+        })),
+    )
+        .into_response()
+}
+
+/// Name of the one-off analyzer an ad-hoc `_analyze` chain is built as.
+const ADHOC_ANALYZER: &str = "_analyze_adhoc";
+
+/// Turn an ad-hoc `_analyze` chain into an `analysis` settings block declaring
+/// one `custom` analyzer, so it is built — and validated — by exactly the
+/// registry code an index's own analysis goes through (#1092).
+///
+/// Names refer to built-ins, or on an index-scoped call to the components the
+/// index declares (`index_analysis`, the block in force); inline definitions
+/// get reserved `_analyze_*` names. With filters and no tokenizer the chain
+/// uses `keyword`, as Elasticsearch and OpenSearch do.
+fn adhoc_analysis_settings(body: &EsAnalyzeBody, index_analysis: Option<&Value>) -> Value {
+    let mut analysis = serde_json::Map::new();
+    for kind in ["tokenizer", "filter", "char_filter"] {
+        let defs = index_analysis
+            .and_then(|a| a.get(kind))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        analysis.insert(kind.to_string(), defs);
+    }
+    let mut define = |kind: &str, name: String, def: &Value| -> String {
+        if let Some(m) = analysis.get_mut(kind).and_then(Value::as_object_mut) {
+            m.insert(name.clone(), def.clone());
+        }
+        name
+    };
+    let tokenizer = match &body.tokenizer {
+        Some(Value::String(s)) => s.clone(),
+        Some(def) => define("tokenizer", "_analyze_tokenizer".to_string(), def),
+        None => "keyword".to_string(),
+    };
+    let mut chain = |kind: &str, parts: &Option<Value>| -> Vec<String> {
+        let items = match parts {
+            Some(Value::Array(a)) => a.clone(),
+            Some(single) => vec![single.clone()],
+            None => Vec::new(),
+        };
+        items
+            .iter()
+            .enumerate()
+            .map(|(i, part)| match part {
+                Value::String(s) => s.clone(),
+                def => define(kind, format!("_analyze_{kind}_{i}"), def),
+            })
+            .collect()
+    };
+    let filter = chain("filter", &body.filter);
+    let char_filter = chain("char_filter", &body.char_filter);
+    analysis.insert(
+        "analyzer".to_string(),
+        json!({ ADHOC_ANALYZER: {
+            "type": "custom",
+            "tokenizer": tokenizer,
+            "filter": filter,
+            "char_filter": char_filter,
+        }}),
+    );
+    json!({ "analysis": Value::Object(analysis) })
+}
+
+/// Build and run an ad-hoc chain. `Err` = the registry cannot honour it, with
+/// the same reasons index creation would give.
+fn run_adhoc_analyze(
+    body: &EsAnalyzeBody,
+    index_analysis: Option<&Value>,
+    input: &str,
+) -> Result<Vec<xerj_engine::Token>, String> {
+    let settings = adhoc_analysis_settings(body, index_analysis);
+    let problems = xerj_engine::AnalyzerRegistry::unsupported_analysis(&settings);
+    if !problems.is_empty() {
+        return Err(format!(
+            "xerj cannot honour this analysis chain — {}",
+            problems.join("; ")
+        ));
+    }
+    let mut registry = xerj_engine::AnalyzerRegistry::with_defaults();
+    registry.apply_settings(&settings);
+    let pipeline = registry
+        .get_analyzer(ADHOC_ANALYZER)
+        .ok_or_else(|| "xerj could not build this analysis chain".to_string())?;
+    Ok(pipeline.analyze(input))
+}
+
+/// ES `_analyze` token objects from real pipeline output. `type` stays the
+/// `word` this endpoint has always reported; offsets and positions are the
+/// pipeline's own.
+fn analyze_tokens_json(tokens: &[xerj_engine::Token]) -> Vec<Value> {
+    tokens
+        .iter()
+        .map(|t| {
+            json!({
+                "token": t.text,
+                "start_offset": t.start_offset,
+                "end_offset": t.end_offset,
+                "type": "word",
+                "position": t.position,
+            })
+        })
+        .collect()
 }
 
 /// Global `POST /_analyze` (no index prefix).
@@ -21143,8 +21309,8 @@ pub async fn analyze_text_global(
 }
 
 pub async fn analyze_text(
-    State(_state): State<AppState>,
-    Path(_index): Path<String>,
+    State(state): State<AppState>,
+    Path(index): Path<String>,
     Json(body): Json<EsAnalyzeBody>,
 ) -> impl IntoResponse {
     let input = match &body.text {
@@ -21157,19 +21323,97 @@ pub async fn analyze_text(
         _ => String::new(),
     };
 
-    if body.explain {
-        // Step-by-step pipeline explanation.
-        //
-        // Shows each filter stage in order so developers can debug why a term
-        // was dropped, modified, or expanded.  Supported for the "standard"
-        // analyzer (the most common case).  Other analyzers fall back to showing
-        // tokenizer + final output only.
-        let explanation = analyze_explain(&input, &body.analyzer);
-        return Json(explanation).into_response();
+    if body.normalizer.is_some() {
+        return analyze_illegal_argument(
+            "_analyze does not support [normalizer] on xerj (it would otherwise be answered \
+             with another analyzer's tokens)"
+                .to_string(),
+        );
+    }
+    let adhoc = body.tokenizer.is_some() || body.filter.is_some() || body.char_filter.is_some();
+    if adhoc {
+        if body.analyzer.is_some() || body.field.is_some() {
+            return analyze_illegal_argument(
+                "cannot define an ad-hoc chain (tokenizer/filter/char_filter) together with \
+                 [analyzer] or [field]"
+                    .to_string(),
+            );
+        }
+        if body.explain {
+            return analyze_illegal_argument(
+                "_analyze explain is not supported for an ad-hoc chain on xerj".to_string(),
+            );
+        }
+        // Index-scoped: the chain may name the index's own components.
+        let index_analysis = if index == "_none" {
+            None
+        } else {
+            let targets = resolve_index_selector(&state, &index).await;
+            let Some(idx) = targets
+                .first()
+                .and_then(|name| state.engine.get_index(name).ok())
+            else {
+                return ApiError::new(xerj_common::XerjError::index_not_found(&index))
+                    .into_response();
+            };
+            idx.analysis_in_force().await
+        };
+        return match run_adhoc_analyze(&body, index_analysis.as_ref(), &input) {
+            Ok(tokens) => Json(json!({ "tokens": analyze_tokens_json(&tokens) })).into_response(),
+            Err(reason) => analyze_illegal_argument(reason),
+        };
     }
 
-    let tokens = tokenize_for_analyze(&input, &body.analyzer);
-    Json(json!({ "tokens": tokens })).into_response()
+    if index == "_none" {
+        // Global endpoint: built-in analyzers only, no index to resolve a
+        // field or a custom analyzer against.
+        if let Some(f) = &body.field {
+            return analyze_illegal_argument(format!(
+                "analysing field [{f}] requires an index: use POST /{{index}}/_analyze"
+            ));
+        }
+        let name = body.analyzer.as_deref().unwrap_or("standard");
+        if body.explain {
+            // Step-by-step pipeline explanation (unchanged): stage-by-stage
+            // for "standard"/"english", final tokens otherwise.
+            return Json(analyze_explain(&input, name)).into_response();
+        }
+        let Some(pipeline) = xerj_engine::analyzer_registry().get_analyzer(name) else {
+            return analyze_illegal_argument(format!("failed to find global analyzer [{name}]"));
+        };
+        let tokens = analyze_tokens_json(&pipeline.analyze(&input));
+        return Json(json!({ "tokens": tokens })).into_response();
+    }
+
+    // Index-scoped (#1092): the index's OWN registry and field resolution —
+    // the pipeline a search on this index actually runs, so a declared
+    // `analysis.analyzer.default` stemmer shows up here.
+    let targets = resolve_index_selector(&state, &index).await;
+    let Some(idx) = targets
+        .first()
+        .and_then(|name| state.engine.get_index(name).ok())
+    else {
+        return ApiError::new(xerj_common::XerjError::index_not_found(&index)).into_response();
+    };
+    match idx
+        .analyze(body.analyzer.as_deref(), body.field.as_deref(), &input)
+        .await
+    {
+        Ok((name, tokens)) => {
+            let tokens = analyze_tokens_json(&tokens);
+            if body.explain {
+                return Json(json!({
+                    "detail": {
+                        "custom_analyzer": false,
+                        "analyzer": { "name": name, "tokens": tokens },
+                    }
+                }))
+                .into_response();
+            }
+            Json(json!({ "tokens": tokens })).into_response()
+        }
+        Err(reason) => analyze_illegal_argument(reason),
+    }
 }
 
 /// Produce step-by-step analysis explanation.
