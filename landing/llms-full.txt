@@ -376,7 +376,8 @@ For a complete disconnected deployment procedure, including current GitHub relea
   (`PUT /_xerj/wal_tap`, every write on tapped indices to an external `_bulk`
   endpoint). The node's other outbound connections carry no document or query text:
   the one-time HuggingFace model download for `--embed-mode neural`, and cluster-mode
-  Raft messages (index names, mappings) to your own peers. A `_search` body carrying `"rerank": {...}` POSTs the question and the text
+  Raft control messages (elections and heartbeats — never document text, and no
+  metadata command is proposed over them yet) to your own peers. A `_search` body carrying `"rerank": {...}` POSTs the question and the text
   of up to `window` hits (default 30, max 300) to a third-party relevance judge
   (TypeSafe AI's Jev, `POST /v1/systemone`). Three controls: it is inert until the
   node's OPERATOR sets a provider key (`[rerank] api_key`, or `TYPESAFE_API_KEY`; a
