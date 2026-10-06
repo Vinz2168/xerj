@@ -7,10 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.84] - 2026-10-06
+
+The tell-the-truth window. Every signal an operator reads — cluster
+health, node counts, corpus-index exit codes, the landing counts — now
+reports what actually happened instead of what was configured or hoped
+for. A small engine window on top of rc.83's corpus-hub hundred: two
+cluster-honesty PRs, one corpus-tooling honesty PR, and two docs PRs
+(#1167, and #1163 by
+[thomas-villani](https://github.com/thomas-villani), his fourth merged
+PR).
+
 ### Fixed
 
 - **Cluster endpoints fabricated topology** (issue
-  [#1169](https://github.com/xerj-org/xerj/issues/1169)) —
+  [#1169](https://github.com/xerj-org/xerj/issues/1169), PR
+  [#1172](https://github.com/xerj-org/xerj/pull/1172)) —
   `GET /_cluster/health?wait_for_nodes=N` echoed `N` back as
   `number_of_nodes` with `status: green` and `timed_out: false`, so the
   multinode smoke suite "converged" on a single node that had no cluster
@@ -34,33 +46,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with this node's own rest/grpc/es_compat port (which degraded the node
   to single-node with green health).
 - **A degraded cluster boot was invisible after the first log line**
-  (issue [#1171](https://github.com/xerj-org/xerj/issues/1171), remaining
-  half) — a configured ring whose TCP transport failed to bind, or whose
-  cluster-state storage was unavailable, degraded to single-node with one
-  ERROR line at boot and then `status: green` forever on
-  `/_cluster/health`: the operator believed the node was clustered and
-  no API could say otherwise. The boot outcome is now recorded on the
-  application state (`ClusterTransportStatus`: Disabled / Running /
-  Degraded) before the first router exists, and health answers from it:
-  `status: yellow`, `number_of_nodes: 1` (the node actually serving —
-  counting the unreachable configured peers would be the same fabrication
-  #1169 removed), and an additive `xerj_cluster_transport: "degraded"`
-  marker that says *why* it is yellow, present exactly when true. Waits
-  stay honest from the degraded side too (`wait_for_nodes=2` of the one
+  (issue [#1171](https://github.com/xerj-org/xerj/issues/1171), PR
+  [#1175](https://github.com/xerj-org/xerj/pull/1175)) — a configured
+  ring whose TCP transport failed to bind, or whose cluster-state storage
+  was unavailable, degraded to single-node with one ERROR line at boot
+  and then `status: green` forever on `/_cluster/health`: the operator
+  believed the node was clustered and no API could say otherwise. The
+  boot outcome is now recorded on the application state
+  (`ClusterTransportStatus`: Disabled / Running / Degraded) before the
+  first router exists, and health answers from it: `status: yellow`,
+  `number_of_nodes: 1` (the node actually serving — counting the
+  unreachable configured peers would be the same fabrication #1169
+  removed), and an additive `xerj_cluster_transport: "degraded"` marker
+  that says *why* it is yellow, present exactly when true. Waits stay
+  honest from the degraded side too (`wait_for_nodes=2` of the one
   serving node → 408 with the real count), and red still outranks the
   degraded-yellow (an unopenable index remains the headline, with the
   transport marker beside it).
 - **`xerj corpus index` reported a converged state as a failure and an
   uncountable node as "no new records"** (issue
   [#1173](https://github.com/xerj-org/xerj/issues/1173), honesty half —
-  the crawl-throughput half stays open) — the resume
-  cleanup's `_delete_by_query` against an index a namespace swap had already
-  retired answered 404 and killed the run (a missing index cannot hold the
-  stale documents the cleanup exists to remove); 404 is now the answer
-  "deleted nothing", the same rule `_count` and `_cat/indices` already
-  follow. And when a failed run's before/after counts could not be read from
-  the node, the tool asserted "wrote no new records" — that claim now
-  requires both counts to be known; an unreadable count prints UNKNOWN.
+  the crawl-throughput half stays open, PR
+  [#1174](https://github.com/xerj-org/xerj/pull/1174)) — the resume
+  cleanup's `_delete_by_query` against an index a namespace swap had
+  already retired answered 404 and killed the run (a missing index cannot
+  hold the stale documents the cleanup exists to remove); 404 is now the
+  answer "deleted nothing", the same rule `_count` and `_cat/indices`
+  already follow. And when a failed run's before/after counts could not
+  be read from the node, the tool asserted "wrote no new records" — that
+  claim now requires both counts to be known; an unreadable count prints
+  UNKNOWN.
+- **The hub counts went stale again** (PR
+  [#1167](https://github.com/xerj-org/xerj/pull/1167)) — `llms.txt:51`
+  and the corpus-hub blog's dated update note still said `75 live / 104
+  backlog rows` from 2026-10-02 while the registry had reached 100 live /
+  119 backlog on 2026-10-05. Both surfaces now say 100/119 and name the
+  rc.83 skill-table milestone — the same line, the same drift class, as
+  the llms.txt:50 pack-status fix queued after rc.82.
+- **EPUB and notebook answers that lagged the extractors** (PR
+  [#1163](https://github.com/xerj-org/xerj/pull/1163) by
+  [thomas-villani](https://github.com/thomas-villani)) — the notebook
+  search and EPUB answer pages were rewritten from fresh captures on the
+  rc.83 build (the first published binary with both extractors), moving
+  the fact-check matrix rows for notebooks and EPUB to GREEN; the
+  Parquet row widened to Parquet/Arrow/HDF5/NumPy/pickle (named with an
+  export hint, still no reader). The man-page fact-check aliases had held
+  a literal `\x08` since a scripted edit in #1130's docs commit decoded
+  `\b` into the control character — they now use real word boundaries,
+  and `factcheck.py --self-test` fails if any alias or rule pattern holds
+  a control character, so the class cannot silently return.
 
 ## [1.0.0-rc.83] - 2026-10-06
 
