@@ -49,5 +49,14 @@ pub use config::Config;
 pub use error::XerjError;
 pub use types::{DocId, Document, FieldConfig, FieldType, IndexName, Schema, SegmentId, SeqNo};
 
+/// Name of the catalog index `xerj autoindex` maintains on every node it
+/// onboards (`xerj-autoindex/src/catalog.rs` defines it; this copy is the
+/// one the SERVER side reads). Single source of truth in xerj-common
+/// because the two crates do not depend on each other, and both need the
+/// exact spelling: the server classifies searches of this index as
+/// machine traffic in the audit record (#1109), the client reads it back
+/// from `xerj gain`.
+pub const AUTOINDEX_CATALOG_INDEX: &str = "autoindex-catalog";
+
 /// Crate-level result alias — uses [`XerjError`] as the error type.
 pub type Result<T> = std::result::Result<T, XerjError>;

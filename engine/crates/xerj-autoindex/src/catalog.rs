@@ -6,7 +6,7 @@ use crate::correlate::KeyCorr;
 use crate::state::PlanDataset;
 use serde_json::{json, Value};
 
-pub const CATALOG_INDEX: &str = "autoindex-catalog";
+pub const CATALOG_INDEX: &str = xerj_common::AUTOINDEX_CATALOG_INDEX;
 
 /// The corpus-scope field the #737/#693 exclusion sweeps term-query (#755).
 ///

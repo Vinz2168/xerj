@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Audit records now carry a server-derived `actor` class (`user`/`machine`)** (issue
+  [#1109](https://github.com/xerj-org/xerj/issues/1109)) — the audit log's
+  search entries said WHO ran a query but not WHO IT SERVED, so the only way
+  `xerj gain` could exclude autoindex's own machine traffic (#1105) was to
+  re-derive it client-side from the note string (`size=0` probes) and the
+  resource name (catalog sweeps): a heuristic a future note-format change
+  would silently break, and one any caller writing audit-shaped entries could
+  satisfy. Every audit entry now carries an `actor` field derived at append
+  time by the SERVER from what the request itself is — a `size:0` counting
+  probe or a search of the `autoindex-catalog` maintenance index is
+  `machine`; everything else is `user`. Nothing a client can set (header,
+  principal, body) is consulted — the spoofable `X-Xerj-Internal` header
+  proposal from #1107 stays rejected. The class is part of the hash chain:
+  flipping an entry from `user` to `machine` — the dodge that would remove
+  unfavourable traffic from the `xerj gain` hit-rate denominator — breaks the
+  chain like any other edit. Entries written by older binaries deserialize
+  with `actor: "user"` (which is what they all were), so mixed-version logs
+  still verify, and `xerj gain` prefers the field on new entries while
+  keeping the note/resource derivation as the documented legacy fallback for
+  old ones.
+
 ### Fixed
 
 - **`embedding.mode = "proxy"` with an unusable endpoint silently ran
