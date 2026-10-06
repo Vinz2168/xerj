@@ -734,6 +734,24 @@ fn load_config(args: &CliArgs) -> Result<Config> {
         }
     }
 
+    // #1189: an explicit mode=proxy is validated at boot, the same
+    // fail-closed contract as onnx-experimental above. The old warn-plus-
+    // lexical fallback started a "healthy" node whose embedding requests
+    // silently wrote lexical vectors. Auto keeps its documented fallback.
+    if cfg.embedding.mode.trim().eq_ignore_ascii_case("proxy") {
+        if cfg.embedding.default_endpoint.trim().is_empty() {
+            anyhow::bail!(
+                "embedding.mode=proxy requires embedding.default_endpoint to be set; \
+                 remove mode=proxy (use auto) if a lexical fallback is wanted"
+            );
+        }
+        if let Err(e) = xerj_ai::embed::EmbeddingProxy::new(xerj_engine::index::proxy_config(
+            &cfg.embedding,
+        )) {
+            anyhow::bail!("embedding.mode=proxy failed to initialize: {e}");
+        }
+    }
+
     // ES/OpenSearch wire-compatibility override: `--compat-distribution` /
     // `XERJ_COMPAT_DISTRIBUTION` (flag wins). Left unset, xerj auto-detects
     // per request from the caller's User-Agent instead — this is only for

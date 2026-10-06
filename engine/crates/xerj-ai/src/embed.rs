@@ -39,6 +39,12 @@ pub struct EmbeddingProxyConfig {
     /// Maximum number of retries on transient failures.
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    /// Maximum input texts per request (#1190). Providers cap
+    /// `input` array length (OpenAI: 2048, many self-hosted ones far lower);
+    /// one `_bulk` of N docs used to leave here as a single N-input request.
+    /// Default 64 mirrors `embedding.batch_size`.
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
 }
 
 fn default_timeout_secs() -> u64 {
@@ -50,6 +56,9 @@ fn default_max_concurrent() -> usize {
 fn default_max_retries() -> u32 {
     3
 }
+fn default_batch_size() -> usize {
+    64
+}
 
 impl EmbeddingProxyConfig {
     pub fn new(endpoint: impl Into<String>, model: impl Into<String>) -> Self {
@@ -60,6 +69,7 @@ impl EmbeddingProxyConfig {
             timeout_secs: default_timeout_secs(),
             max_concurrent: default_max_concurrent(),
             max_retries: default_max_retries(),
+            batch_size: default_batch_size(),
         }
     }
 
@@ -178,14 +188,29 @@ impl EmbeddingProxy {
             return Ok(vec![]);
         }
 
-        let _permit = self
-            .semaphore
-            .acquire()
-            .await
-            .map_err(|e| XerjError::embedding(format!("semaphore: {e}")))?;
+        // #1190: split into requests of at most `batch_size` inputs. The
+        // semaphore permit moved from here to per-chunk: it limits in-flight
+        // HTTP requests (its actual purpose), not logical batches.
+        let chunk_len = self.config.batch_size.max(1);
+        let chunks: Vec<&[String]> = if texts.len() <= chunk_len {
+            vec![texts.as_slice()]
+        } else {
+            texts.chunks(chunk_len).collect()
+        };
 
-        let result = self.send_with_retry(&texts, model).await?;
-        Ok(result)
+        let mut futs = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            futs.push(async {
+                let _permit = self
+                    .semaphore
+                    .acquire()
+                    .await
+                    .map_err(|e| XerjError::embedding(format!("semaphore: {e}")))?;
+                self.send_with_retry(chunk, model).await
+            });
+        }
+        let results = futures_util::future::try_join_all(futs).await?;
+        Ok(results.into_iter().flatten().collect())
     }
 
     async fn send_with_retry(&self, texts: &[String], model: &str) -> Result<Vec<Vec<f32>>> {
@@ -311,6 +336,7 @@ mod tests {
         assert_eq!(cfg.timeout_secs, 30);
         assert_eq!(cfg.max_concurrent, 4);
         assert_eq!(cfg.max_retries, 3);
+        assert_eq!(cfg.batch_size, 64);
         assert!(cfg.api_key.is_none());
     }
 
@@ -397,5 +423,77 @@ mod tests {
             "permanent 4xx should not retry; took {elapsed:?}"
         );
         drop(handle); // listener already closed by loop exit
+    }
+
+    // #1190: one embed_batch of 10 texts with batch_size 4 must leave as
+    // requests of at most 4 inputs, and the returned vectors stay in input
+    // order across chunk boundaries.
+    #[tokio::test]
+    async fn batch_size_splits_requests_and_preserves_order() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let mut input_sizes = vec![];
+            for _ in 0..3 {
+                let Ok((mut s, _)) = listener.accept() else { break };
+                // Fixed single read, like permanent_4xx above: the client
+                // holds the connection open awaiting the response, so
+                // read_to_end would deadlock.
+                let mut buf = [0u8; 8192];
+                let n = s.read(&mut buf).unwrap();
+                let body = String::from_utf8_lossy(&buf[..n]);
+                let payload = body
+                    .split("\r\n\r\n")
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+                let n = parsed["input"].as_array().unwrap().len();
+                input_sizes.push(n);
+                // Embedding for input i is the vector [i, i, ...]: order is
+                // observable in the output itself.
+                let data: Vec<String> = parsed["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| {
+                        // The provider sees per-request indices; recover the
+                        // global index from the text itself ("t<global>").
+                        let text = parsed["input"][i].as_str().unwrap();
+                        let g: f32 = text[1..].parse().unwrap();
+                        format!(
+                            "{{\"object\":\"embedding\",\"index\":{i},\"embedding\":[{g},{g}]}}"
+                        )
+                    })
+                    .collect();
+                let resp_body = format!(
+                    "{{\"object\":\"list\",\"data\":[{}]}}",
+                    data.join(",")
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_body.len(),
+                    resp_body
+                );
+                let _ = s.write_all(resp.as_bytes());
+            }
+            input_sizes
+        });
+
+        let mut cfg = EmbeddingProxyConfig::new(format!("http://{addr}/v1/embeddings"), "m");
+        cfg.batch_size = 4;
+        let proxy = EmbeddingProxy::new(cfg).unwrap();
+
+        let texts: Vec<String> = (0..10).map(|i| format!("t{i}")).collect();
+        let out = proxy.embed_batch(texts).await.unwrap();
+
+        assert_eq!(out.len(), 10);
+        for (i, v) in out.iter().enumerate() {
+            assert_eq!(v, &vec![i as f32, i as f32], "output {i} out of order");
+        }
+        let sizes = handle.join().unwrap();
+        assert_eq!(sizes, vec![4, 4, 2], "requests must respect batch_size");
     }
 }
