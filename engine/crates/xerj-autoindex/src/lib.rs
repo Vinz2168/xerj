@@ -2002,10 +2002,21 @@ struct PipeState {
     /// Workers that may still call [`BulkPipe::submit`]. Decremented by
     /// [`BulkPipe::retire`] as each worker drains its queue.
     live_workers: usize,
-    /// Live workers currently parked inside `settle`. `live == parked` is
-    /// the "no more bytes are coming" signal that flushes a residual buffer.
+    /// Live workers currently parked inside `settle` (or waiting for an
+    /// in-flight slot in `submit`). `live == parked` is the "no more bytes
+    /// are coming" signal that flushes a residual buffer.
     parked_workers: usize,
+    /// Bulk bodies currently on the wire. Capped at [`MAX_IN_FLIGHT`].
+    in_flight: usize,
 }
+
+/// How many bulk bodies may be on the wire at once. 8 matches the server
+/// governor's default `max_concurrent_bulks`: more would queue server-side
+/// without adding throughput, fewer re-creates the one-at-a-time pipe the
+/// first cut of this change shipped (and which measured 4.7x SLOWER on
+/// phase B than the per-file code it replaced — extraction and sending
+/// must overlap, not alternate).
+const MAX_IN_FLIGHT: usize = 8;
 
 /// ONE bulk buffer shared by every phase-B worker (#1147).
 ///
@@ -2020,19 +2031,26 @@ struct PipeState {
 ///
 /// Flush triggers, in order:
 /// 1. the shared buffer crosses the cut (`--bulk-mb` bytes or the doc cap) —
-///    flushed inline by the submitting worker, exactly where the per-file
-///    code flushed;
-/// 2. every worker that could still add bytes is parked settling — the
+///    shipped inline by the submitting worker, exactly where the per-file
+///    code flushed (it blocks here, so a worker's own chunks stay ordered);
+/// 2. half the live workers are parked settling — ship what is buffered
+///    rather than wait for a full wave: extraction and sending must OVERLAP,
+///    not alternate (the all-parked barrier alone measured 4.7x slower on
+///    phase B than the per-file code, which sent 8-wide);
+/// 3. every worker that could still add bytes is parked settling — the
 ///    "nothing more is coming" flush, playing the role of the busy timeout
 ///    in clickhouse's async-insert queue (which groups per-insert futures
 ///    behind one flush the same way; `AsynchronousInsertQueue.cpp`, Apache-2.0,
 ///    read as design, not copied);
-/// 3. `retire` — the last worker out drains what remains.
+/// 4. `retire` — the last worker out drains what remains.
 ///
-/// Flushing happens under the pipe lock, so at most ONE bulk is in flight at
-/// a time. That is deliberate: the defect was round-trip count, not lack of
-/// parallel round-trips, and one full bulk keeps the server's WAL busy
-/// continuously instead of interleaving 16 partial ones.
+/// The pipe lock is NOT held across the wire: a flush detaches the buffer as
+/// a job, drops the lock, sends, and resolves tokens on return, so up to
+/// [`MAX_IN_FLIGHT`] bulks are on the wire at once. Per-file order still
+/// holds — a file's cut chunks are sent synchronously by its own worker
+/// inside `submit`, so any later job carrying its tail ships after those
+/// completed; files interleave arbitrarily, exactly as the 32 parallel
+/// per-file buffers always did.
 ///
 /// Durability semantics are the per-file code's, unchanged: a token settles
 /// `Ok` only after EVERY bulk carrying its records was accepted (server_errors
@@ -2113,9 +2131,27 @@ where
         }
         st.buf.extend_from_slice(&bytes);
         st.docs += docs;
-        if st.buf.len() >= self.bulk_cut || st.docs >= self.doc_cap {
-            self.flush_locked(&mut st);
+        if st.buf.len() < self.bulk_cut && st.docs < self.doc_cap {
+            return;
         }
+        // Cut crossed: ship inline. If every wire slot is busy, park until a
+        // delivery frees one — backpressure, exactly like the per-file code
+        // blocking inside its own bulk send.
+        let job = loop {
+            if let Some(job) = self.take_job(&mut st) {
+                break job;
+            }
+            st.parked_workers += 1;
+            let (guard, _) = self
+                .ready
+                .wait_timeout(st, std::time::Duration::from_secs(30))
+                .unwrap_or_else(|p| p.into_inner());
+            st = guard;
+            st.parked_workers -= 1;
+        };
+        drop(st);
+        let outcome = (self.send)(job.0);
+        self.deliver(job.1, outcome);
     }
 
     /// Whether any bulk carrying this file's records has failed. The drain
@@ -2136,13 +2172,22 @@ where
                 return res;
             }
             // This worker is about to park, so `parked + 1` is what the
-            // condition looks like from in here. When every live worker is
-            // (or is about to be) parked, no submission can arrive and a
-            // residual buffer must flush now, not wait for a cut nothing is
-            // left to cross.
-            if !st.buf.is_empty() && st.parked_workers + 1 >= st.live_workers {
-                self.flush_locked(&mut st);
-                continue;
+            // conditions look like from in here. All parked: no submission
+            // can arrive, a residual buffer must ship now. Half parked: ship
+            // what is there so extraction and sending overlap instead of
+            // alternating in waves (the wave barrier is what made the first
+            // cut of this pipe slower than the per-file code).
+            let all = st.parked_workers + 1 >= st.live_workers;
+            let half = (st.parked_workers + 1) * 2 >= st.live_workers.max(1);
+            if !st.buf.is_empty() && (all || half) {
+                if let Some(job) = self.take_job(&mut st) {
+                    drop(st);
+                    let outcome = (self.send)(job.0);
+                    self.deliver(job.1, outcome);
+                    st = self.lock();
+                    continue;
+                }
+                // Every wire slot is busy: park; a delivery will wake us.
             }
             st.parked_workers += 1;
             let (guard, _) = self
@@ -2159,22 +2204,45 @@ where
     fn retire(&self) {
         let mut st = self.lock();
         st.live_workers = st.live_workers.saturating_sub(1);
-        if !st.buf.is_empty() && st.parked_workers >= st.live_workers {
-            self.flush_locked(&mut st);
-        } else {
-            self.ready.notify_all();
+        while !st.buf.is_empty() {
+            if let Some(job) = self.take_job(&mut st) {
+                drop(st);
+                let outcome = (self.send)(job.0);
+                self.deliver(job.1, outcome);
+                st = self.lock();
+                continue;
+            }
+            // Wire full: wait for a delivery to free a slot.
+            let (guard, _) = self
+                .ready
+                .wait_timeout(st, std::time::Duration::from_secs(30))
+                .unwrap_or_else(|p| p.into_inner());
+            st = guard;
         }
+        // Live workers may have dropped to zero: anyone still parked must
+        // re-check whether they are now the last one able to ship.
+        self.ready.notify_all();
     }
 
-    /// Send the buffer and resolve every token it held. Runs under the pipe
-    /// lock: one bulk in flight at a time (see the type doc).
-    fn flush_locked(&self, st: &mut PipeState) {
-        let body = std::mem::take(&mut st.buf);
-        let tokens = std::mem::take(&mut st.pending);
+    /// Detach the buffer as a send job if a wire slot is free. Called with
+    /// the lock held; the caller drops the lock before sending.
+    fn take_job(&self, st: &mut PipeState) -> Option<(Vec<u8>, Vec<u64>)> {
+        if st.buf.is_empty() || st.in_flight >= MAX_IN_FLIGHT {
+            return None;
+        }
+        st.in_flight += 1;
         st.docs = 0;
-        // Same outcome handling as `record_bulk_outcome`, resolved per token
-        // instead of through the caller's `send_err`.
-        match (self.send)(body) {
+        Some((std::mem::take(&mut st.buf), std::mem::take(&mut st.pending)))
+    }
+
+    /// Resolve a completed job: reclaim the wire slot, settle every token it
+    /// carried, wake the parked. Same outcome handling as
+    /// `record_bulk_outcome`, resolved per token instead of through the
+    /// caller's `send_err`.
+    fn deliver(&self, tokens: Vec<u64>, outcome: anyhow::Result<crate::esclient::BulkOutcome>) {
+        let mut st = self.lock();
+        st.in_flight = st.in_flight.saturating_sub(1);
+        match outcome {
             Ok(outcome) => {
                 if outcome.server_errors > 0 {
                     let msg = format!(
@@ -11477,6 +11545,54 @@ mod bulk_pipe_tests {
         pipe.settle(t).expect("pre-resolved");
         pipe.retire();
         assert!(bodies.lock().unwrap().is_empty());
+    }
+
+    /// Sends must OVERLAP, not alternate: the first cut of this pipe held the
+    /// lock across the wire (one bulk at a time), and phase B on the rustsec
+    /// corpus measured 4.7x SLOWER than the per-file code it replaced —
+    /// extraction and sending serialized behind a full-wave barrier. Here N
+    /// cut-crossing submits from N threads must put more than one body on
+    /// the wire at once.
+    #[test]
+    fn wire_slots_overlap_instead_of_serializing() {
+        let rejected = AtomicU64::new(0);
+        let errors = Mutex::new(Vec::new());
+        let concurrent = AtomicU64::new(0);
+        let peak = AtomicU64::new(0);
+        let pipe = BulkPipe::new(
+            {
+                let concurrent = &concurrent;
+                let peak = &peak;
+                move |_body| {
+                    let now = concurrent.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(60));
+                    concurrent.fetch_sub(1, Ordering::SeqCst);
+                    Ok(outcome())
+                }
+            },
+            64,
+            5000,
+            &rejected,
+            &errors,
+            4,
+        );
+        let tokens: Vec<_> = (0..4).map(|_| pipe.token()).collect();
+        std::thread::scope(|s| {
+            for t in tokens {
+                let pipe = &pipe;
+                s.spawn(move || {
+                    pipe.submit(t, vec![b'x'; 200], 1);
+                    pipe.settle(t).expect("accepted");
+                });
+            }
+        });
+        pipe.retire();
+        assert!(
+            peak.load(Ordering::SeqCst) >= 2,
+            "at least two bodies were on the wire together, peak={}",
+            peak.load(Ordering::SeqCst)
+        );
     }
 
     /// The concurrent shape phase B actually runs: many workers, many small
