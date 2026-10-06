@@ -1341,6 +1341,33 @@ fn pack_record_gap(name: &str, root: &Path, docs: Option<u64>) -> Option<(u64, u
     (files > 0 && docs < lines).then_some((lines, files))
 }
 
+/// What a failed legacy-mode run can honestly claim about the records it
+/// wrote (#1173). The three cases are exclusive, and the whole point of the
+/// type is which one is forbidden when: "wrote no new records" asserted from
+/// a count the node never answered is an absence claim with no evidence —
+/// exactly the honest-claims rule the public docs are held to, applied to
+/// our own tooling. The node under a failed long build is precisely the node
+/// that answers counts with UNKNOWN.
+enum LegacyFailureVerdict {
+    /// The count grew: records from THIS run are queryable despite the exit.
+    Salvaged { before: u64, after: u64 },
+    /// The node could not be counted (before, after, or both). The honest
+    /// claim is "unknown" — never "absent".
+    CountUnknown,
+    /// Both counts are known and did not grow.
+    WroteNothing { before: u64, after: u64 },
+}
+
+fn legacy_failure_verdict(before: Option<u64>, after: Option<u64>) -> LegacyFailureVerdict {
+    match (before, after) {
+        (Some(before), Some(after)) if after > before => {
+            LegacyFailureVerdict::Salvaged { before, after }
+        }
+        (Some(before), Some(after)) => LegacyFailureVerdict::WroteNothing { before, after },
+        _ => LegacyFailureVerdict::CountUnknown,
+    }
+}
+
 /// The build/verify/swap flow over an injected node, autoindex runner and
 /// clock (#1004) — the destructive-operation contracts are pinned by the
 /// tests below against a [`FakeNode`](tests::FakeNode), which is why none of
@@ -1619,23 +1646,39 @@ fn corpus_index_flow(
             // lying around" (salvaging the latter would date stale data to
             // now, which is worse than no index).
             let before_known = count_under(node, &format!("xc-{name}"));
-            let docs_before = before_known.unwrap_or(0);
             let rc = run_autoindex(&format!("xc-{name}"), None);
             let mut salvaged = false;
             let mut docs: Option<u64> = None;
             if rc != 0 && rc != 3 {
                 docs = count_under(node, &format!("xc-{name}"));
-                if before_known.is_some() && docs.is_some_and(|d| d > docs_before) {
-                    salvaged = true;
-                    eprintln!("xerj corpus index: WARNING — autoindex exited {rc}, but this run wrote records");
-                    eprintln!("xerj corpus index: ({docs_before} -> {}). The corpus is queryable and is being", docs.unwrap_or(0));
-                    eprintln!("xerj corpus index: recorded as indexed, with autoindex_exit={rc} in its state file.");
-                    eprintln!("xerj corpus index: Coverage is not guaranteed — please report the error above.");
-                } else {
-                    eprintln!("xerj corpus index: autoindex failed with exit {rc} and wrote no new records.");
-                    eprintln!("xerj corpus index: If the error above says the state directory cannot become generation");
-                    eprintln!("xerj corpus index: authority, or that --fresh is refused, run:  xerj corpus index {name} --fresh");
-                    return rc;
+                match legacy_failure_verdict(before_known, docs) {
+                    LegacyFailureVerdict::Salvaged { before, after } => {
+                        salvaged = true;
+                        eprintln!("xerj corpus index: WARNING — autoindex exited {rc}, but this run wrote records");
+                        eprintln!("xerj corpus index: ({before} -> {after}). The corpus is queryable and is being");
+                        eprintln!("xerj corpus index: recorded as indexed, with autoindex_exit={rc} in its state file.");
+                        eprintln!("xerj corpus index: Coverage is not guaranteed — please report the error above.");
+                    }
+                    // #1173: a node that cannot be counted cannot be reported
+                    // on. "Wrote no new records" was asserted here while the
+                    // count was UNKNOWN — the honest-claims rule applied to
+                    // our own tooling: say what is unknown, never claim an
+                    // absence the node never confirmed.
+                    LegacyFailureVerdict::CountUnknown => {
+                        eprintln!("xerj corpus index: autoindex exited {rc} and the node could not be counted");
+                        eprintln!("xerj corpus index: afterwards, so whether this run wrote records is UNKNOWN (not absent).");
+                        eprintln!("xerj corpus index: Count again once the node answers, or rebuild beside the old");
+                        eprintln!(
+                            "xerj corpus index: index with:  xerj corpus index {name} --fresh"
+                        );
+                        return rc;
+                    }
+                    LegacyFailureVerdict::WroteNothing { before, after } => {
+                        eprintln!("xerj corpus index: autoindex failed with exit {rc} and wrote no new records ({before} -> {after}).");
+                        eprintln!("xerj corpus index: If the error above says the state directory cannot become generation");
+                        eprintln!("xerj corpus index: authority, or that --fresh is refused, run:  xerj corpus index {name} --fresh");
+                        return rc;
+                    }
                 }
             }
             docs = docs.or_else(|| count_under(node, &format!("xc-{name}")));
@@ -2325,6 +2368,49 @@ mod tests {
         let st = state::load_state(&root, "kv").unwrap();
         assert_eq!(st.index_prefix.as_deref(), Some(old_prefix.as_str()));
         assert_eq!(st.salvaged, Some(false));
+    }
+
+    /// #1173: the three honest claims a failed legacy run can make. The one
+    /// this exists to pin is the middle: a count the node never answered is
+    /// UNKNOWN, and "wrote no new records" asserted from it is a fabricated
+    /// absence — exactly what the overnight resume failure printed while the
+    /// run had written records the node was too unhealthy to count.
+    #[test]
+    fn a_failed_run_the_node_cannot_count_is_unknown_not_wrote_nothing() {
+        use super::LegacyFailureVerdict::*;
+        // grew → salvaged, with the pair the message quotes
+        assert!(matches!(
+            legacy_failure_verdict(Some(100), Some(250)),
+            Salvaged {
+                before: 100,
+                after: 250
+            }
+        ));
+        // known and did not grow → the absence claim is EARNED
+        assert!(matches!(
+            legacy_failure_verdict(Some(100), Some(100)),
+            WroteNothing {
+                before: 100,
+                after: 100
+            }
+        ));
+        assert!(matches!(
+            legacy_failure_verdict(Some(100), Some(40)),
+            WroteNothing {
+                before: 100,
+                after: 40
+            }
+        ));
+        // any UNKNOWN side forbids the absence claim — before, after, or both
+        assert!(matches!(
+            legacy_failure_verdict(None, Some(250)),
+            CountUnknown
+        ));
+        assert!(matches!(
+            legacy_failure_verdict(Some(100), None),
+            CountUnknown
+        ));
+        assert!(matches!(legacy_failure_verdict(None, None), CountUnknown));
     }
 
     #[test]
