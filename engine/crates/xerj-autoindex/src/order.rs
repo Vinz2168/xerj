@@ -228,8 +228,7 @@ pub fn band_from_family_str(rel: &str, family: &str) -> Band {
         // planning run had put it ahead of. The agreement test did not catch it
         // because its family list was written by hand and omitted `Eml` too.
         "code" | "txt-prose" | "html" | "pdf" | "docx" | "pptx" | "epub" | "ipynb" | "man"
-        | "unity"
-        | "eml" | "mbox" => Band::SourceAndDocs,
+        | "unity" | "eml" | "mbox" => Band::SourceAndDocs,
         "yaml" | "json" | "xml" | "unity-meta" => Band::Config,
         "csv" | "jsonl" | "sqlite" | "sqldump" | "xlsx" | "bvh" => Band::Data,
         // Pre-existing drift, caught by
