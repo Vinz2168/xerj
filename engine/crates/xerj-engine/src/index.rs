@@ -27566,13 +27566,39 @@ impl Index {
         // silently reverting every segment to per-segment BM25 statistics.
         pinned: Option<PinnedIds<'_>>,
     ) -> Option<xerj_fts::CollectionStats> {
-        // Widest (field × term) pre-pass we will pay for.  A field-less
-        // `query_string` over a wide mapping can project hundreds of leaves;
-        // past this point the FST seeks stop being cheap relative to the
-        // search itself, and falling back to per-arm statistics is the
-        // conservative choice (same "decline rather than over-serve"
-        // convention as `MAX_QS_CROSS_PRODUCT`).
-        const MAX_STATS_PROBES: usize = 4096;
+        // Widest pre-pass we will pay for, budgeted per COST CLASS (#1186):
+        //
+        //  * FIELD probes — `open_stats_only` mmaps one FST per (segment,
+        //    field) and `field_stats` walks its meta.  A field-less
+        //    `query_string` over a wide mapping can project hundreds of
+        //    leaves, and that product (fields × segments) is the explosion
+        //    the original 4096 combined cap existed to stop.  Unchanged.
+        //
+        //  * TERM probes — one FST seek per (segment, term).  These were
+        //    lumped into the same 4096 cap, which had a correctness cost the
+        //    field case does not: a long `match` query (an agent pasting a
+        //    blob, a 1502-term repro) crossed the cap on any multi-segment
+        //    index, the pre-pass silently declined, and every segment fell
+        //    back to its own df/avgdl — padding a query with terms that
+        //    match NOTHING reordered the whole top-5 (#1186).  Execution
+        //    itself already pays ~one postings seek per (segment, term), so
+        //    the pre-pass at most doubles a cost the query is already
+        //    incurring: Lucene collects `TermStates` for every clause it
+        //    executes and never falls back to per-leaf statistics (its
+        //    bound is the clause count, which refuses the query instead of
+        //    re-scoring it).  The term budget below only exists so a
+        //    pathological million-term query cannot make the pre-pass
+        //    dominate a search that execution would itself refuse.  The bar
+        //    is set at 2^20 probes (~1–2 s of FST seeks) — a query must
+        //    exceed a MILLION (term × segment) products to hit it, i.e. a
+        //    1,500-term query on a ~700-segment index; anything the engine
+        //    answers in sane time keeps index-wide statistics, and when the
+        //    budget DOES decline it says so on the log instead of silently
+        //    changing the ranking.  (The reporter's literal repro — 1,502
+        //    terms on a 32-core box's ~128 flush segments, ≈192k probes —
+        //    sits comfortably inside.)
+        const MAX_STATS_FIELD_PROBES: usize = 4096;
+        const MAX_STATS_TERM_PROBES: usize = 1_048_576;
 
         let fq = query_node_to_fts_projected(
             query,
@@ -27611,7 +27637,27 @@ impl Index {
             }
         }
 
-        if (fields.len() + pairs.len()) * snap.segments.len().max(1) > MAX_STATS_PROBES {
+        let segs = snap.segments.len().max(1);
+        if fields.len() * segs > MAX_STATS_FIELD_PROBES {
+            tracing::warn!(
+                fields = fields.len(),
+                segments = segs,
+                "search: BM25 collection statistics declined ({}) field probes > \
+                 {MAX_STATS_FIELD_PROBES} — segments will score against their own \
+                 df/avgdl and scores will not be comparable across segments",
+                fields.len() * segs
+            );
+            return None;
+        }
+        if pairs.len() * segs > MAX_STATS_TERM_PROBES {
+            tracing::warn!(
+                terms = pairs.len(),
+                segments = segs,
+                "search: BM25 collection statistics declined ({}) term probes > \
+                 {MAX_STATS_TERM_PROBES} — segments will score against their own \
+                 df/avgdl and scores will not be comparable across segments",
+                pairs.len() * segs
+            );
             return None;
         }
 
@@ -27623,7 +27669,15 @@ impl Index {
             else {
                 // A segment whose statistics we cannot read would skew the
                 // union low and silently inflate every other arm's IDF.
-                // Fall back to per-arm statistics rather than half a union.
+                // Fall back to per-arm statistics rather than half a union —
+                // and SAY so (#1186: every decline from index-wide stats is
+                // a silent ranking change, never a quiet local decision).
+                tracing::warn!(
+                    segment = %meta.id,
+                    "search: BM25 collection statistics declined — segment stats \
+                     unreadable; segments will score against their own df/avgdl and \
+                     scores will not be comparable across segments"
+                );
                 return None;
             };
             for f in &fields {
