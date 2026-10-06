@@ -436,7 +436,9 @@ mod tests {
             use std::io::{Read, Write};
             let mut input_sizes = vec![];
             for _ in 0..3 {
-                let Ok((mut s, _)) = listener.accept() else { break };
+                let Ok((mut s, _)) = listener.accept() else {
+                    break;
+                };
                 // Fixed single read, like permanent_4xx above: the client
                 // holds the connection open awaiting the response, so
                 // read_to_end would deadlock.
@@ -468,10 +470,7 @@ mod tests {
                         )
                     })
                     .collect();
-                let resp_body = format!(
-                    "{{\"object\":\"list\",\"data\":[{}]}}",
-                    data.join(",")
-                );
+                let resp_body = format!("{{\"object\":\"list\",\"data\":[{}]}}", data.join(","));
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     resp_body.len(),

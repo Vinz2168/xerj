@@ -745,9 +745,9 @@ fn load_config(args: &CliArgs) -> Result<Config> {
                  remove mode=proxy (use auto) if a lexical fallback is wanted"
             );
         }
-        if let Err(e) = xerj_ai::embed::EmbeddingProxy::new(xerj_engine::index::proxy_config(
-            &cfg.embedding,
-        )) {
+        if let Err(e) =
+            xerj_ai::embed::EmbeddingProxy::new(xerj_engine::index::proxy_config(&cfg.embedding))
+        {
             anyhow::bail!("embedding.mode=proxy failed to initialize: {e}");
         }
     }

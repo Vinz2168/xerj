@@ -35689,8 +35689,6 @@ pub fn proxy_config(
     }
 }
 
-
-
 /// Fail closed rather than mixing vectors produced by different model,
 /// tokenizer, pooling, or backend configurations after a restart/resume.
 fn validate_embedding_identity(
@@ -36865,9 +36863,9 @@ fn make_embedder(cfg: &xerj_common::config::EmbeddingConfig) -> Result<xerj_ai::
             }
             Err(e) => {
                 if explicit_proxy {
-                    return Err(EngineError::Common(xerj_common::XerjError::embedding(format!(
-                        "embedding.mode=proxy failed to initialize: {e}"
-                    ))));
+                    return Err(EngineError::Common(xerj_common::XerjError::embedding(
+                        format!("embedding.mode=proxy failed to initialize: {e}"),
+                    )));
                 }
                 warn!(error = %e, "embedding proxy init failed — falling back to lexical");
                 Ok(xerj_ai::Embedder::lexical())
