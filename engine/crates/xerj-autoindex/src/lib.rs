@@ -6568,6 +6568,14 @@ fn run_index_report_inner(
             identity.resumable,
             identity.non_resumable_reason.as_deref(),
         )?;
+        // #1189: name the live backend in the run output. A server started
+        // with mode=proxy that had silently degraded to lexical was
+        // indistinguishable here until the vectors came back wrong.
+        pr.note(&format!(
+            "semantic autoindex embedding backend: {} ({}resumable)",
+            identity.backend,
+            if identity.resumable { "" } else { "non-" }
+        ));
     }
 
     // ── create indices with explicit mappings ────────────────────────────

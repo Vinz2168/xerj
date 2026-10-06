@@ -7242,6 +7242,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
+ "futures-util",
  "hf-hub",
  "ort",
  "reqwest",

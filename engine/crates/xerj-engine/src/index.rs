@@ -35532,6 +35532,11 @@ pub(crate) fn embedding_execution_identity(
 
     const CONTRACT: &str = "semantic_text-derived-vector.v1";
     let requested = cfg.mode.trim().to_ascii_lowercase();
+    // Explicit mode=proxy with an unusable endpoint is a configuration error,
+    // not a lexical degrade (#1189): the identity must report what the
+    // embedder would actually run, and after the make_embedder fix that
+    // configuration no longer starts. Auto (any non-pinned mode) keeps the
+    // historical fallback to lexical.
     let mut backend = match requested.as_str() {
         "neural" => {
             #[cfg(feature = "neural")]
@@ -35545,13 +35550,25 @@ pub(crate) fn embedding_execution_identity(
         }
         "onnx-experimental" => "onnx-experimental",
         "lexical" => "lexical",
-        "proxy" if cfg.default_endpoint.is_empty() => "lexical",
+        "proxy" if cfg.default_endpoint.is_empty() => {
+            return Err(EngineError::Common(xerj_common::XerjError::embedding(
+                "embedding.mode=proxy requires embedding.default_endpoint to be set; \
+                 remove mode=proxy (use auto) if a lexical fallback is wanted",
+            )));
+        }
         "proxy" => "proxy",
         _ if cfg.default_endpoint.is_empty() => "lexical",
         _ => "proxy",
     };
-    if backend == "proxy" && !proxy_initializes(cfg) {
-        backend = "lexical";
+    if backend == "proxy" {
+        if let Err(e) = xerj_ai::embed::EmbeddingProxy::new(proxy_config(cfg)) {
+            if requested == "proxy" {
+                return Err(EngineError::Common(xerj_common::XerjError::embedding(
+                    format!("embedding.mode=proxy failed to initialize: {e}"),
+                )));
+            }
+            backend = "lexical";
+        }
     }
     // Only report a width for the backends whose width this server actually
     // pins. `neural` reads it from the resolved model's `config.json`
@@ -35655,7 +35672,10 @@ fn lexical_algorithm_probe_sha256() -> String {
     format!("{:x}", digest.finalize())
 }
 
-fn proxy_config(
+/// Build the proxy client config from engine embedding settings. Public so
+/// `xerj-server` runs the same #1189 boot validation the engine runs at
+/// index-create, instead of duplicating the mapping.
+pub fn proxy_config(
     cfg: &xerj_common::config::EmbeddingConfig,
 ) -> xerj_ai::embed::EmbeddingProxyConfig {
     xerj_ai::embed::EmbeddingProxyConfig {
@@ -35665,11 +35685,8 @@ fn proxy_config(
         timeout_secs: cfg.timeout_ms / 1000,
         max_concurrent: 4,
         max_retries: 3,
+        batch_size: cfg.batch_size.max(1),
     }
-}
-
-fn proxy_initializes(cfg: &xerj_common::config::EmbeddingConfig) -> bool {
-    xerj_ai::embed::EmbeddingProxy::new(proxy_config(cfg)).is_ok()
 }
 
 /// Fail closed rather than mixing vectors produced by different model,
@@ -35995,23 +36012,89 @@ mod embedding_identity_tests {
         assert!(!encoded.contains("private-alias"));
         assert!(!encoded.contains("dimensions"), "{encoded}");
 
+        // #1189: an EXPLICIT mode=proxy with an unusable endpoint is a
+        // configuration error, not a silent lexical degrade. All three
+        // failures previously reported backend "lexical" while the operator
+        // believed the node was embedding through their provider.
         for endpoint in ["", "not a url", "file:///private/model"] {
-            let fallback = xerj_common::config::EmbeddingConfig {
+            let broken = xerj_common::config::EmbeddingConfig {
                 mode: "proxy".into(),
                 default_endpoint: endpoint.into(),
                 ..Default::default()
             };
+            let err = embedding_execution_identity(&broken)
+                .expect_err("explicit proxy with an unusable endpoint must error");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("embedding.mode=proxy"),
+                "the error must name the setting: {msg}"
+            );
+        }
+
+        // The AUTO path keeps the documented fallback: an unset or unknown
+        // mode with a broken endpoint resolves to lexical, never errors.
+        for mode in ["auto", "", "somewhere-in-between"] {
+            let fallback = xerj_common::config::EmbeddingConfig {
+                mode: mode.into(),
+                default_endpoint: "not a url".into(),
+                ..Default::default()
+            };
             let identity = embedding_execution_identity(&fallback).unwrap();
-            assert_eq!(identity.backend, "lexical", "{endpoint}");
-            assert!(identity.resumable, "{endpoint}");
+            assert_eq!(identity.backend, "lexical", "{mode}");
+            assert!(identity.resumable, "{mode}");
             // The fallback really did become lexical, so the pinned lexical
             // width is the truthful answer here.
             assert_eq!(
                 identity.dimensions,
                 Some(xerj_ai::local::DEFAULT_DIMS),
-                "{endpoint}"
+                "{mode}"
             );
         }
+    }
+
+    /// #1189: explicit mode=proxy fails closed at the embedder too, with the
+    /// proxy's own error carried through; the auto path keeps the documented
+    /// lexical fallback.
+    #[test]
+    fn explicit_proxy_mode_fails_closed_at_the_embedder() {
+        for endpoint in ["", "htp://typo.example/v1", "file:///etc/hosts"] {
+            let cfg = xerj_common::config::EmbeddingConfig {
+                mode: "proxy".into(),
+                default_endpoint: endpoint.into(),
+                ..Default::default()
+            };
+            // `Embedder` is not Debug, so plain `expect_err` cannot print
+            // the Ok side; map it away first.
+            let err = make_embedder(&cfg)
+                .map(|_| ())
+                .expect_err("explicit proxy with an unusable endpoint must error");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("embedding.mode=proxy"),
+                "must name the setting: {msg}"
+            );
+            // The typo case carries the underlying scheme error so the
+            // operator sees what is actually wrong with the URL.
+            if endpoint.starts_with("htp://") {
+                assert!(
+                    msg.contains("http or https"),
+                    "must carry the proxy's own init error: {msg}"
+                );
+            }
+        }
+
+        // Auto with the same broken endpoint still boots as lexical — that
+        // fallback is the documented auto behavior and stays.
+        let auto = xerj_common::config::EmbeddingConfig {
+            mode: "auto".into(),
+            default_endpoint: "htp://typo.example/v1".into(),
+            ..Default::default()
+        };
+        make_embedder(&auto).unwrap();
+        assert_eq!(
+            embedding_execution_identity(&auto).unwrap().backend,
+            "lexical"
+        );
     }
 
     /// #522: the #434 guard (`validate_embedding_execution`) was unit-tested at
@@ -36048,16 +36131,21 @@ mod embedding_identity_tests {
             "the refusal must name both the recorded and the current backend: {msg}"
         );
 
-        // Over-refusal guard: a proxy config with NO endpoint falls back to the
-        // lexical embedder, so its resolved identity is unchanged and reopening
-        // must NOT be refused.
+        // Over-refusal guard (#1189 update): a proxy config with NO endpoint
+        // used to silently resolve to lexical and reopen cleanly. It is now a
+        // configuration error at the identity level, so reopening fails with
+        // the same actionable message instead of a confusing mismatch refusal.
         let proxy_without_endpoint = xerj_common::config::EmbeddingConfig {
             mode: "proxy".into(),
             default_endpoint: String::new(),
             ..Default::default()
         };
-        validate_embedding_execution(index_dir, &proxy_without_endpoint, false, true)
-            .expect("a proxy that falls back to lexical must not be refused");
+        let err = validate_embedding_execution(index_dir, &proxy_without_endpoint, false, true)
+            .expect_err("proxy with no endpoint is a config error, not a lexical reopen");
+        assert!(
+            format!("{err}").contains("embedding.mode=proxy"),
+            "must name the setting: {err}"
+        );
     }
 
     /// #533: the proxy `default_endpoint` is part of the embedder identity. Same
@@ -36742,7 +36830,8 @@ mod embedding_identity_tests {
 
 fn make_embedder(cfg: &xerj_common::config::EmbeddingConfig) -> Result<xerj_ai::Embedder> {
     let mode = cfg.mode.trim().to_ascii_lowercase();
-    let want_proxy = mode == "proxy"
+    let explicit_proxy = mode == "proxy";
+    let want_proxy = explicit_proxy
         || (mode != "neural" && mode != "lexical" && !cfg.default_endpoint.is_empty());
 
     if mode == "neural" {
@@ -36754,22 +36843,35 @@ fn make_embedder(cfg: &xerj_common::config::EmbeddingConfig) -> Result<xerj_ai::
     }
 
     if want_proxy {
+        // Explicit mode=proxy fails closed (#1189): a warn plus lexical
+        // fallback left the node "healthy" while every embedding request
+        // silently wrote lexical vectors into the index. Only the auto path
+        // (endpoint set but mode not pinned) keeps the documented fallback.
         if cfg.default_endpoint.is_empty() {
-            warn!("embedding.mode=proxy but embedding.default_endpoint is empty — falling back to lexical");
+            if explicit_proxy {
+                return Err(EngineError::Common(xerj_common::XerjError::embedding(
+                    "embedding.mode=proxy requires embedding.default_endpoint to be set; \
+                     remove mode=proxy (use auto) if a lexical fallback is wanted",
+                )));
+            }
+            warn!("embedding.default_endpoint is empty — falling back to lexical");
             return Ok(xerj_ai::Embedder::lexical());
         }
-        return Ok(
-            match xerj_ai::embed::EmbeddingProxy::new(proxy_config(cfg)) {
-                Ok(p) => {
-                    info!(endpoint = %cfg.default_endpoint, "embedding backend: external proxy");
-                    xerj_ai::Embedder::proxy(p)
+        return match xerj_ai::embed::EmbeddingProxy::new(proxy_config(cfg)) {
+            Ok(p) => {
+                info!(endpoint = %cfg.default_endpoint, "embedding backend: external proxy");
+                Ok(xerj_ai::Embedder::proxy(p))
+            }
+            Err(e) => {
+                if explicit_proxy {
+                    return Err(EngineError::Common(xerj_common::XerjError::embedding(
+                        format!("embedding.mode=proxy failed to initialize: {e}"),
+                    )));
                 }
-                Err(e) => {
-                    warn!(error = %e, "embedding proxy init failed — falling back to lexical");
-                    xerj_ai::Embedder::lexical()
-                }
-            },
-        );
+                warn!(error = %e, "embedding proxy init failed — falling back to lexical");
+                Ok(xerj_ai::Embedder::lexical())
+            }
+        };
     }
 
     Ok(xerj_ai::Embedder::lexical())

@@ -1354,9 +1354,13 @@ impl Default for LogsConfig {
 ///     to lexical.
 ///   * `"proxy"` — call an external OpenAI-compatible `/v1/embeddings`
 ///     endpoint ([`default_endpoint`]). Lets customers plug in ANY embedding
-///     model / provider they already run.
+///     model / provider they already run. An explicit `mode = "proxy"` with a
+///     missing or unusable endpoint is a startup ERROR (#1189): silently
+///     running lexical instead would write the wrong vectors into the index
+///     while every embedding request appears to succeed.
 ///   * `"auto"` (default) — use the proxy when [`default_endpoint`] is set,
-///     otherwise lexical. This preserves the historical behavior exactly.
+///     otherwise lexical; if the endpoint fails to initialize, fall back to
+///     lexical with a warning. The fallback exists ONLY on this path (#1189).
 ///
 /// **20 settings.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1369,7 +1373,9 @@ pub struct EmbeddingConfig {
     pub default_endpoint: String,
     /// Model name to request from the endpoint (default: `""`).
     pub default_model: String,
-    /// Maximum documents per embedding API call (default: `64`).
+    /// Maximum documents per embedding API call (default: `64`). Providers
+    /// cap the request `input` array (often far below 64); the proxy splits
+    /// larger batches into consecutive requests of at most this size (#1190).
     pub batch_size: usize,
     /// HTTP timeout for embedding requests in ms (default: `5000`).
     pub timeout_ms: u64,

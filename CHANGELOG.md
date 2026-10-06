@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`embedding.mode = "proxy"` with an unusable endpoint silently ran
+  lexical** (issue [#1189](https://github.com/xerj-org/xerj/issues/1189)) —
+  an empty `default_endpoint` or a typo'd URL (`htp://…`) produced a
+  startup WARN and a lexical embedder; indexing and semantic search then
+  "succeeded" while writing lexical feature-hash vectors into the index, and
+  `/v1/embedding/identity` reported `backend: lexical` for a config that
+  said `proxy`. An explicit `mode = "proxy"` now fails closed at startup
+  with an actionable error in both the embedder and the identity path
+  (including the reporter's scheme typo, which carries the underlying
+  `http or https` message); the auto path (endpoint set, mode not pinned)
+  keeps the documented warn-plus-lexical fallback. `xerj autoindex` now
+  names the live embedding backend in its run output so a degraded backend
+  is visible where the work happens.
+
+- **`embedding.batch_size` was never read** (issue
+  [#1190](https://github.com/xerj-org/xerj/issues/1190)) — the setting
+  documented "Maximum documents per embedding API call (default: 64)" but
+  no code read it: one `_bulk` of 20 documents left the proxy as a single
+  request with 20 inputs, and an autoindex run was observed sending a
+  192-input request. Providers cap the request `input` array (OpenAI 2048,
+  self-hosted gateways often far lower), so a large bulk could fail on
+  request shape, not load. The proxy now splits every batch into
+  concurrent requests of at most `batch_size` inputs (each with its own
+  retry/backoff and concurrency permit; the semaphore now limits in-flight
+  HTTP requests, which was its purpose) and reassembles the vectors in
+  input order. Verified by a mock-endpoint test: 10 texts with
+  `batch_size: 4` leave as three requests of 4/4/2 inputs and the returned
+  vectors keep input order across chunk boundaries.
+
 - **Long BM25 queries silently fell back to per-segment IDF/avgdl**
   (issue [#1186](https://github.com/xerj-org/xerj/issues/1186)) — the
   index-wide statistics pre-pass (#188) budgeted `(fields + terms) ×
