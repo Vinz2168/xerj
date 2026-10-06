@@ -279,3 +279,170 @@ async fn test_single_node_cluster_via_runner() {
         "index should be committed and applied"
     );
 }
+
+// ── #1168: outbound sends must never block the Raft loop on one peer ────────
+
+/// A listener that accepts connections (so `connect` succeeds) but never
+/// speaks the cluster handshake — the shape of a peer that is dying slowly
+/// (SIGTERM graceful shutdown with the listener still bound) or hung. The
+/// pre-fix send path blocked on exactly this peer for the full 5 s
+/// `SEND_TIMEOUT`, per heartbeat, while the election timeout is 150–300 ms.
+///
+/// Counts how many connections it accepted so tests can assert the *attempt
+/// rate*, not just delivery.
+async fn black_hole_peer() -> (SocketAddr, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepts = Arc::new(AtomicUsize::new(0));
+
+    let counter = accepts.clone();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Hold the stream open without ever writing the handshake.
+            held.push(stream);
+        }
+    });
+    (addr, accepts)
+}
+
+fn request_vote(term: u64) -> RaftMessage {
+    RaftMessage::RequestVote {
+        term,
+        candidate_id: "node-a".to_string(),
+        last_log_index: 0,
+        last_log_term: 0,
+    }
+}
+
+/// `ClusterTransport::send` must return as soon as the message is *enqueued*,
+/// not after the TCP exchange: a stalled (accepting-but-silent) peer costs the
+/// Raft tick loop nothing. Pre-fix, this send awaited the full `SEND_TIMEOUT`
+/// and then failed.
+#[tokio::test]
+async fn send_to_a_stalled_peer_returns_without_awaiting_the_tcp_exchange() {
+    use xerj_cluster::node::ClusterTransport;
+
+    let (stalled_addr, _accepts) = black_hole_peer().await;
+    let addr_a = free_addr().await;
+    let mut peers_a = HashMap::new();
+    peers_a.insert("stalled".to_string(), stalled_addr);
+
+    let transport_a = TcpTransport::new(
+        "node-a".to_string(),
+        addr_a,
+        peers_a,
+        ClusterSecret::new("shared-cluster-secret-for-tests").unwrap(),
+    )
+    .await
+    .expect("create transport A");
+
+    // 2 s is generous (the pre-fix path took the full 5 s timeout and erred);
+    // generous is deliberate — the assertion is the ordering of magnitude,
+    // not microtiming, so a co-tenant-loaded runner cannot flake it.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        transport_a.send("stalled", request_vote(1)).await
+    })
+    .await
+    .expect("send() must not await the stalled peer's TCP exchange")
+    .expect("enqueue must succeed");
+}
+
+/// The #1168 scenario in miniature: a leader dispatching to a stalled peer and
+/// a healthy peer in the same tick. The healthy peer must receive its message
+/// immediately — pre-fix the sequential inline awaits made the stalled peer's
+/// 5 s timeout gate every later send in the same dispatch batch, which is how
+/// killing one node starved heartbeats to the survivors.
+#[tokio::test]
+async fn a_stalled_peer_does_not_starve_a_healthy_peer() {
+    use xerj_cluster::node::ClusterTransport;
+
+    let (stalled_addr, _accepts) = black_hole_peer().await;
+    let addr_a = free_addr().await;
+    let addr_b = free_addr().await;
+
+    let mut peers_a = HashMap::new();
+    peers_a.insert("stalled".to_string(), stalled_addr);
+    peers_a.insert("node-b".to_string(), addr_b);
+    let mut peers_b = HashMap::new();
+    peers_b.insert("node-a".to_string(), addr_a);
+
+    let secret = ClusterSecret::new("shared-cluster-secret-for-tests").unwrap();
+    let transport_a = TcpTransport::new("node-a".to_string(), addr_a, peers_a, secret.clone())
+        .await
+        .expect("create transport A");
+    let transport_b = TcpTransport::new("node-b".to_string(), addr_b, peers_b, secret)
+        .await
+        .expect("create transport B");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Same dispatch order as ClusterNode::dispatch: stalled peer first.
+    transport_a
+        .send("stalled", request_vote(1))
+        .await
+        .expect("enqueue to stalled peer");
+    transport_a
+        .send("node-b", request_vote(2))
+        .await
+        .expect("enqueue to healthy peer");
+
+    // Pre-fix this took ≥ 5 s (the stalled send's timeout gated the healthy
+    // send); post-fix it is one loopback round-trip. 2 s to stay flake-safe.
+    let (from, msg) = tokio::time::timeout(Duration::from_secs(2), async {
+        transport_b.recv().await.expect("recv error")
+    })
+    .await
+    .expect("healthy peer starved by the stalled peer's send timeout");
+
+    assert_eq!(from, "node-a");
+    match msg {
+        RaftMessage::RequestVote { term, .. } => assert_eq!(term, 2),
+        other => panic!("expected RequestVote, got {other:?}"),
+    }
+}
+
+/// A dead peer is retried on the backoff ladder, not once per heartbeat: 100
+/// sends across 1 s (the pre-fix pattern was one attempt per 50 ms tick) must
+/// produce only a handful of connection attempts. The upper bound is generous
+/// (the ladder predicts ~4: 0 ms, 100 ms, 300 ms, 700 ms) so scheduler jitter
+/// under a loaded co-tenant cannot flake it — the pre-fix count was ~100.
+#[tokio::test]
+async fn a_dead_peer_is_backed_off_not_retried_every_message() {
+    use std::sync::atomic::Ordering;
+
+    use xerj_cluster::node::ClusterTransport;
+
+    let (stalled_addr, accepts) = black_hole_peer().await;
+    let addr_a = free_addr().await;
+    let mut peers_a = HashMap::new();
+    peers_a.insert("stalled".to_string(), stalled_addr);
+
+    let transport_a = TcpTransport::new(
+        "node-a".to_string(),
+        addr_a,
+        peers_a,
+        ClusterSecret::new("shared-cluster-secret-for-tests").unwrap(),
+    )
+    .await
+    .expect("create transport A");
+
+    for i in 0..100u64 {
+        transport_a
+            .send("stalled", request_vote(i))
+            .await
+            .expect("enqueue must keep succeeding while the peer is down");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let attempts = accepts.load(Ordering::Relaxed);
+    assert!(
+        attempts <= 8,
+        "dead peer was attempted {attempts} times in ~1 s — backoff is not engaging \
+         (ladder predicts ~4, pre-fix behaviour was ~100)"
+    );
+}
