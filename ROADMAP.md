@@ -2,19 +2,25 @@
 
 This roadmap tracks capabilities that are **planned but not yet fully implemented**, so the project's public claims stay honest about what ships today versus what is coming. Status is verified against the actual code and by real API requests to the release binary, not aspirational.
 
-Last reviewed: 2026-10-06 (against `v1.0.0-rc.83` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.83 release-cut roll: the open-defects shortlist was
-re-verified against the live tracker at cut time — **eight open** (#1091,
+Last reviewed: 2026-10-06 (against `v1.0.0-rc.84` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.84 release-cut roll: the open-defects shortlist was
+re-verified against the live tracker at cut time — **eleven open** (#1091,
 #1092, #1094 from the rc.80 gate runs; #1100 from the console review;
 #1146 and #1147, the kNN-recall and build-throughput classes;
 #1158, the missing `text` field that made raw JSON/JSONL mirrors invisible
 to `xerj code` passage search; #1122, reopened 2026-10-05 when the
-reference node died at its memory ceiling with no panic line). #1136 was
-closed inside the window by PR
-[#1156](https://github.com/xerj-org/xerj/pull/1156) and #1145/#1148 by PR
-[#1153](https://github.com/xerj-org/xerj/pull/1153) — all three move to the
+reference node died at its memory ceiling with no panic line; #1168 and
+#1170, the cluster liveness and leader-wiring classes filed from the rc.83
+3-node ring tests; and #1173's throughput half). #1169 and #1171 —
+the fabricated-topology and invisible-degraded-boot cluster defects —
+were closed inside the window by PRs
+[#1172](https://github.com/xerj-org/xerj/pull/1172) and
+[#1175](https://github.com/xerj-org/xerj/pull/1175) and move to the
 CHANGELOG — the lesson of 2026-09-21, when several
 entries went stale within hours of that review, is why the shortlist is
-checked live at the cut rather than desk-carried. The rc.81 roll's record
+checked live at the cut rather than desk-carried. The rc.83 roll's record
+stands as written: eight open at that cut, with #1136 closed inside the
+window by PR [#1156](https://github.com/xerj-org/xerj/pull/1156) and
+#1145/#1148 by PR [#1153](https://github.com/xerj-org/xerj/pull/1153). The rc.81 roll's record
 stands as written: four open at that cut, with #1093 closed inside the
 window by PR [#1112](https://github.com/xerj-org/xerj/pull/1112) (strict
 unknown-field refusal). Later the same day the tracker was emptied: everything open after the cut — #1038, #1030, #1031, #1032 — was closed (the two shipped-half epics are in the rc.78 record below, the two defects are recorded below as deferred, not fixed), leaving zero open issues. The 2026-09-26 desk review (PR [#1036](https://github.com/xerj-org/xerj/pull/1036)) stands as recorded: it closed the CHANGELOG-gap GA item (the rc.19–rc.70 backfill, PR [#1035](https://github.com/xerj-org/xerj/pull/1035)), marked the stage-2 object-storage item done ([#965](https://github.com/xerj-org/xerj/issues/965) wired in rc.77), and corrected the mail-ingest memory line to the post-[#1002](https://github.com/xerj-org/xerj/pull/1002) reality. The *Shipping today* claims were last live-verified against rc.76 (unchanged by this pass), and *The zero-token direction* below was verified separately on 2026-09-18, against `main` @ `4d8dadbf`.
@@ -48,7 +54,21 @@ The release-by-release record of how all of this landed is [CHANGELOG.md](./CHAN
 
 ## Next release — [v1.0.0](https://github.com/xerj-org/xerj/milestone/2)
 
-The GA window. **rc.83 was cut on 2026-10-06** — the
+The GA window. **rc.84 was cut on 2026-10-06** — the
+tell-the-truth window: cluster endpoints stopped fabricating ring topology
+and report real membership with honest waits (#1169, PR
+[#1172](https://github.com/xerj-org/xerj/pull/1172)), a degraded
+cluster-transport boot surfaces in health as yellow plus an explicit
+`xerj_cluster_transport: "degraded"` marker instead of green silence
+(#1171, PR [#1175](https://github.com/xerj-org/xerj/pull/1175)), and
+`xerj corpus index` stopped reporting a converged corpus as a failed
+crawl (#1173's honesty half, PR
+[#1174](https://github.com/xerj-org/xerj/pull/1174) — the
+crawl-throughput half stays open). Docs: the hub counts un-staled (PR
+[#1167](https://github.com/xerj-org/xerj/pull/1167)), and the
+EPUB/notebook answer pages were recaptured on the rc.83 build (PR
+[#1163](https://github.com/xerj-org/xerj/pull/1163), thomas-villani's
+fourth merged PR). **rc.83 was cut on 2026-10-06** — the
 corpus-hub hundred release: the reference-coding catalogue reached
 **100 live corpora** at hub.xerj.org, each pinned, licence-reviewed at
 its commit and gated by a pre-registered G7 suite, and the `xerj-code`
