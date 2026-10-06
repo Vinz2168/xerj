@@ -2444,6 +2444,17 @@ async fn async_main() -> Result<()> {
     let cluster_listen_addr = cfg.socket_addr(cfg.cluster.port);
 
     // 8b. Cluster runner (if cluster mode is enabled)
+    //
+    // The boot outcome is recorded for the REST layer (#1171): a configured
+    // ring whose transport cannot bind degrades to single-node with one
+    // ERROR line and then nothing — health reports the degraded state
+    // instead of green silence. Starts as Degraded for every enabled path
+    // and is only upgraded to Running when the runner actually started.
+    let mut cluster_transport_outcome = if cfg.cluster.enabled {
+        xerj_api::state::ClusterTransportStatus::Degraded
+    } else {
+        xerj_api::state::ClusterTransportStatus::Disabled
+    };
     let _cluster_shutdown = if cfg.cluster.enabled && storage_available {
         // Fail closed (issue #75). The cluster port carries Raft control
         // messages; without a shared secret every frame on it is
@@ -2506,6 +2517,7 @@ async fn async_main() -> Result<()> {
                 let mut runner = ClusterRunner::new(node, tick, shutdown_rx);
 
                 info!(node = %node_id, "Starting cluster runner (Raft mode)");
+                cluster_transport_outcome = xerj_api::state::ClusterTransportStatus::Running;
                 tokio::spawn(async move { runner.run().await });
             }
             Err(e) => {
@@ -2679,6 +2691,15 @@ async fn async_main() -> Result<()> {
 
     // 9b. Application state
     let mut state = AppState::new(cfg.clone(), engine, metrics);
+
+    // 9b-i. The cluster-transport boot outcome (#1171): `AppState::new`
+    //   seeds the field from the config alone because it cannot see the
+    //   boot; overwrite it with what actually happened in step 8b before
+    //   any router exists to read it. A node whose configured ring failed
+    //   to bind (or whose cluster-state storage was unavailable) serves
+    //   single-node while the operator believes it is clustered — this is
+    //   what lets /_cluster/health say yellow instead of green forever.
+    state.cluster_transport = cluster_transport_outcome;
 
     // 9b-iia. Decide-ladder override (#1057): `--decide-mode` /
     //   `--decide-model-dir` flags or XERJ_DECIDE_MODE / XERJ_DECIDE_MODEL_DIR
