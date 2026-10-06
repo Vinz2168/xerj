@@ -58,7 +58,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Seek, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
 use cli::{Cmd, IndexCfg, MapCfg, StatusCfg};
@@ -1974,6 +1974,250 @@ fn record_bulk_outcome(
             *send_err = Some(format!("{error:#}"));
             true
         }
+    }
+}
+
+// ─── phase-B bulk coalescing (#1147) ─────────────────────────────────────
+
+/// Shared mutable state of [`BulkPipe`]. One lock covers the buffer and the
+/// per-token bookkeeping so a flush is atomic against submissions.
+#[derive(Default)]
+struct PipeState {
+    /// NDJSON body under construction. Never holds more than one flush's
+    /// worth: crossing the cut flushes inline.
+    buf: Vec<u8>,
+    docs: usize,
+    /// Tokens with bytes in `buf`, in submission order. A token appears once
+    /// even across several chunk submissions (one file larger than the cut).
+    pending: Vec<u64>,
+    /// Terminal result per token, observed (and removed) by the token's
+    /// owner in [`BulkPipe::settle`].
+    done: std::collections::HashMap<u64, Result<(), String>>,
+    /// Tokens that saw at least one failed bulk. A file larger than one
+    /// flush has bytes in SEVERAL bulks; if the first fails and a later
+    /// one succeeds, the file is still un-journaled — the failure is
+    /// sticky, exactly like the per-file `send_err` it replaces.
+    failed: std::collections::HashSet<u64>,
+    next_token: u64,
+    /// Workers that may still call [`BulkPipe::submit`]. Decremented by
+    /// [`BulkPipe::retire`] as each worker drains its queue.
+    live_workers: usize,
+    /// Live workers currently parked inside `settle`. `live == parked` is
+    /// the "no more bytes are coming" signal that flushes a residual buffer.
+    parked_workers: usize,
+}
+
+/// ONE bulk buffer shared by every phase-B worker (#1147).
+///
+/// Phase B used to drain each file's staged records into a buffer that lived
+/// inside the per-file job, so the `--bulk-mb` and 5,000-doc flush triggers
+/// could never span files: a corpus of 36k one-record advisory JSONs left as
+/// 36k one-round-trip bulks, and the measured ceiling was ~12 records/s
+/// regardless of node load (issue #1147). The pipe holds one buffer for the
+/// whole run: workers submit a file's staged lines in cut-sized chunks tagged
+/// with the file's token, and a worker that has submitted its whole file
+/// settles on that token.
+///
+/// Flush triggers, in order:
+/// 1. the shared buffer crosses the cut (`--bulk-mb` bytes or the doc cap) —
+///    flushed inline by the submitting worker, exactly where the per-file
+///    code flushed;
+/// 2. every worker that could still add bytes is parked settling — the
+///    "nothing more is coming" flush, playing the role of the busy timeout
+///    in clickhouse's async-insert queue (which groups per-insert futures
+///    behind one flush the same way; `AsynchronousInsertQueue.cpp`, Apache-2.0,
+///    read as design, not copied);
+/// 3. `retire` — the last worker out drains what remains.
+///
+/// Flushing happens under the pipe lock, so at most ONE bulk is in flight at
+/// a time. That is deliberate: the defect was round-trip count, not lack of
+/// parallel round-trips, and one full bulk keeps the server's WAL busy
+/// continuously instead of interleaving 16 partial ones.
+///
+/// Durability semantics are the per-file code's, unchanged: a token settles
+/// `Ok` only after EVERY bulk carrying its records was accepted (server_errors
+/// == 0), and a bulk that fails transport settles `Err` for EVERY file whose
+/// bytes it held — those files stay un-journaled and are republished by the
+/// next run, which converges because records overwrite by deterministic id.
+/// A file larger than one flush has bytes in several bulks: once any of them
+/// fails, the file's error is sticky — a later successful bulk carrying more
+/// of the same file must not clear it (`PipeState::failed`). Per-item
+/// rejections stay non-fatal as before: counted, surfaced, and the file still
+/// settles.
+struct BulkPipe<'a, F> {
+    send: F,
+    bulk_cut: usize,
+    doc_cap: usize,
+    rejected_records: &'a AtomicU64,
+    bulk_errors: &'a Mutex<Vec<String>>,
+    state: Mutex<PipeState>,
+    ready: Condvar,
+}
+
+impl<'a, F> BulkPipe<'a, F>
+where
+    F: Fn(Vec<u8>) -> anyhow::Result<crate::esclient::BulkOutcome>,
+{
+    fn new(
+        send: F,
+        bulk_cut: usize,
+        doc_cap: usize,
+        rejected_records: &'a AtomicU64,
+        bulk_errors: &'a Mutex<Vec<String>>,
+        workers: usize,
+    ) -> Self {
+        Self {
+            send,
+            bulk_cut: bulk_cut.max(1),
+            doc_cap: doc_cap.max(1),
+            rejected_records,
+            bulk_errors,
+            state: Mutex::new(PipeState {
+                live_workers: workers,
+                ..PipeState::default()
+            }),
+            ready: Condvar::new(),
+        }
+    }
+
+    /// Allocate a file's token. Pre-resolved `Ok`: a file whose staging
+    /// produced no records (all junk, all unrouted) settles instantly.
+    fn token(&self) -> u64 {
+        let mut st = self.lock();
+        let t = st.next_token;
+        st.next_token += 1;
+        st.done.insert(t, Ok(()));
+        t
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, PipeState> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Add one chunk of staged NDJSON lines to the shared buffer, flushing
+    /// inline if the buffer crossed the cut. Never blocks on the network
+    /// beyond that inline flush.
+    fn submit(&self, token: u64, bytes: Vec<u8>, docs: usize) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut st = self.lock();
+        // Bytes are in flight: the pre-resolution from `token` no longer
+        // holds for this file — unless the file already failed, in which
+        // case the error is sticky and no later bulk can clear it.
+        if !st.failed.contains(&token) {
+            st.done.remove(&token);
+        }
+        if !st.pending.contains(&token) {
+            st.pending.push(token);
+        }
+        st.buf.extend_from_slice(&bytes);
+        st.docs += docs;
+        if st.buf.len() >= self.bulk_cut || st.docs >= self.doc_cap {
+            self.flush_locked(&mut st);
+        }
+    }
+
+    /// Whether any bulk carrying this file's records has failed. The drain
+    /// loop breaks on it, mirroring the per-file `send_err` break it
+    /// replaced: no point reading and shipping the rest of a file whose
+    /// earlier records were already refused.
+    fn failed(&self, token: u64) -> bool {
+        self.lock().failed.contains(&token)
+    }
+
+    /// Block until the bulk(s) carrying this file's records were accepted.
+    /// `Ok` means journaled-safe; `Err` is the failure text for the
+    /// un-journaled path.
+    fn settle(&self, token: u64) -> Result<(), String> {
+        let mut st = self.lock();
+        loop {
+            if let Some(res) = st.done.remove(&token) {
+                return res;
+            }
+            // This worker is about to park, so `parked + 1` is what the
+            // condition looks like from in here. When every live worker is
+            // (or is about to be) parked, no submission can arrive and a
+            // residual buffer must flush now, not wait for a cut nothing is
+            // left to cross.
+            if !st.buf.is_empty() && st.parked_workers + 1 >= st.live_workers {
+                self.flush_locked(&mut st);
+                continue;
+            }
+            st.parked_workers += 1;
+            let (guard, _) = self
+                .ready
+                .wait_timeout(st, std::time::Duration::from_secs(30))
+                .unwrap_or_else(|p| p.into_inner());
+            st = guard;
+            st.parked_workers -= 1;
+        }
+    }
+
+    /// A worker leaving its loop will submit nothing more. The last one out
+    /// drains the residual buffer so the run never ends with unflushed bytes.
+    fn retire(&self) {
+        let mut st = self.lock();
+        st.live_workers = st.live_workers.saturating_sub(1);
+        if !st.buf.is_empty() && st.parked_workers >= st.live_workers {
+            self.flush_locked(&mut st);
+        } else {
+            self.ready.notify_all();
+        }
+    }
+
+    /// Send the buffer and resolve every token it held. Runs under the pipe
+    /// lock: one bulk in flight at a time (see the type doc).
+    fn flush_locked(&self, st: &mut PipeState) {
+        let body = std::mem::take(&mut st.buf);
+        let tokens = std::mem::take(&mut st.pending);
+        st.docs = 0;
+        // Same outcome handling as `record_bulk_outcome`, resolved per token
+        // instead of through the caller's `send_err`.
+        match (self.send)(body) {
+            Ok(outcome) => {
+                if outcome.server_errors > 0 {
+                    let msg = format!(
+                        "bulk backend failed for {} item(s): {}. Source file was not journaled \
+                         complete; fix the server condition (or wait for it to clear) and rerun \
+                         autoindex — the run resumes from the journal",
+                        outcome.server_errors,
+                        outcome
+                            .first_server_error
+                            .as_deref()
+                            .unwrap_or("unknown server error")
+                    );
+                    for t in &tokens {
+                        st.failed.insert(*t);
+                        st.done.insert(*t, Err(msg.clone()));
+                    }
+                } else {
+                    if outcome.item_errors > 0 {
+                        self.rejected_records
+                            .fetch_add(outcome.item_errors, Ordering::Relaxed);
+                        if let Some(error) = outcome.first_error {
+                            let mut errors = self.bulk_errors.lock().unwrap();
+                            if errors.len() < 5 {
+                                errors.push(error);
+                            }
+                        }
+                    }
+                    for t in &tokens {
+                        if !st.failed.contains(t) {
+                            st.done.insert(*t, Ok(()));
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                let msg = format!("{error:#}");
+                for t in &tokens {
+                    st.failed.insert(*t);
+                    st.done.insert(*t, Err(msg.clone()));
+                }
+            }
+        }
+        self.ready.notify_all();
     }
 }
 
@@ -7106,15 +7350,42 @@ fn run_index_report_inner(
     let files_done = AtomicU64::new(0);
     let records_total = AtomicU64::new(0);
     let extra_junk = Mutex::new(Vec::<JunkFile>::new());
+    // #1147: ONE bulk buffer for every worker. The per-file drain below used
+    // to build a buffer inside each job, so `bulk_cut` could only ever flush
+    // one file's records and a many-small-files corpus paid one HTTP
+    // round-trip per file (~12 records/s measured). The same cut, now crossed
+    // by whatever the workers are staging concurrently, is what fills a bulk.
+    let worker_count = cfg.workers.min(n_todo.max(1));
+    let pipe = {
+        let es = &es;
+        let rejected = &rejected_records;
+        let errors = &bulk_errors;
+        BulkPipe::new(
+            move |body| es.bulk(body),
+            bulk_cut,
+            5000,
+            rejected,
+            errors,
+            worker_count,
+        )
+    };
 
     std::thread::scope(|scope| {
-        for _ in 0..cfg.workers.min(n_todo.max(1)) {
+        for _ in 0..worker_count {
             scope.spawn(|| {
                 loop {
                     let (i, pdf_spool) = match queue.lock().unwrap().pop() {
                         Some(job) => job,
-                        None => break,
+                        None => {
+                            // This worker will submit nothing more; the last
+                            // one out drains the shared buffer (#1147).
+                            pipe.retire();
+                            break;
+                        }
                     };
+                    // The file's slot in the shared bulk buffer. Allocated
+                    // before staging so every exit path below can settle it.
+                    let file_token = pipe.token();
                     let f = &files[i];
                     // Counts this file done on EVERY exit path below, junk
                     // included: progress measures work drained from the queue,
@@ -7589,13 +7860,27 @@ fn run_index_report_inner(
                     if send_err.is_none() {
                         // The second half of a mailbox's bar: staged bytes
                         // handed to the engine, out of staged bytes in total.
+                        // Credit is taken at submission: the shared buffer
+                        // (#1147) may hold these bytes for a moment before a
+                        // flush carries them, and the bar measures reading
+                        // work, not wire time.
                         let credit_send = sn.family == Family::Mbox;
                         let staged_len = staged.as_file().metadata().map(|m| m.len()).unwrap_or(0);
                         let mut staged_sent = 0u64;
                         let mut reader = BufReader::new(staged.as_file_mut());
-                        let mut buf = Vec::with_capacity(bulk_cut + (1 << 20));
+                        // A LOCAL chunk, not the bulk: chunks join whatever
+                        // the other workers are staging in the shared buffer,
+                        // so a small file stops paying for its own round-trip.
+                        let mut chunk: Vec<u8> = Vec::with_capacity(bulk_cut + (1 << 20));
                         let mut docs = 0usize;
                         loop {
+                            // A bulk already carrying this file's records was
+                            // refused: stop reading. The sticky error comes
+                            // back from `settle` below (the pre-resolution
+                            // from a successful tail bulk must not clear it).
+                            if pipe.failed(file_token) {
+                                break;
+                            }
                             let mut action = Vec::new();
                             match reader.read_until(b'\n', &mut action) {
                                 Ok(0) => break,
@@ -7624,24 +7909,14 @@ fn run_index_report_inner(
                                     break;
                                 }
                             }
-                            buf.extend_from_slice(&action);
-                            buf.extend_from_slice(&document);
+                            chunk.extend_from_slice(&action);
+                            chunk.extend_from_slice(&document);
                             staged_sent += (action.len() + document.len()) as u64;
                             docs += 1;
-                            if (buf.len() >= bulk_cut || docs >= 5000)
-                                && record_bulk_outcome(
-                                    &es,
-                                    std::mem::take(&mut buf),
-                                    &rejected_records,
-                                    &bulk_errors,
-                                    &mut send_err,
-                                )
-                            {
-                                break;
-                            }
-                            if buf.is_empty() {
+                            if chunk.len() >= bulk_cut || docs >= 5000 {
+                                pipe.submit(file_token, std::mem::take(&mut chunk), docs);
                                 docs = 0;
-                                buf.reserve(bulk_cut);
+                                chunk.reserve(bulk_cut);
                                 if credit_send {
                                     in_flight.advance_to(container_send_credit(
                                         f.size,
@@ -7651,14 +7926,18 @@ fn run_index_report_inner(
                                 }
                             }
                         }
-                        if !buf.is_empty() && send_err.is_none() {
-                            record_bulk_outcome(
-                                &es,
-                                buf,
-                                &rejected_records,
-                                &bulk_errors,
-                                &mut send_err,
-                            );
+                        if !chunk.is_empty() && !pipe.failed(file_token) {
+                            pipe.submit(file_token, chunk, docs);
+                        }
+                    }
+                    // The file's records are in the shared buffer, possibly
+                    // already flushed inline; settle blocks until the bulk
+                    // carrying them was accepted. Until it returns Ok, the
+                    // records are NOT durably in and neither the edges below
+                    // nor the journal commit may run.
+                    if send_err.is_none() {
+                        if let Err(e) = pipe.settle(file_token) {
+                            send_err = Some(e);
                         }
                     }
                     // Second-brain edges for this file (§6.7): only after the
@@ -10934,6 +11213,315 @@ mod container_progress_tests {
         assert_eq!(
             container_extract_credit(size, 50_000),
             container_extract_credit(size, size)
+        );
+    }
+}
+
+#[cfg(test)]
+mod bulk_pipe_tests {
+    use super::{AtomicU64, BulkPipe, Mutex, Ordering};
+    use crate::esclient::BulkOutcome;
+
+    fn outcome() -> BulkOutcome {
+        BulkOutcome {
+            item_errors: 0,
+            server_errors: 0,
+            first_error: None,
+            first_server_error: None,
+            throttled_out: 0,
+        }
+    }
+
+    /// A send function that records every body it was handed.
+    fn recording_send(
+        bodies: &Mutex<Vec<Vec<u8>>>,
+    ) -> impl Fn(Vec<u8>) -> anyhow::Result<BulkOutcome> + '_ {
+        move |body| {
+            bodies.lock().unwrap().push(body);
+            Ok(outcome())
+        }
+    }
+
+    /// #1147's headline: many small files share ONE bulk instead of paying
+    /// one round-trip each. With a single worker, the residual flush happens
+    /// at settle time (the "no more bytes are coming" trigger).
+    #[test]
+    fn small_files_coalesce_into_one_bulk() {
+        let bodies = Mutex::new(Vec::new());
+        let rejected = AtomicU64::new(0);
+        let errors = Mutex::new(Vec::new());
+        let pipe = BulkPipe::new(
+            recording_send(&bodies),
+            1 << 20,
+            5000,
+            &rejected,
+            &errors,
+            1,
+        );
+
+        let t1 = pipe.token();
+        let t2 = pipe.token();
+        let t3 = pipe.token();
+        pipe.submit(t1, b"action1\ndoc1\n".to_vec(), 1);
+        pipe.submit(t2, b"action2\ndoc2\n".to_vec(), 1);
+        pipe.submit(t3, b"action3\ndoc3\n".to_vec(), 1);
+        assert!(
+            bodies.lock().unwrap().is_empty(),
+            "under the cut, nothing flushes early"
+        );
+        pipe.settle(t1).expect("t1 accepted");
+        pipe.settle(t2).expect("t2 accepted");
+        pipe.settle(t3).expect("t3 accepted");
+        pipe.retire();
+
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(
+            bodies.len(),
+            1,
+            "the single-worker residual flush is one body"
+        );
+        assert_eq!(
+            bodies[0],
+            b"action1\ndoc1\naction2\ndoc2\naction3\ndoc3\n".to_vec(),
+            "one body, input order"
+        );
+    }
+
+    /// A file's chunk larger than the cut flushes INLINE — one huge file must
+    /// not wait for the end of the run (and must not blow memory).
+    #[test]
+    fn an_oversized_chunk_flushes_inline() {
+        let bodies = Mutex::new(Vec::new());
+        let rejected = AtomicU64::new(0);
+        let errors = Mutex::new(Vec::new());
+        let pipe = BulkPipe::new(recording_send(&bodies), 64, 5000, &rejected, &errors, 1);
+
+        let t = pipe.token();
+        let big: Vec<u8> = vec![b'x'; 200];
+        pipe.submit(t, big, 3);
+        assert_eq!(
+            bodies.lock().unwrap().len(),
+            1,
+            "crossing the cut flushes immediately"
+        );
+        pipe.settle(t).expect("accepted");
+        pipe.retire();
+    }
+
+    /// A transport failure settles Err for EVERY file whose bytes rode that
+    /// body — the un-journaled-on-failure contract the journal's resume
+    /// depends on.
+    #[test]
+    fn a_failed_bulk_fails_every_file_it_carried() {
+        let rejected = AtomicU64::new(0);
+        let errors = Mutex::new(Vec::new());
+        let pipe = BulkPipe::new(
+            |_body| Err(anyhow::anyhow!("connection reset by peer")),
+            1 << 20,
+            5000,
+            &rejected,
+            &errors,
+            1,
+        );
+        let t1 = pipe.token();
+        let t2 = pipe.token();
+        pipe.submit(t1, b"a\n".to_vec(), 1);
+        pipe.submit(t2, b"b\n".to_vec(), 1);
+        let e1 = pipe.settle(t1).expect_err("t1 must fail");
+        let e2 = pipe.settle(t2).expect_err("t2 must fail");
+        assert_eq!(e1, e2, "one failed body, one failure for all its files");
+        assert!(
+            e1.contains("connection reset"),
+            "the cause is preserved: {e1}"
+        );
+    }
+
+    /// A file larger than one flush has bytes in SEVERAL bulks. If the first
+    /// bulk fails and a later one succeeds, the file's failure is STICKY:
+    /// settling Ok would journal the source complete while most of its
+    /// records were never accepted — the exact hole
+    /// `existing_completion_is_invalidated_and_partial_visibility_is_deleted_on_resume`
+    /// caught in the first cut of this pipe (fail on bulk 1 of 2, the tail
+    /// bulk succeeded, the file journaled complete).
+    #[test]
+    fn a_later_successful_bulk_does_not_erase_an_earlier_failure() {
+        let rejected = AtomicU64::new(0);
+        let errors = Mutex::new(Vec::new());
+        let attempts = Mutex::new(0);
+        let pipe = BulkPipe::new(
+            {
+                let attempts = &attempts;
+                move |_body| {
+                    let mut n = attempts.lock().unwrap();
+                    *n += 1;
+                    if *n == 1 {
+                        Err(anyhow::anyhow!("connection reset by peer"))
+                    } else {
+                        Ok(outcome())
+                    }
+                }
+            },
+            // doc_cap 1: every submit flushes, so one file spans two bulks.
+            1 << 20,
+            1,
+            &rejected,
+            &errors,
+            1,
+        );
+        let big_file = pipe.token();
+        let other_file = pipe.token();
+        pipe.submit(big_file, b"first-chunk\n".to_vec(), 1);
+        assert!(pipe.failed(big_file), "the failed bulk marked its file");
+        assert!(!pipe.failed(other_file));
+        // The next bulk carries the SAME file's tail plus another file, and
+        // succeeds.
+        pipe.submit(big_file, b"second-chunk\n".to_vec(), 1);
+        pipe.submit(other_file, b"other\n".to_vec(), 1);
+        let err = pipe
+            .settle(big_file)
+            .expect_err("sticky: bulk 2 succeeding must not clear bulk 1's failure");
+        assert!(
+            err.contains("connection reset"),
+            "the FIRST cause is kept: {err}"
+        );
+        pipe.settle(other_file)
+            .expect("the healthy file still settles Ok");
+        pipe.retire();
+    }
+
+    /// server_errors (the backend refused items) also settles Err — that is
+    /// the "do not journal the source file complete" arm of #944/#956.
+    #[test]
+    fn server_errors_settle_err_without_poisoning_later_batches() {
+        let rejected = AtomicU64::new(0);
+        let errors = Mutex::new(Vec::new());
+        let attempts = Mutex::new(0);
+        let pipe = BulkPipe::new(
+            {
+                let attempts = &attempts;
+                move |_body| {
+                    let mut n = attempts.lock().unwrap();
+                    *n += 1;
+                    if *n == 1 {
+                        Ok(BulkOutcome {
+                            server_errors: 2,
+                            first_server_error: Some("cluster block".into()),
+                            ..outcome()
+                        })
+                    } else {
+                        Ok(outcome())
+                    }
+                }
+            },
+            1 << 20,
+            5000,
+            &rejected,
+            &errors,
+            1,
+        );
+        let bad = pipe.token();
+        pipe.submit(bad, b"a\n".to_vec(), 1);
+        let err = pipe.settle(bad).expect_err("refused items do not journal");
+        assert!(err.contains("cluster block"), "{err}");
+
+        let good = pipe.token();
+        pipe.submit(good, b"b\n".to_vec(), 1);
+        pipe.settle(good).expect("the pipe keeps working");
+        pipe.retire();
+    }
+
+    /// Per-item rejections are counted and surfaced but stay non-fatal — the
+    /// file's OTHER records are live and it journals complete.
+    #[test]
+    fn item_errors_are_counted_and_non_fatal() {
+        let rejected = AtomicU64::new(0);
+        let errors = Mutex::new(Vec::new());
+        let pipe = BulkPipe::new(
+            |_body| {
+                Ok(BulkOutcome {
+                    item_errors: 2,
+                    first_error: Some("mapper refused field".into()),
+                    ..outcome()
+                })
+            },
+            1 << 20,
+            5000,
+            &rejected,
+            &errors,
+            1,
+        );
+        let t = pipe.token();
+        pipe.submit(t, b"a\n".to_vec(), 3);
+        pipe.settle(t).expect("item errors do not fail the file");
+        assert_eq!(rejected.load(Ordering::Relaxed), 2);
+        assert_eq!(errors.lock().unwrap().len(), 1);
+        pipe.retire();
+    }
+
+    /// A file whose staging produced nothing (all junk / unrouted) settles
+    /// instantly: the journal records zero records and no bulk is sent.
+    #[test]
+    fn a_file_with_no_records_settles_without_sending() {
+        let bodies = Mutex::new(Vec::new());
+        let rejected = AtomicU64::new(0);
+        let errors = Mutex::new(Vec::new());
+        let pipe = BulkPipe::new(
+            recording_send(&bodies),
+            1 << 20,
+            5000,
+            &rejected,
+            &errors,
+            1,
+        );
+        let t = pipe.token();
+        pipe.settle(t).expect("pre-resolved");
+        pipe.retire();
+        assert!(bodies.lock().unwrap().is_empty());
+    }
+
+    /// The concurrent shape phase B actually runs: many workers, many small
+    /// files. Coalescing must happen (far fewer bodies than files) with every
+    /// token settling Ok and no deadlock — the parked/live accounting is what
+    /// this test would hang on if it were wrong.
+    #[test]
+    fn many_workers_many_files_coalesce_without_deadlock() {
+        let bodies = Mutex::new(Vec::new());
+        let rejected = AtomicU64::new(0);
+        let errors = Mutex::new(Vec::new());
+        let pipe = BulkPipe::new(
+            {
+                let bodies = &bodies;
+                move |body| {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    bodies.lock().unwrap().push(body);
+                    Ok(outcome())
+                }
+            },
+            1 << 20,
+            5000,
+            &rejected,
+            &errors,
+            8,
+        );
+        const WORKERS: usize = 8;
+        const FILES_PER_WORKER: usize = 40;
+        std::thread::scope(|s| {
+            for w in 0..WORKERS {
+                let pipe = &pipe;
+                s.spawn(move || {
+                    for i in 0..FILES_PER_WORKER {
+                        let t = pipe.token();
+                        pipe.submit(t, format!("w{w}-f{i}\n").into_bytes(), 1);
+                        pipe.settle(t).expect("every file accepted");
+                    }
+                    pipe.retire();
+                });
+            }
+        });
+        let n = bodies.lock().unwrap().len();
+        assert!(
+            n < WORKERS * FILES_PER_WORKER,
+            "{WORKERS}x{FILES_PER_WORKER} files left as {n} bodies — no coalescing happened"
         );
     }
 }
