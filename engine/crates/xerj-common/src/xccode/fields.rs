@@ -75,10 +75,50 @@ pub fn resolve_fields(mapping: Option<&Value>) -> Vec<String> {
         out.push("text".to_string());
     }
     if out.is_empty() {
-        vec!["body".to_string()]
+        // #1158: a raw-JSON corpus (ghsa-db's advisory mirrors, OSV) maps
+        // NONE of the standard content fields — every record carries its
+        // text in schema-named fields like `summary`/`details`. The old
+        // `["body"]` floor here is a field no index maps, and an unmapped
+        // multi_match field collapses a multi-token query to ZERO hits
+        // with no error: the entire corpus answered "no passage matches"
+        // while the same indices returned 10,000+ hits queried directly.
+        // Fall back to the corpus's OWN text-typed fields (never `ax_*`
+        // provenance) — still mapping-gated, so every field sent is one
+        // at least one index really maps.
+        let own = own_text_fields(obj);
+        if own.is_empty() {
+            vec!["body".to_string()]
+        } else {
+            own
+        }
     } else {
         out
     }
+}
+
+/// The corpus's own searchable content fields, for the no-standard-field
+/// floor above: every property mapped `text` (or `semantic_text`) by any
+/// index under the prefix, `ax_*` provenance excluded, names sorted, capped
+/// so a wide schema cannot balloon the multi_match.
+fn own_text_fields(obj: &serde_json::Map<String, Value>) -> Vec<String> {
+    const AX: &str = "ax_";
+    const MAX_OWN_FIELDS: usize = 24;
+    let mut own = std::collections::BTreeSet::new();
+    for m in obj.values() {
+        let Some(props) = m.pointer("/mappings/properties").and_then(Value::as_object) else {
+            continue;
+        };
+        for (key, spec) in props {
+            let searchable = spec
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|t| t == "text" || t == "semantic_text");
+            if searchable && !key.starts_with(AX) {
+                own.insert(key.clone());
+            }
+        }
+    }
+    own.into_iter().take(MAX_OWN_FIELDS).collect()
 }
 
 /// Indices under the prefix whose `field` (default `body`) is mapped as
@@ -144,8 +184,12 @@ mod tests {
             vec!["body".to_string(), "defs".into(), "title".into()]
         );
 
-        // No FIELDS member mapped at all -> the ["body"] floor, never empty.
-        let thin = mapping(&[("i", &["unrelated"], false)]);
+        // No FIELDS member and NOTHING text-typed at all -> the ["body"]
+        // floor, never empty, never a keyword field. (A text-typed field
+        // no standard name covers is the #1158 own-fields case below.)
+        let thin = json!({ "i": { "mappings": { "properties": {
+            "unrelated": { "type": "keyword" }
+        } } } });
         assert_eq!(resolve_fields(Some(&thin)), vec!["body".to_string()]);
     }
 
@@ -171,8 +215,12 @@ mod tests {
             resolve_fields(Some(&with_text)),
             vec!["body".to_string(), "text".to_string()]
         );
-        // No FIELDS member AND no text -> the ["body"] floor still holds.
-        let thin = mapping(&[("i", &["unrelated"], false)]);
+        // No FIELDS member AND no text-typed field -> the ["body"] floor
+        // still holds (keyword placeholders — text-typed ones are #1158's
+        // own-fields fallback, covered by its own test).
+        let thin = json!({ "i": { "mappings": { "properties": {
+            "unrelated": { "type": "keyword" }
+        } } } });
         assert_eq!(resolve_fields(Some(&thin)), vec!["body".to_string()]);
     }
 
@@ -187,5 +235,74 @@ mod tests {
         assert_eq!(capable, vec!["sem-1".to_string(), "sem-2".to_string()]);
         assert_eq!(total, 3);
         assert!(semantic_capable(None) == (Vec::new(), 0));
+    }
+
+    /// #1158: a raw-JSON corpus (ghsa-db advisories) maps none of the
+    /// standard content fields — the old `["body"]` floor was a field no
+    /// index maps, and an unmapped multi_match field collapses a
+    /// multi-token query to zero hits. The corpus's own text-typed fields
+    /// must take the floor's place, `ax_*` provenance excluded.
+    #[test]
+    fn a_raw_json_corpus_falls_back_to_its_own_text_fields() {
+        let mut obj = serde_json::Map::new();
+        let props = json!({
+            "id":        { "type": "keyword" },
+            "summary":   { "type": "text" },
+            "details":   { "type": "text" },
+            "severity":  { "type": "keyword" },
+            "ax_path":   { "type": "text" },
+            "ax_file":   { "type": "text" },
+            "modified":  { "type": "date" }
+        });
+        obj.insert(
+            "xc-ghsa-000".to_string(),
+            json!({ "mappings": { "properties": props } }),
+        );
+        let m = Value::Object(obj);
+        assert_eq!(
+            resolve_fields(Some(&m)),
+            vec!["details".to_string(), "summary".to_string()],
+            "own text fields, sorted; ax_*/keyword/date excluded"
+        );
+    }
+
+    /// The floor is unchanged when the corpus maps nothing searchable at
+    /// all (only keywords/provenance): `["body"]`, never an empty list.
+    #[test]
+    fn a_corpus_with_no_text_typed_fields_keeps_the_body_floor() {
+        let mut obj = serde_json::Map::new();
+        let props = json!({
+            "id":     { "type": "keyword" },
+            "count":  { "type": "long" }
+        });
+        obj.insert(
+            "xc-kv-000".to_string(),
+            json!({ "mappings": { "properties": props } }),
+        );
+        assert_eq!(
+            resolve_fields(Some(&Value::Object(obj))),
+            vec!["body".to_string()]
+        );
+    }
+
+    /// A mixed corpus where SOME index maps `body` keeps today's behaviour
+    /// exactly — the own-fields fallback fires only on the no-standard-
+    /// field floor, never as an extra leg beside `body`.
+    #[test]
+    fn a_corpus_with_body_mapped_never_grows_own_fields() {
+        let m = mapping(&[("xc-mixed-000", &["body"], false)]);
+        let mut obj = m.as_object().unwrap().clone();
+        obj.insert(
+            "xc-mixed-001".to_string(),
+            json!({ "mappings": { "properties": {
+                "id": { "type": "keyword" },
+                "summary": { "type": "text" }
+            } } }),
+        );
+        assert_eq!(
+            resolve_fields(Some(&Value::Object(obj))),
+            vec!["body".to_string()],
+            "body present: no summary leg, no floor rewrite"
+        );
     }
 }

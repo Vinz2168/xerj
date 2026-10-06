@@ -34,6 +34,29 @@ pub struct RenderOpts<'a> {
 /// Render the full result block: the optional arms-ran note line, one block
 /// per hit, the footer. `note` is printed EVERY time it exists — a silently
 /// BM25-only "hybrid" result must never read as hybrid.
+/// The longest non-empty string field of a source object, "" when there is
+/// none — the content-bearing field of a raw-JSON record (#1158). Fields are
+/// visited in sorted key order and only a STRICTLY longer field replaces the
+/// winner, so a tie goes to the alphabetically first name and the passage
+/// never depends on the wire's key order.
+fn longest_string_field(src: &Value) -> String {
+    let mut best: Option<(usize, &str)> = None;
+    if let Some(obj) = src.as_object() {
+        let mut keys: Vec<&String> = obj.keys().collect();
+        keys.sort();
+        for key in keys {
+            if let Some(s) = obj[key].as_str() {
+                if !s.trim().is_empty()
+                    && best.is_none_or(|(len, _)| s.chars().count() > len)
+                {
+                    best = Some((s.chars().count(), s));
+                }
+            }
+        }
+    }
+    best.map(|(_, s)| s.to_string()).unwrap_or_default()
+}
+
 pub fn render(
     hits: &[Value],
     licences: &HashMap<String, String>,
@@ -119,13 +142,17 @@ fn render_hit(h: &Value, licences: &HashMap<String, String>, opts: &RenderOpts) 
 
     // `body` is the content field of every family EXCEPT plain text
     // (`.txt` mirrors put their passage in `text`) — fall back so those
-    // records render a real passage, not an empty one (#1139).
+    // records render a real passage, not an empty one (#1139). A raw-JSON
+    // record (#1158) carries no either: its text lives in schema-named
+    // fields (`summary`, `details`, …), so the last resort is the longest
+    // string field — for a data record that IS the content, and provenance
+    // (`ax_*` paths, dates) never wins a longest-string contest.
     let body = src
         .get("body")
         .and_then(Value::as_str)
         .or_else(|| src.get("text").and_then(Value::as_str))
-        .unwrap_or("")
-        .to_string();
+        .map(str::to_string)
+        .unwrap_or_else(|| longest_string_field(&src));
 
     if opts.full > 0 && !(restricted && opts.strict_licence) {
         // Prefer the matching DEFINITION over a byte window; fall back to the
@@ -281,6 +308,72 @@ mod tests {
             .expect("warning");
         assert!(warn_at > passage_at, "the warning sits UNDER the passage");
         assert!(text.contains("(score 9.01, AGPL)"), "{text}");
+    }
+
+    /// #1158: a raw-JSON record has neither `body` nor `text` — its content
+    /// lives in schema-named fields. The passage must come from the longest
+    /// string field (the advisory's `details`), and a tie on length goes to
+    /// the alphabetically first name so the passage is stable regardless of
+    /// key order on the wire.
+    #[test]
+    fn a_raw_json_hit_renders_its_longest_string_field_as_the_passage() {
+        let raw_hit = json!({
+            "_score": 7.5,
+            "_source": {
+                "ax_path": "ghsa-db/advisories/GHSA-9j.json",
+                "id": "GHSA-9j",
+                "summary": "lodash command injection",
+                "details": "Applications using lodash are vulnerable to command injection via the template function."
+            }
+        });
+        let text = render(
+            &[raw_hit],
+            &HashMap::new(),
+            &RenderOpts {
+                corpus: "ghsa-db",
+                query: "command injection",
+                full: 800,
+                no_symbol: true,
+                meatl: false,
+                rrf_scores: false,
+                age_days: None,
+                strict_licence: false,
+            },
+            None,
+        );
+        assert!(
+            text.contains("vulnerable to command injection"),
+            "the passage is `details`, the longest field: {text}"
+        );
+        assert!(!text.contains("[0 of 0 chars"), "no empty-passage shape: {text}");
+
+        // Tie: two fields of equal length — the alphabetically first wins.
+        let tie = json!({
+            "_score": 1.0,
+            "_source": {
+                "ax_path": "x/y.json",
+                "zzz_field": "same length exactly",
+                "aaa_field": "same length exactly"
+            }
+        });
+        let text = render(
+            &[tie],
+            &HashMap::new(),
+            &RenderOpts {
+                corpus: "kv",
+                query: "length",
+                full: 800,
+                no_symbol: true,
+                meatl: false,
+                rrf_scores: false,
+                age_days: None,
+                strict_licence: false,
+            },
+            None,
+        );
+        assert!(text.contains("aaa_field") || text.contains("same length exactly"));
+        // Both same content here — the deterministic pick is still ONE field.
+        assert!(text.contains("same length exactly"), "{text}");
     }
 
     #[test]

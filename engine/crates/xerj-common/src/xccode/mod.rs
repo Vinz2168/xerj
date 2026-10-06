@@ -1073,6 +1073,58 @@ mod tests {
         );
     }
 
+    /// #1158: a raw-JSON corpus (ghsa-db advisories) maps none of
+    /// body/defs/title/text. The multi_match must go to the corpus's OWN
+    /// text-typed fields — the old `["body"]` floor is a field no index
+    /// maps, which collapses a multi-token query to zero hits — and the
+    /// hit must render a real passage from its longest string field, not
+    /// an empty one.
+    #[test]
+    fn a_raw_json_corpus_queries_its_own_text_fields_and_renders_a_passage() {
+        let root = root_with_state();
+        let mut http = FakeHttp::new();
+        http.mapping = serde_json::json!({
+            "xc-kv-b1-000": { "mappings": { "properties": {
+                "id": { "type": "keyword" },
+                "summary": { "type": "text" },
+                "details": { "type": "text" },
+                "ax_path": { "type": "keyword" }
+            }}}
+        });
+        http.hits = vec![serde_json::json!({
+            "_score": 5.1,
+            "_source": {
+                "ax_path": "ghsa-db/advisories/GHSA-9j.json",
+                "id": "GHSA-9j",
+                "summary": "lodash command injection",
+                "details": "Applications using lodash are vulnerable to command \
+                            injection via the template function."
+            }
+        })];
+        let out = run_code_query(
+            &root,
+            &http,
+            "u",
+            &CodeParams::new("kv", "command injection"),
+            "`--stale-ok`",
+        );
+        assert_eq!(out.exit, 0, "{}", out.text);
+        let reqs = http.searches.lock().unwrap().clone();
+        assert!(!reqs.is_empty());
+        assert_eq!(
+            reqs[0]
+                .1
+                .pointer("/query/bool/must/0/multi_match/fields"),
+            Some(&serde_json::json!(["details", "summary"])),
+            "the corpus's own text fields, sorted — not the silent-zero body floor",
+        );
+        assert!(
+            out.text.contains("vulnerable to command injection"),
+            "a real passage from the longest string field: {}",
+            out.text
+        );
+    }
+
     /// #1145: a `semantic` clause without `k` is cut to the parser default
     /// (10), so the vector leg must carry the same window as `size` — else
     /// `--mode semantic -k 20` returns 10 hits and hybrid fuses BM25@50 with
