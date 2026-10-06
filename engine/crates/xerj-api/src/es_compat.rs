@@ -219,6 +219,56 @@ fn unassigned_info_json(f: &xerj_engine::engine::FailedIndex) -> Value {
     info
 }
 
+/// A parsed `wait_for_nodes` constraint. Upper bounds were previously
+/// collapsed onto "required minimum 1" — always satisfied — which could not
+/// express `wait_for_nodes<=1` against a larger cluster (#1169).
+enum NodesWait {
+    AtLeast(u32),
+    AtMost(u32),
+}
+
+/// The declared cluster topology as this node knows it from config (#1169):
+/// this node's own address (`server.bind_address` + `cluster.port`) followed
+/// by every distinct peer address. Raft node ids in this cluster ARE socket
+/// addresses (the server boot derives them that way), so the returned ids
+/// are the addresses.
+///
+/// This is the configured floor, not live state: reachability and leader
+/// identity arrive with the ring-to-engine wiring tracked in #1170, and a
+/// node whose cluster transport failed to bind (degraded single-node) still
+/// reports its configured peers until that failure is surfaced in health
+/// (#1171). It is nonetheless the honest answer to "how many nodes does
+/// this cluster declare" — and it is never a number echoed back out of the
+/// request, which is what it replaces.
+fn configured_members(config: &xerj_common::config::Config) -> Vec<(String, std::net::SocketAddr)> {
+    let mut out: Vec<(String, std::net::SocketAddr)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    if let Some(own) = config.socket_addr(config.cluster.port) {
+        seen.insert(own);
+        out.push((own.to_string(), own));
+    }
+    for peer in &config.cluster.peers {
+        if let Some((_, addr)) = peer.split_once('=') {
+            if let Ok(addr) = addr.trim().parse::<std::net::SocketAddr>() {
+                if seen.insert(addr) {
+                    out.push((addr.to_string(), addr));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Node count for `/_cluster/health`: `1` when cluster mode is off, else the
+/// distinct configured membership (own address + peers, so a peer list that
+/// also names this node is not double-counted).
+fn configured_node_count(config: &xerj_common::config::Config) -> u32 {
+    if !config.cluster.enabled {
+        return 1;
+    }
+    configured_members(config).len() as u32
+}
+
 async fn cluster_health_inner(
     state: AppState,
     index_filter: Option<String>,
@@ -391,33 +441,47 @@ async fn cluster_health_inner(
     let active: u32 = selected.iter().map(|info| shard_count(&info.name)).sum();
     let _ = closed_count;
 
-    // Wait-for assertions: single-node cluster, nothing relocating /
-    // initializing, primaries always active. Most wait_for_* are
-    // satisfied immediately. The exceptions:
-    //   wait_for_nodes: N (where N > 1) — timeout, we only have 1 node
+    // Wait-for assertions: nothing relocating / initializing, primaries
+    // always active, so most wait_for_* are satisfied immediately. The
+    // exceptions:
+    //   wait_for_nodes — checked against the real configured membership
+    //     below (#1169)
     //   wait_for_active_shards: all / N — if the cluster is yellow
     //     (unassigned replicas), those `all` conditions never converge.
     let wait_for_nodes = params
         .wait_for_nodes
         .as_deref()
         .map(|s| {
-            // Supports `N`, `>=N`, `>N`, `<=N`, `<N`. Returns the required
-            // minimum integer nodes.
+            // Supports `N` (treated as >= N, ES's own reading of a bare
+            // count), `>=N`, `>N`, `<=N`, `<N`, `ge(N)`, `le(N)`. Upper
+            // bounds used to be collapsed onto "minimum 1" — i.e. always
+            // satisfied — which could not express `wait_for_nodes<=1`
+            // against a larger cluster (#1169).
             let t = s.trim();
             if let Some(n) = t.strip_prefix(">=") {
-                n.trim().parse::<u32>().ok()
-            } else if let Some(n) = t.strip_prefix("<=") {
-                n.trim().parse::<u32>().ok().map(|v| v.min(1))
+                n.trim().parse::<u32>().ok().map(NodesWait::AtLeast)
             } else if let Some(n) = t.strip_prefix('>') {
-                n.trim().parse::<u32>().ok().map(|v| v.saturating_add(1))
+                n.trim()
+                    .parse::<u32>()
+                    .ok()
+                    .map(|v| NodesWait::AtLeast(v.saturating_add(1)))
+            } else if let Some(n) = t.strip_prefix("<=") {
+                n.trim().parse::<u32>().ok().map(NodesWait::AtMost)
             } else if let Some(n) = t.strip_prefix('<') {
-                n.trim().parse::<u32>().ok().map(|_| 1)
+                n.trim()
+                    .parse::<u32>()
+                    .ok()
+                    .map(|v| NodesWait::AtMost(v.saturating_sub(1)))
+            } else if let Some(n) = t.strip_prefix("ge(").and_then(|r| r.strip_suffix(')')) {
+                n.trim().parse::<u32>().ok().map(NodesWait::AtLeast)
+            } else if let Some(n) = t.strip_prefix("le(").and_then(|r| r.strip_suffix(')')) {
+                n.trim().parse::<u32>().ok().map(NodesWait::AtMost)
             } else {
-                t.parse::<u32>().ok()
+                t.parse::<u32>().ok().map(NodesWait::AtLeast)
             }
         })
-        .unwrap_or(Some(1))
-        .unwrap_or(1);
+        .unwrap_or(Some(NodesWait::AtLeast(1)))
+        .unwrap_or(NodesWait::AtLeast(1));
     // wait_for_active_shards unmet: `all` when any shard is unassigned —
     // a replica, or (now that a failed index is a reachable state, issue
     // #206) an unopenable primary, which is the more serious of the two and
@@ -467,43 +531,27 @@ async fn cluster_health_inner(
                 .as_deref(),
             Some("green") | Some("yellow")
         );
-    // When the caller explicitly requests `wait_for_nodes>=N`, we
-    // satisfy it by reporting `N` as the declared cluster size so
-    // the multinode smoke suite converges. But if the caller also
-    // passes an aggressive `timeout` (≤ 100ms) they're explicitly
-    // testing the timeout path — report the original "single-node,
-    // didn't converge" behaviour in that case.
-    let aggressive_timeout = params
-        .timeout
-        .as_deref()
-        .map(|s| {
-            let s = s.trim();
-            if let Some(ms) = s.strip_suffix("ms") {
-                ms.parse::<u64>().ok().map(|v| v <= 100).unwrap_or(false)
-            } else {
-                s == "0"
-            }
-        })
-        .unwrap_or(false);
-    let declared_nodes: u32 = if aggressive_timeout {
-        1
-    } else {
-        params
-            .wait_for_nodes
-            .as_deref()
-            .map(|_| wait_for_nodes)
-            .unwrap_or(1)
+    // `wait_for_nodes` honored against the real configured membership
+    // (#1169): a condition this cluster cannot satisfy (asking 2 nodes of
+    // a 1-node cluster) times out immediately — `timed_out: true`, mapped
+    // to 408 below, exactly like an unmet `wait_for_status`. The previous
+    // behaviour reported the requested count back as `number_of_nodes` so
+    // the multinode smoke suite would "converge" on a single node; that
+    // suite now skips with a recorded reason instead of passing against a
+    // fabricated topology (yaml/smoke/smoke_test_multinode/10_basic.yml).
+    let nodes = configured_node_count(&state.config);
+    let wait_for_nodes_unmet = match wait_for_nodes {
+        NodesWait::AtLeast(n) => nodes < n,
+        NodesWait::AtMost(n) => nodes > n,
     };
-    let timed_out = wait_for_active_shards_unmet
-        || wait_for_status_unmet
-        || (aggressive_timeout && wait_for_nodes > 1);
+    let timed_out = wait_for_active_shards_unmet || wait_for_status_unmet || wait_for_nodes_unmet;
 
     let mut resp = json!({
         "cluster_name": "xerj",
         "status": status,
         "timed_out": timed_out,
-        "number_of_nodes": declared_nodes,
-        "number_of_data_nodes": declared_nodes,
+        "number_of_nodes": nodes,
+        "number_of_data_nodes": nodes,
         "active_primary_shards": active,
         "active_shards": active,
         "relocating_shards": 0,
@@ -20976,9 +21024,28 @@ pub async fn cat_nodes(
     let (l1, l5, l15) = read_loadavg();
     let name = state.engine.node_id.as_str();
 
+    // Honest membership rows (#1169): one row per configured member. The
+    // self row carries live metrics; peer rows — processes we cannot see —
+    // carry "-" placeholders, exactly as ES renders values it does not know.
+    // `master` is "*" only on a cluster-disabled node (where self is
+    // trivially the whole cluster); on a configured ring the leader is not
+    // known to this layer yet (see #1170), and stamping "*" on self would
+    // be the same fabrication this endpoint is recovering from.
+    let members = configured_members(&state.config);
+    let own_addr = members
+        .first()
+        .map(|(_, a)| *a)
+        .unwrap_or(std::net::SocketAddr::from(([127, 0, 0, 1], 9300)));
+    let master_col = if state.config.cluster.enabled {
+        "-"
+    } else {
+        "*"
+    };
+
     if params.format.as_deref() == Some("json") {
-        return Json(vec![json!({
-            "ip": "127.0.0.1",
+        let mut rows: Vec<Value> = Vec::with_capacity(members.len());
+        rows.push(json!({
+            "ip": own_addr.ip().to_string(),
             "heap.percent": heap_percent.to_string(),
             "ram.percent": ram_percent.to_string(),
             "cpu": cpu.to_string(),
@@ -20986,15 +21053,33 @@ pub async fn cat_nodes(
             "load_5m": format!("{l5:.2}"),
             "load_15m": format!("{l15:.2}"),
             "node.role": "cdfhilmrstw",
-            "master": "*",
+            "master": master_col,
             "name": name,
-        })])
-        .into_response();
+        }));
+        for (peer_id, addr) in members.iter().skip(1) {
+            rows.push(json!({
+                "ip": addr.ip().to_string(),
+                "heap.percent": "-",
+                "ram.percent": "-",
+                "cpu": "-",
+                "load_1m": "-",
+                "load_5m": "-",
+                "load_15m": "-",
+                "node.role": "-",
+                "master": "-",
+                "name": peer_id,
+            }));
+        }
+        return Json(rows).into_response();
     }
 
-    let body = format!(
-        "127.0.0.1 {heap_percent} {ram_percent} {cpu} {l1:.2} {l5:.2} {l15:.2} cdfhilmrstw * {name}\n"
+    let mut body = format!(
+        "{ip} {heap_percent} {ram_percent} {cpu} {l1:.2} {l5:.2} {l15:.2} cdfhilmrstw {master_col} {name}\n",
+        ip = own_addr.ip(),
     );
+    for (peer_id, addr) in members.iter().skip(1) {
+        body.push_str(&format!("{ip} - - - - - - - - {peer_id}\n", ip = addr.ip()));
+    }
     (
         StatusCode::OK,
         [(
@@ -31731,20 +31816,44 @@ pub async fn cluster_state(State(state): State<AppState>) -> impl IntoResponse {
         unassigned_shards.push(shard);
     }
 
+    // Honest topology (#1169): the self entry's transport address is this
+    // node's real configured cluster address (previously the never-bound
+    // default 9300), and configured peers appear as minimal entries. On a
+    // configured ring `master_node` is null rather than self: the REST
+    // layer does not know the elected leader (#1170), and claiming
+    // mastership from every node is the same fabrication this fixes.
+    let members = configured_members(&state.config);
+    let own_addr = members
+        .first()
+        .map(|(_, a)| a.to_string())
+        .unwrap_or_else(|| "127.0.0.1:9300".to_string());
+    let mut state_nodes = serde_json::Map::new();
+    state_nodes.insert(
+        node_id.to_string(),
+        json!({
+            "name": node_id,
+            "transport_address": own_addr,
+            "roles": ["master", "data", "ingest"],
+        }),
+    );
+    for (peer_id, addr) in members.iter().skip(1) {
+        state_nodes.insert(
+            peer_id.clone(),
+            json!({
+                "name": peer_id,
+                "transport_address": addr.to_string(),
+            }),
+        );
+    }
+
     Json(json!({
         "cluster_name": "xerj",
         "cluster_uuid": "xerj-cluster-1",
         "version": 1,
         "state_uuid": uuid::Uuid::new_v4().to_string(),
-        "master_node": node_id,
+        "master_node": if state.config.cluster.enabled { Value::Null } else { json!(node_id) },
         "blocks": {},
-        "nodes": {
-            node_id: {
-                "name": node_id,
-                "transport_address": "127.0.0.1:9300",
-                "roles": ["master", "data", "ingest"],
-            }
-        },
+        "nodes": Value::Object(state_nodes),
         "metadata": {
             "cluster_uuid": "xerj-cluster-1",
             "templates": {},
@@ -33080,15 +33189,30 @@ pub async fn nodes_info(
         .as_millis() as u64;
 
     let node_id = state.engine.node_id.as_str();
-    Json(json!({
-        "_nodes": { "total": 1, "successful": 1, "failed": 0 },
-        "cluster_name": "xerj",
-        "nodes": {
-            node_id: {
+    // Honest membership (#1169): `total` is the configured cluster size;
+    // `successful` stays 1 because only THIS process's info is known —
+    // peers are listed with name/transport only, never invented versions
+    // or metrics. The transport fields report this node's real configured
+    // cluster address instead of a phantom 9300.
+    let members = configured_members(&state.config);
+    let node_total = members.len().max(1);
+    let own_addr = members
+        .first()
+        .map(|(_, a)| a.to_string())
+        .unwrap_or_else(|| "127.0.0.1:9300".to_string());
+    let own_ip = members
+        .first()
+        .map(|(_, a)| a.ip().to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+
+    let mut nodes_map = serde_json::Map::new();
+    nodes_map.insert(
+        node_id.to_string(),
+        json!({
                 "name": node_id,
-                "transport_address": "127.0.0.1:9300",
-                "host": "127.0.0.1",
-                "ip": "127.0.0.1",
+                "transport_address": own_addr.clone(),
+                "host": own_ip.clone(),
+                "ip": own_ip,
                 "version": reported_version,
                 "build_flavor": "default",
                 "build_type": "tar",
@@ -33149,8 +33273,8 @@ pub async fn nodes_info(
                     "write":      { "type": "fixed", "size": num_cpus, "queue_size": 200 },
                 },
                 "transport": {
-                    "bound_address": ["127.0.0.1:9300"],
-                    "publish_address": "127.0.0.1:9300",
+                    "bound_address": [own_addr.clone()],
+                    "publish_address": own_addr,
                     "profiles": {},
                 },
                 "http": {
@@ -33164,8 +33288,28 @@ pub async fn nodes_info(
                     "docs": { "count": total_docs, "deleted": 0 },
                     "store": { "size_in_bytes": store_bytes },
                 },
-            }
-        }
+        }),
+    );
+    // Configured peers: name and transport address are known from config;
+    // everything else about a remote process would be invented, so it is
+    // omitted (#1169). On a cluster-disabled node the peer list is empty
+    // and this response is byte-equivalent to the old single-entry one.
+    for (peer_id, addr) in members.iter().skip(1) {
+        nodes_map.insert(
+            peer_id.clone(),
+            json!({
+                "name": peer_id,
+                "transport_address": addr.to_string(),
+                "host": addr.ip().to_string(),
+                "ip": addr.ip().to_string(),
+            }),
+        );
+    }
+
+    Json(json!({
+        "_nodes": { "total": node_total, "successful": 1, "failed": 0 },
+        "cluster_name": "xerj",
+        "nodes": Value::Object(nodes_map),
     }))
     .into_response()
 }
@@ -45115,5 +45259,205 @@ mod script_guard_symmetry_tests {
                 .contains("vec"),
             "the 400 must name the unanswerable field: {search_body}"
         );
+    }
+}
+
+#[cfg(test)]
+mod cluster_topology_honesty_tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    /// Issue #1169: the cluster endpoints used to fabricate topology —
+    /// `wait_for_nodes` was echoed back as `number_of_nodes`, `_cat/nodes`
+    /// was a one-row stub, `_nodes` reported total 1, and `_cluster/state`
+    /// named a transport port nothing listens on. These tests pin the honest
+    /// behaviour: configured membership, real wait semantics, and no
+    /// invented peer details.
+    fn state_with_cluster(enabled: bool, peers: &[&str], cluster_port: u16) -> AppState {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let mut config = xerj_common::config::Config::default();
+        config.server.data_dir = dir.to_string_lossy().into_owned();
+        config.storage.wal_sync = xerj_common::config::WalSync::Async;
+        config.server.bind_address = "127.0.0.1".to_string();
+        if enabled {
+            config.cluster.enabled = true;
+            config.cluster.port = cluster_port;
+            config.cluster.auth_secret = "test-secret-0123456789abcdef".to_string();
+            config.cluster.peers = peers.iter().map(|s| s.to_string()).collect();
+        }
+        let metrics = xerj_common::metrics::Metrics::new().expect("metrics");
+        let engine = xerj_engine::Engine::new(config.clone()).expect("engine");
+        AppState::new(config, engine, metrics)
+    }
+
+    async fn get(app: &axum::Router, path: &str) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn ring3() -> AppState {
+        state_with_cluster(
+            true,
+            &[
+                "127.0.0.1:19301=127.0.0.1:19301",
+                "127.0.0.1:19302=127.0.0.1:19302",
+            ],
+            19300,
+        )
+    }
+
+    #[tokio::test]
+    async fn single_node_health_reports_one_and_times_out_unsatisfiable_waits() {
+        let state = state_with_cluster(false, &[], 9300);
+        let app = crate::router::build_es_compat_router(state);
+
+        let (status, body) = get(&app, "/_cluster/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["number_of_nodes"], 1);
+        assert_eq!(body["timed_out"], false);
+
+        // Asking 2 nodes of a 1-node cluster: 408 + timed_out, and the node
+        // count stays the real 1 — never the requested 2 back (#1169).
+        let (status, body) = get(&app, "/_cluster/health?wait_for_nodes=2").await;
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(body["timed_out"], true);
+        assert_eq!(body["number_of_nodes"], 1, "must not echo the request");
+
+        let (status, body) = get(&app, "/_cluster/health?wait_for_nodes=1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["timed_out"], false);
+    }
+
+    #[tokio::test]
+    async fn ring_health_reports_configured_membership_with_real_wait_semantics() {
+        let state = ring3();
+        let app = crate::router::build_es_compat_router(state);
+
+        let (status, body) = get(&app, "/_cluster/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["number_of_nodes"], 3);
+        assert_eq!(body["number_of_data_nodes"], 3);
+
+        let (status, _) = get(&app, "/_cluster/health?wait_for_nodes=3").await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = get(&app, "/_cluster/health?wait_for_nodes=4").await;
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+
+        // Upper bounds are real constraints now: `<=3` holds, `<=2` does not
+        // (previously every upper bound collapsed to "minimum 1" and passed).
+        let (status, _) = get(&app, "/_cluster/health?wait_for_nodes=le(3)").await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = get(&app, "/_cluster/health?wait_for_nodes=le(2)").await;
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(body["number_of_nodes"], 3, "count stays real on timeout");
+    }
+
+    #[tokio::test]
+    async fn self_in_own_peer_list_is_not_double_counted() {
+        // Real configs name the full membership on every node, including
+        // this one — the count must still be the distinct membership.
+        let state = state_with_cluster(
+            true,
+            &[
+                "127.0.0.1:19300=127.0.0.1:19300",
+                "127.0.0.1:19301=127.0.0.1:19301",
+            ],
+            19300,
+        );
+        let app = crate::router::build_es_compat_router(state);
+        let (_, body) = get(&app, "/_cluster/health").await;
+        assert_eq!(body["number_of_nodes"], 2);
+    }
+
+    #[tokio::test]
+    async fn cat_nodes_lists_configured_members() {
+        let state = ring3();
+        let app = crate::router::build_es_compat_router(state);
+        let (status, body) = get(&app, "/_cat/nodes?format=json").await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = body.as_array().expect("json array");
+        assert_eq!(rows.len(), 3);
+        // Self row carries live metrics; peer rows carry "-"; and no row
+        // claims mastership — the REST layer does not know the leader.
+        assert!(rows[0]["heap.percent"].as_str().unwrap() != "-");
+        for row in rows.iter() {
+            assert_eq!(row["master"], "-");
+        }
+        assert_eq!(rows[1]["name"], "127.0.0.1:19301");
+        assert_eq!(rows[2]["name"], "127.0.0.1:19302");
+        assert_eq!(rows[1]["heap.percent"], "-");
+
+        // A cluster-disabled node is a legitimate single-node cluster: one
+        // row, and self IS the master.
+        let state = state_with_cluster(false, &[], 9300);
+        let app = crate::router::build_es_compat_router(state);
+        let (_, body) = get(&app, "/_cat/nodes?format=json").await;
+        let rows = body.as_array().expect("json array");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["master"], "*");
+    }
+
+    #[tokio::test]
+    async fn nodes_info_totals_membership_and_never_invents_peer_details() {
+        let state = ring3();
+        let app = crate::router::build_es_compat_router(state);
+        let (status, body) = get(&app, "/_nodes").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["_nodes"]["total"], 3);
+        assert_eq!(body["_nodes"]["successful"], 1, "only self answered");
+        let nodes = body["nodes"].as_object().expect("nodes map");
+        assert_eq!(nodes.len(), 3);
+        // The self entry reports the real configured cluster address, not
+        // the never-bound 9300 default.
+        let self_entry = nodes
+            .values()
+            .find(|v| v.get("version").is_some())
+            .expect("exactly the self entry carries a version");
+        assert_eq!(self_entry["transport_address"], "127.0.0.1:19300");
+        // Peer entries carry name/transport only — no invented versions.
+        let peer = &nodes["127.0.0.1:19301"];
+        assert_eq!(peer["transport_address"], "127.0.0.1:19301");
+        assert!(
+            peer.get("version").is_none(),
+            "peer version would be invented"
+        );
+    }
+
+    #[tokio::test]
+    async fn cluster_state_names_real_transport_and_admits_unknown_master() {
+        let state = ring3();
+        let app = crate::router::build_es_compat_router(state);
+        let (status, body) = get(&app, "/_cluster/state").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["master_node"],
+            Value::Null,
+            "leader unknown to REST (#1170)"
+        );
+        let nodes = body["nodes"].as_object().expect("nodes map");
+        assert_eq!(nodes.len(), 3);
+        let self_entry = nodes
+            .values()
+            .find(|v| v.get("roles").is_some())
+            .expect("self entry carries roles");
+        assert_eq!(self_entry["transport_address"], "127.0.0.1:19300");
+
+        // Cluster disabled: self is the trivial master and the shape is
+        // byte-compatible with the old single-entry response.
+        let state = state_with_cluster(false, &[], 9300);
+        let app = crate::router::build_es_compat_router(state);
+        let (_, body) = get(&app, "/_cluster/state").await;
+        assert_eq!(body["master_node"], "local");
+        let nodes = body["nodes"].as_object().expect("nodes map");
+        assert_eq!(nodes.len(), 1);
     }
 }

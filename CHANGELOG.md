@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cluster endpoints fabricated topology** (issue
+  [#1169](https://github.com/xerj-org/xerj/issues/1169)) —
+  `GET /_cluster/health?wait_for_nodes=N` echoed `N` back as
+  `number_of_nodes` with `status: green` and `timed_out: false`, so the
+  multinode smoke suite "converged" on a single node that had no cluster
+  at all (the handler comment said so out loud). Health now reports the
+  real configured membership (`1` when cluster mode is off, else the
+  distinct own + peer addresses), an unsatisfiable `wait_for_nodes` times
+  out honestly (408, `timed_out: true`, count stays real), and upper
+  bounds (`<=N`, `<N`, `le(N)`) are enforced instead of collapsed to
+  "always satisfied". `_cat/nodes` lists every configured member (peers
+  with `-` placeholders, no invented metrics), `_nodes` totals the
+  membership while `successful: 1` reflects that only self answered, and
+  `_cluster/state` reports this node's actual cluster address instead of
+  the never-bound 9300 default and `master_node: null` on a configured
+  ring rather than every node claiming mastership. The multinode smoke
+  case now **skips with a recorded reason** instead of passing vacuously;
+  `cluster.health/20_request_timeout` passes through the real timeout
+  path. Cluster config that could only fail silently is refused at load
+  (issue [#1171](https://github.com/xerj-org/xerj/issues/1171)): a peer
+  label differing from its address (which made the node lose every
+  election with no diagnostic of its own) and `cluster.port` colliding
+  with this node's own rest/grpc/es_compat port (which degraded the node
+  to single-node with green health).
+
 ## [1.0.0-rc.83] - 2026-10-06
 
 The corpus-hub hundred release. The engine window is small — one retrieval
