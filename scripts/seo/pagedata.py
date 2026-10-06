@@ -378,7 +378,7 @@ PAGES: dict[str, dict[str, str]] = {
     ),
     "docs/clustering.html": dict(
         label="Clustering", kind="techarticle",
-        description="XERJ ships an embedded Raft implementation — no etcd, no ZooKeeper. Leader election, metadata replication, and per-shard data replication in one binary.",
+        description="XERJ ships an embedded Raft ring — leader election, heartbeats, and an authenticated cluster transport in one binary. What replicates today and what is roadmap, stated plainly.",
     ),
 
     # ── docs · operate ──────────────────────────────────────────────────────
