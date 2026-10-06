@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **An index's analysis configuration could not be verified over the wire**
+  (issue [#1092](https://github.com/xerj-org/xerj/issues/1092)) — search
+  honoured a declared `analysis.analyzer.default`, but nothing an agent can
+  read said so. `GET /{index}/_settings` and `GET /{index}` replayed an
+  in-memory copy of the create body: after a restart it was empty, so the
+  analysis block (and every other create-time setting) vanished, and a
+  top-level `analysis` beside an `index` block was never echoed at all. Both
+  now report `index.analysis` as the block the index's analyzer registry was
+  actually built from — none for a pre-#204 index whose declared block is
+  not honoured — and fall back to the persisted `settings.json` when the
+  in-memory copy is gone. `POST /{index}/_analyze` was an inline lowercase
+  splitter that ignored the index; it now runs the index's real pipelines:
+  no `analyzer` → the index's default, `field` → the analyzer that field is
+  indexed with, a named analyzer from the index's own registry. Ad-hoc
+  `tokenizer` / `filter` / `char_filter` chains (names or inline
+  definitions) are built by the same registry code index creation uses, with
+  `keyword` as the tokenizer when only filters are given. Unknown analyzers,
+  tokenizers and filters, `field` on the global endpoint and `normalizer`
+  are 400 `illegal_argument_exception`. A missing index is 404. Checked
+  side by side against OpenSearch 3.9.0: status codes, error types, tokens,
+  offsets and positions match on all 24 probed requests. Only the wording of
+  the reason differs on 3 of the 400s.
+
 ## [1.0.0-rc.84] - 2026-10-06
 
 The tell-the-truth window. Every signal an operator reads — cluster
