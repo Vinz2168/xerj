@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.85] - 2026-10-06
+
+The cluster-ring-works window. One defect fix and one docs correction,
+both born from the rc.83 three-node ring tests: the election churn that
+made a ring with a dead peer elect a new leader every ~250 ms forever is
+root-caused and fixed, and the clustering page now describes what the
+ring actually does instead of an unshipped replication design.
+
+### Fixed
+
+- **A ring with a dead peer churned elections forever** (issue
+  [#1168](https://github.com/xerj-org/xerj/issues/1168), PR
+  [#1179](https://github.com/xerj-org/xerj/pull/1179)) — the documented
+  convention lists the full membership in `[cluster] peers` on every
+  node, self included, and nothing removed this node's own entry before
+  the membership reached Raft. Two compounding consequences: the peer
+  count included self, so a three-node ring computed a *four*-member
+  cluster whose majority was three — unanimity, zero fault tolerance —
+  and self was also a routable transport peer, so each candidate sent
+  its own `RequestVote` to itself over loopback TCP where a re-grant
+  counted the self vote **twice**. After the leader died, no survivor
+  could assemble three real votes, and the double-counted self votes
+  let the surviving pair hand each other phantom wins while leapfrogging
+  terms indefinitely. Self is now excluded at three layers (config
+  parse in `main.rs`, `RaftNode::new`, and `TcpTransport::new`), each
+  logging a warning when it fires. Measured on a three-node loopback
+  ring (`tick_ms=50`, kill the leader, 240 s observation): rc.83
+  churned through **94 terms** and never stopped; with the transport
+  starvation fix alone (per-peer outbound queues, first commit on the
+  PR) the churn got *faster* — **909 terms**, which is what pinned the
+  real root cause; with self-exclusion, a new leader is elected
+  **~250 ms** after the kill (one split-vote retry) and the ring then
+  holds **zero elections for the remaining 239 s**, with the second
+  survivor never even timing out. Three new tests, including the ring
+  acceptance scenario `ring_with_full_membership_lists_survives_leader_death`
+  driving three `ClusterNode`s constructed exactly as the server passes
+  the full-membership config.
+
+### Documentation
+
+- **The clustering page described an unshipped replication design**
+  (PR
+  [#1180](https://github.com/xerj-org/xerj/pull/1180), issue
+  [#1170](https://github.com/xerj-org/xerj/issues/1170) context) —
+  `docs/clustering` claimed metadata replication, document replication,
+  node drain/activate/remove endpoints, region split/merge, and a
+  `NodeState` API, none of which exist in the code; it even invented
+  `/_cluster/health` output. The page now states what the ring does
+  today — leader election (~250 ms failover, citing the #1168 fix), an
+  HMAC-authenticated cluster transport with dead-peer isolation, and a
+  durable local Raft log — and says plainly that metadata and document
+  replication are roadmap (#1170), with a "when not to cluster: today,
+  almost always" section. The same sweep corrected the docs-index
+  cards across 29 pages (145 replacements), the troubleshooting
+  election-flapping entry (sustained churn is a *defect* now, not a
+  tuning knob), the rolling-upgrade page (the cluster wire has no
+  version negotiation — full stop/start, not rolling), and the
+  clustered backup section (indexes are node-local today).
+
 ## [1.0.0-rc.84] - 2026-10-06
 
 The tell-the-truth window. Every signal an operator reads — cluster
