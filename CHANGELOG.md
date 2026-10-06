@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Long BM25 queries silently fell back to per-segment IDF/avgdl**
+  (issue [#1186](https://github.com/xerj-org/xerj/issues/1186)) — the
+  index-wide statistics pre-pass (#188) budgeted `(fields + terms) ×
+  segments ≤ 4096`, so a many-term query on a multi-segment index crossed
+  the cap, the pre-pass silently declined, and every segment scored
+  against its own `df`/`avgdl`: padding a query with 1,500 terms that
+  match NO document reordered the whole top-5 (reported `1-1:1.6797521`
+  → `8-4:1.6904112`; after `_forcemerge?max_num_segments=1` both queries
+  agreed — the merge had nothing to do with it, it just brought the
+  probe count back under the cap). The budget is now split by cost
+  class: field probes (one mmap'd FST per segment × field — the wide
+  `query_string` explosion the cap existed for) stay at 4096, term
+  probes (one FST seek per segment × term — the same order of cost
+  execution itself pays for postings) get their own 1,048,576 budget, and
+  every decline now logs a warning instead of changing the ranking
+  silently. The reporter's literal repro (1,502 terms over a 32-core
+  box's ~128 flush segments, ≈192k term probes) and a 4-shard/32-segment
+  variant both now score identically to their unpadded forms,
+  bit-for-bit.
+
 - **`xerj code --mode hybrid` dropped lexical-only indices from the BM25
   leg** (issue [#1146](https://github.com/xerj-org/xerj/issues/1146)) — on
   a corpus where only some indices map `body` as `semantic_text`, the fused
