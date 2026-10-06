@@ -1669,6 +1669,16 @@ impl Es {
     }
 
     /// One server-side delete pass; returns the reported `deleted` count.
+    ///
+    /// A 404 is the answer, not a failure — the same rule as
+    /// [`Self::count_endpoint`]: this cleanup runs before a file-level
+    /// replacement against the index the journal names, and when a namespace
+    /// swap already retired that index the node answers 404. The stale
+    /// documents are then already absent (a missing index cannot hold any),
+    /// so the pass deleted nothing and the goal state holds. Treating it as
+    /// an abort (#1173) turned a converged state into a dead run whose final
+    /// message then claimed "wrote no new records" on a run that had written
+    /// plenty. Every other status keeps the refusal error.
     fn delete_by_query_pass(&self, index: &str, query: &Value) -> Result<u64> {
         self.with_retry(
             "delete_by_query",
@@ -1682,6 +1692,9 @@ impl Es {
                 .map_err(|e| anyhow!("delete_by_query: {e}"))
             },
             |resp| {
+                if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                    return Ok(0);
+                }
                 let status = resp.status();
                 let body: Value = resp.json().unwrap_or(Value::Null);
                 if status.is_success()
@@ -2350,6 +2363,57 @@ mod tests {
             let text = String::from_utf8_lossy(request);
             assert!(text.contains("POST /data/_delete_by_query"), "{text}");
         }
+    }
+
+    /// #1173: the cleanup before a file-level replacement targets the index
+    /// the journal names. When a namespace swap already retired it the node
+    /// answers 404, and the client turned that converged state ("the stale
+    /// documents are already absent — a missing index cannot hold any") into
+    /// a fatal abort. 404 must be the answer "deleted nothing", the same rule
+    /// as `count_endpoint`'s, and it must be answered on the FIRST request —
+    /// convergent is not a thing to retry.
+    #[test]
+    fn delete_by_query_on_a_missing_index_is_already_clean_not_an_abort() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_server = requests.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            requests_server
+                .lock()
+                .unwrap()
+                .push(read_request(&mut stream));
+            respond_status(
+                &mut stream,
+                "404 Not Found",
+                br#"{"error":{"type":"index_not_found_exception","status":404},"status":404}"#,
+            );
+        });
+        let es = Es::with_bulk_policy(
+            &format!("http://{address}"),
+            None,
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+        )
+        .unwrap();
+        es.delete_by_query(
+            "retired-generation",
+            &serde_json::json!({"term": {"ax_file": "key"}}),
+        )
+        .expect("a missing index is already clean, not a failed cleanup");
+        server.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "a 404 is answered, not retried: {:#?}",
+            requests
+                .iter()
+                .map(|r| String::from_utf8_lossy(r).to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     /// #345: the reporter's whole issue was `delete_by_query: HTTP 500
