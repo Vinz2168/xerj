@@ -1112,9 +1112,7 @@ mod tests {
         let reqs = http.searches.lock().unwrap().clone();
         assert!(!reqs.is_empty());
         assert_eq!(
-            reqs[0]
-                .1
-                .pointer("/query/bool/must/0/multi_match/fields"),
+            reqs[0].1.pointer("/query/bool/must/0/multi_match/fields"),
             Some(&serde_json::json!(["details", "summary"])),
             "the corpus's own text fields, sorted — not the silent-zero body floor",
         );

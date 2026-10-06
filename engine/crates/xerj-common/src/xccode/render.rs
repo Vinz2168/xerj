@@ -46,9 +46,7 @@ fn longest_string_field(src: &Value) -> String {
         keys.sort();
         for key in keys {
             if let Some(s) = obj[key].as_str() {
-                if !s.trim().is_empty()
-                    && best.is_none_or(|(len, _)| s.chars().count() > len)
-                {
+                if !s.trim().is_empty() && best.is_none_or(|(len, _)| s.chars().count() > len) {
                     best = Some((s.chars().count(), s));
                 }
             }
@@ -345,7 +343,10 @@ mod tests {
             text.contains("vulnerable to command injection"),
             "the passage is `details`, the longest field: {text}"
         );
-        assert!(!text.contains("[0 of 0 chars"), "no empty-passage shape: {text}");
+        assert!(
+            !text.contains("[0 of 0 chars"),
+            "no empty-passage shape: {text}"
+        );
 
         // Tie: two fields of equal length — the alphabetically first wins.
         let tie = json!({
