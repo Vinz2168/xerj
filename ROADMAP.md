@@ -2,13 +2,16 @@
 
 This roadmap tracks capabilities that are **planned but not yet fully implemented**, so the project's public claims stay honest about what ships today versus what is coming. Status is verified against the actual code and by real API requests to the release binary, not aspirational.
 
-Last reviewed: 2026-10-05 (against `v1.0.0-rc.82` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.82 release-cut roll: the open-defects shortlist was
-re-verified against the live tracker at cut time — **nine open** (#1091,
+Last reviewed: 2026-10-06 (against `v1.0.0-rc.83` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.83 release-cut roll: the open-defects shortlist was
+re-verified against the live tracker at cut time — **eight open** (#1091,
 #1092, #1094 from the rc.80 gate runs; #1100 from the console review;
-#1136 and #1145–#1148, the corpus-namespace and `xerj code` retrieval
-defects filed from the corpus-hub G7 work inside this window); #1137 and
-#1139 were closed inside the window by PR
-[#1140](https://github.com/xerj-org/xerj/pull/1140) and move to the
+#1146 and #1147, the kNN-recall and build-throughput classes;
+#1158, the missing `text` field that made raw JSON/JSONL mirrors invisible
+to `xerj code` passage search; #1122, reopened 2026-10-05 when the
+reference node died at its memory ceiling with no panic line). #1136 was
+closed inside the window by PR
+[#1156](https://github.com/xerj-org/xerj/pull/1156) and #1145/#1148 by PR
+[#1153](https://github.com/xerj-org/xerj/pull/1153) — all three move to the
 CHANGELOG — the lesson of 2026-09-21, when several
 entries went stale within hours of that review, is why the shortlist is
 checked live at the cut rather than desk-carried. The rc.81 roll's record
@@ -45,7 +48,22 @@ The release-by-release record of how all of this landed is [CHANGELOG.md](./CHAN
 
 ## Next release — [v1.0.0](https://github.com/xerj-org/xerj/milestone/2)
 
-The GA window. **rc.82 was cut on 2026-10-05** — the
+The GA window. **rc.83 was cut on 2026-10-06** — the
+corpus-hub hundred release: the reference-coding catalogue reached
+**100 live corpora** at hub.xerj.org, each pinned, licence-reviewed at
+its commit and gated by a pre-registered G7 suite, and the `xerj-code`
+skill's domain-selection table now names all 100 (PR
+[#1164](https://github.com/xerj-org/xerj/pull/1164)); the new-security
+strata (rustsec-advisories, pysec, go-vulndb, ghsa-db, redos-precedent,
+crypto-misuse-precedent) carry an ecosystem-first, defect-class-second
+selection rule. The engine window: the vector-leg retrieval fix
+(#1145/#1148, PR
+[#1153](https://github.com/xerj-org/xerj/pull/1153)), corpus generation
+hygiene (#1136, PR
+[#1156](https://github.com/xerj-org/xerj/pull/1156)), and three more
+[thomas-villani](https://github.com/thomas-villani) extractor PRs —
+EPUB chapters, the redundant-overlap section fix, and Jupyter notebooks
+plus named-and-exportable data files. **rc.82 was cut on 2026-10-05** — the
 documents-people-actually-have release: man-page extraction plus the two
 spreadsheet shapes real workbooks ship (vertically merged XLSX cells,
 two-row grouped headers), all three
@@ -95,7 +113,7 @@ and the console review's), the #1062 wrong-and-confident detection gate, the
 `xerj-decide-v1` Hugging Face publication (operator credentials), and the GA
 bar itself — *The road to v1.0.0 GA* below.
 
-**Open defects.** Nine, all live on the tracker at rc.82 cut time — the
+**Open defects.** Eight, all live on the tracker at rc.83 cut time — the
 shortlist the release-notes gate checks. From the rc.80 gate runs:
 [#1091](https://github.com/xerj-org/xerj/issues/1091) (hybrid first stage
 13–26 s/query on the 57,638-doc FiQA index),
@@ -106,18 +124,24 @@ flywheel write-back freezes once the history index has BM25 support). From
 the rc.80 console knowledge-surface review:
 [#1100](https://github.com/xerj-org/xerj/issues/1100) (second-brain
 belief-time frame rendered on non-note corpora). Filed from the corpus-hub
-G7 work inside the rc.82 window:
-[#1136](https://github.com/xerj-org/xerj/issues/1136) (stale index
-generations survive `--fresh` swaps; a state file with `index_prefix=null`
-queries all of them) and the `xerj code` retrieval quartet
-[#1145](https://github.com/xerj-org/xerj/issues/1145) (`k` never sent on
-the semantic clause),
-[#1146](https://github.com/xerj-org/xerj/issues/1146) (hybrid drops
-lexical-only indices from the BM25 leg too),
+G7 work: [#1146](https://github.com/xerj-org/xerj/issues/1146) (hybrid
+drops lexical-only indices from the BM25 leg too) and
 [#1147](https://github.com/xerj-org/xerj/issues/1147) (corpus-index ingest
-throughput caps corpus builds at ~10⁵ records/node-day, measured) and
-[#1148](https://github.com/xerj-org/xerj/issues/1148) (`--lang` silently
-disables the vector leg). **Closed inside the rc.82 window and recorded in
+throughput caps corpus builds at ~10⁵ records/node-day, measured — the
+osv-ecosystems corpus is deferred on exactly this number). Reopened or
+still open from the rc.81/82 windows:
+[#1158](https://github.com/xerj-org/xerj/issues/1158) (the missing `text`
+field that made raw-JSON/JSONL mirrors invisible to `xerj code` passage
+search) and [#1122](https://github.com/xerj-org/xerj/issues/1122) (reopened
+2026-10-05 when the reference node died at its memory ceiling with no panic
+line). **Closed inside the rc.83 window and recorded in the CHANGELOG, not
+carried here:** #1136 (stale index generations surviving `--fresh` swaps —
+a state file with `index_prefix=null` queried all of them; fixed by PR
+[#1156](https://github.com/xerj-org/xerj/pull/1156)) and two of the `xerj
+code` retrieval quartet, #1145 (`k` never sent on the semantic clause) and
+#1148 (`--lang` silently disabling the vector leg), both fixed by PR
+[#1153](https://github.com/xerj-org/xerj/pull/1153). **Closed inside the
+rc.82 window and recorded in
 the CHANGELOG, not carried here:** #1137 and #1139 (per-file top-k diversity
 and the txt-family search field, both fixed by PR
 [#1140](https://github.com/xerj-org/xerj/pull/1140)). **Closed inside the

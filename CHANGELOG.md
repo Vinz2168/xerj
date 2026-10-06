@@ -7,8 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.83] - 2026-10-06
+
+The corpus-hub hundred release. The engine window is small — one retrieval
+fix and three extractor PRs — while the reference-coding catalogue reached
+**100 live, licence-reviewed, G7-graded corpora at
+[hub.xerj.org](https://hub.xerj.org)**, every one of them now named in the
+`xerj-code` skill's domain-selection table (PR
+[#1164](https://github.com/xerj-org/xerj/pull/1164); the five SKILL-row
+additions of the rc.82 window rode in as PR
+[#1157](https://github.com/xerj-org/xerj/pull/1157)).
+
 ### Fixed
 
+- **The version roll that missed itself** (PR
+  [#1155](https://github.com/xerj-org/xerj/pull/1155)) — the rc.82 release
+  PR bumped only the download link's `data-latest-tag`; the 91 footer brand
+  spans across the landing pages still read `RC.81`, and the release's own
+  CI could not see the stale ones because the newest tag at push time was
+  still rc.81. All spans now roll with the release and the guard compares
+  against the release being cut, not the last one tagged. `xxhash` is
+  bumped to 0.8.19 in the same PR (the dependabot PR it supersedes was
+  #1152, closed).
 - **The vector leg of `xerj code` hybrid/semantic retrieval** (issues
   [#1145](https://github.com/xerj-org/xerj/issues/1145) and
   [#1148](https://github.com/xerj-org/xerj/issues/1148), PR
@@ -50,6 +70,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   paragraph, so `split_sections` breaks pages at paragraph ends instead
   of hard-cutting every 2 KB mid-word behind a heading emitted as its
   own empty section.
+- **EPUB books in autoindex** (PR
+  [#1159](https://github.com/xerj-org/xerj/pull/1159) by
+  [thomas-villani](https://github.com/thomas-villani)) — one record per
+  spine document in reading order, cut at the table-of-contents anchors,
+  with the book's `title`/`author`/`language` and each chapter's own
+  title from the nav or NCX. DRM-encrypted parts are detected and
+  skipped, and per-part and total byte budgets apply, so a hostile
+  container cannot balloon the index.
+- **A section the next one repeats whole is not emitted** (PR
+  [#1160](https://github.com/xerj-org/xerj/pull/1160) by
+  [thomas-villani](https://github.com/thomas-villani)) — a short
+  paragraph (a chapter heading, seen on a Gutenberg EPUB as "CHAPTER 26.
+  Knights and Squires." alone) followed by one too big to join it was
+  emitted as a section of its own, and the next section then carried it
+  whole as its overlap: a record with no text of its own. A section
+  shorter than the overlap now stays and leads its successor instead.
+- **Jupyter notebooks, and data files that cannot be read, in
+  autoindex** (PR [#1161](https://github.com/xerj-org/xerj/pull/1161)
+  by [thomas-villani](https://github.com/thomas-villani), landed via the
+  maintainer rebase
+  [#1162](https://github.com/xerj-org/xerj/pull/1162)) — a notebook is
+  grouped the way a reader sees it: a section starts at each Markdown
+  heading and holds every cell to the next one, code fenced in the
+  kernel's language (R and Julia notebooks say so), text outputs capped
+  and ANSI-stripped, images skipped, nothing ever executed; the
+  `cell` field gives the 1-based index an agent needs to find the
+  section in Jupyter. Parquet, Arrow, NumPy, HDF5 and pickle files —
+  binary shapes no extractor should parse — are now named records that
+  say which tool exports them to an indexable form.
 
 ## [1.0.0-rc.82] - 2026-10-05
 
