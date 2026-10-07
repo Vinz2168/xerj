@@ -2,27 +2,24 @@
 
 This roadmap tracks capabilities that are **planned but not yet fully implemented**, so the project's public claims stay honest about what ships today versus what is coming. Status is verified against the actual code and by real API requests to the release binary, not aspirational.
 
-Last reviewed: 2026-10-07 (against `v1.0.0-rc.89` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.89 release-cut roll:
+Last reviewed: 2026-10-07 (against `v1.0.0-rc.90` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.90 release-cut roll:
 the open-defects shortlist was re-verified against the live tracker at
-cut time — **eleven open**. Two were missing from the rc.88 roll and
-are added now, both filed inside its window: #1212 (scans silently
-truncating when a merge or flush publishes mid-walk — the engine half
-is fixed in this release by PR
-[#1218](https://github.com/xerj-org/xerj/pull/1218) and both client
-legs by [#1213](https://github.com/xerj-org/xerj/pull/1213)/[#1216](https://github.com/xerj-org/xerj/pull/1216); the issue stays open until
-the standing xerj-search rebuild completes against the released fix)
-and #1220 (the kNN exact scan's admission predicate still reading the
-live version map — a pre-existing predicate the #1217 review surfaced
-and filed). #1091's latency half is fixed in this release by PR
-[#1217](https://github.com/xerj-org/xerj/pull/1217) (FiQA, lexical
-embedder: semantic p50 3,865→261 ms, hybrid 5,772→289 ms, watermark
-crossings 25→0, answers bit-identical); the issue stays open for the
-neural-embedder re-measurement under the original 13-26 s conditions.
-One rc.89-window issue closed verified: #1214 (corpus index silently
-running legacy mode over a recorded build, PR
-[#1215](https://github.com/xerj-org/xerj/pull/1215)). The remaining
-shortlist is unchanged from the rc.88 cut (#1094, #1100, #1122, #1170,
-#1173, #1108, #1110, #1183).
+cut time — **ten open** (#1094, #1100, #1122, #1170, #1173, #1108,
+#1110, #1183, #1212, #1226). Three closed verified inside the window:
+#1220 (the kNN exact scan's capture bracket and capture-scoped
+admission, PR
+[#1223](https://github.com/xerj-org/xerj/pull/1223)), #1222 (a
+no-match by-query run no longer flushes, PR
+[#1227](https://github.com/xerj-org/xerj/pull/1227)) and #1091 (the
+FiQA hybrid-latency tracker, closed by the
+[#1219](https://github.com/xerj-org/xerj/pull/1219) field report on
+the session that produced the rc.89 fix — semantic p50 3,865→261 ms,
+hybrid 5,772→289 ms, answers bit-identical; the neural-embedder
+re-measure stays recorded here rather than as a silent open
+condition). One tracker added: #1226, the flush-under-concurrent-load
+cost that the #1227 diagnosis reframed. #1212 keeps its rc.89
+wording — the standing rebuild must complete against the released fix
+before it closes.
 **Two closed inside the rc.87 window and recorded in the CHANGELOG, not
 carried here:** #1147 (the build-throughput class, PR
 [#1195](https://github.com/xerj-org/xerj/pull/1195), merged just past
