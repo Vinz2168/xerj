@@ -2,23 +2,27 @@
 
 This roadmap tracks capabilities that are **planned but not yet fully implemented**, so the project's public claims stay honest about what ships today versus what is coming. Status is verified against the actual code and by real API requests to the release binary, not aspirational.
 
-Last reviewed: 2026-10-07 (against `v1.0.0-rc.88` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.88 release-cut roll:
+Last reviewed: 2026-10-07 (against `v1.0.0-rc.89` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.89 release-cut roll:
 the open-defects shortlist was re-verified against the live tracker at
-cut time — **nine open**, unchanged from the rc.87 cut (#1091 and #1094
-from the rc.80 gate runs; #1100 from the console review; #1122,
-reopened 2026-10-05 when the reference node died at its memory ceiling
-with no panic line, fresh load-driven evidence posted 2026-10-07; #1170,
-the leader-wiring class filed from the rc.83 3-node ring tests; #1173's
-throughput half; and three from the corpus-program work — #1108 the
-detections gate, #1110 the generalization proof, and #1183, whose
-read-back half is fixed in this release by PR
-[#1207](https://github.com/xerj-org/xerj/pull/1207) and which stays open
-for the end-to-end xerj-search rebuild proof). Two rc.88-window issues
-closed verified on the release binary before the cut: #1201 and #1202
-(the `_cat` output parameters and real segment rows, PR
-[#1208](https://github.com/xerj-org/xerj/pull/1208)), and the #1198
-code-analyzer shipped (PR
-[#1205](https://github.com/xerj-org/xerj/pull/1205)).
+cut time — **eleven open**. Two were missing from the rc.88 roll and
+are added now, both filed inside its window: #1212 (scans silently
+truncating when a merge or flush publishes mid-walk — the engine half
+is fixed in this release by PR
+[#1218](https://github.com/xerj-org/xerj/pull/1218) and both client
+legs by [#1213](https://github.com/xerj-org/xerj/pull/1213)/[#1216](https://github.com/xerj-org/xerj/pull/1216); the issue stays open until
+the standing xerj-search rebuild completes against the released fix)
+and #1220 (the kNN exact scan's admission predicate still reading the
+live version map — a pre-existing predicate the #1217 review surfaced
+and filed). #1091's latency half is fixed in this release by PR
+[#1217](https://github.com/xerj-org/xerj/pull/1217) (FiQA, lexical
+embedder: semantic p50 3,865→261 ms, hybrid 5,772→289 ms, watermark
+crossings 25→0, answers bit-identical); the issue stays open for the
+neural-embedder re-measurement under the original 13-26 s conditions.
+One rc.89-window issue closed verified: #1214 (corpus index silently
+running legacy mode over a recorded build, PR
+[#1215](https://github.com/xerj-org/xerj/pull/1215)). The remaining
+shortlist is unchanged from the rc.88 cut (#1094, #1100, #1122, #1170,
+#1173, #1108, #1110, #1183).
 **Two closed inside the rc.87 window and recorded in the CHANGELOG, not
 carried here:** #1147 (the build-throughput class, PR
 [#1195](https://github.com/xerj-org/xerj/pull/1195), merged just past
@@ -213,10 +217,13 @@ and the console review's), the #1062 wrong-and-confident detection gate, the
 `xerj-decide-v1` Hugging Face publication (operator credentials), and the GA
 bar itself — *The road to v1.0.0 GA* below.
 
-**Open defects.** Nine, all live on the tracker — the
+**Open defects.** Eleven, all live on the tracker — the
 shortlist the release-notes gate checks. From the rc.80 gate runs:
 [#1091](https://github.com/xerj-org/xerj/issues/1091) (hybrid first stage
-13–26 s/query on the 57,638-doc FiQA index) and
+13–26 s/query on the 57,638-doc FiQA index; the latency half fixed in
+rc.89 by PR [#1217](https://github.com/xerj-org/xerj/pull/1217) — semantic
+p50 3,865→261 ms — with the original `--embed-mode neural` conditions not
+yet re-measured) and
 [#1094](https://github.com/xerj-org/xerj/issues/1094) (decision
 flywheel write-back freezes once the history index has BM25 support).
 From the rc.80 console knowledge-surface review:
@@ -242,7 +249,16 @@ read-back fix (PR
 made finalize estimate 1.1 GB against the 512 MB query-memory breaker; the
 issue stays open until a full xerj-search rebuild passes finalize-catalog
 end-to-end with the fixed client, and the #1122 memory-ceiling class stays
-its companion).
+its companion). From the rc.88/89 windows:
+[#1212](https://github.com/xerj-org/xerj/issues/1212) (scans silently
+truncating when a merge or flush publishes mid-walk: the engine fix is
+[#1218](https://github.com/xerj-org/xerj/pull/1218), the client legs
+[#1213](https://github.com/xerj-org/xerj/pull/1213)/[#1216](https://github.com/xerj-org/xerj/pull/1216), all in rc.89; resume3 of the
+standing rebuild aborted on exactly this short read-back, and the issue
+closes only when a rebuild completes against the released fix) and
+[#1220](https://github.com/xerj-org/xerj/issues/1220) (the kNN exact
+scan's admission predicate reads the live version map — pre-existing,
+window ~15× narrower after #1217, capture-scoping filed as the follow-up).
 **Closed inside the rc.86 window and recorded in the CHANGELOG, not
 carried here:** #1109, #1189, #1190, #1186, #1146 and #1092 (PRs
 [#1194](https://github.com/xerj-org/xerj/pull/1194),
