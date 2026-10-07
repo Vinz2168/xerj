@@ -19,6 +19,10 @@ static HTTP_E2E_LOCK: Mutex<()> = Mutex::new(());
 struct HttpState {
     docs: HashMap<(String, String), Value>,
     requests: Vec<(String, String)>,
+    /// Every `POST …/_search` body, in order (#1183): the dataset read-back's
+    /// agg-free shape and its sorted time-bound queries are asserted against
+    /// these.
+    search_bodies: Vec<Value>,
     data_bulk_requests: usize,
     fail_next_data_bulk: bool,
     /// Apply the first half of the next data bulk's items and *then* report
@@ -162,6 +166,21 @@ impl HttpEndpoint {
             .collect()
     }
 
+    /// Every `POST …/_search` body the endpoint has seen, in order (#1183).
+    fn search_bodies(&self) -> Vec<Value> {
+        self.state.lock().unwrap().search_bodies.clone()
+    }
+
+    /// One catalog document by id, from the fake's stored docs.
+    fn catalog_doc(&self, id: &str) -> Option<Value> {
+        self.state
+            .lock()
+            .unwrap()
+            .docs
+            .get(&(catalog::CATALOG_INDEX.to_string(), id.to_string()))
+            .cloned()
+    }
+
     fn data_bulk_requests(&self) -> usize {
         self.state.lock().unwrap().data_bulk_requests
     }
@@ -264,6 +283,9 @@ fn handle_http(mut stream: TcpStream, state: &Arc<Mutex<HttpState>>) {
         let deleted = delete_http(path, &body, state);
         (200, json!({"deleted": deleted, "failures": []}))
     } else if method == "POST" && path.ends_with("/_search") {
+        if let Ok(query) = serde_json::from_slice::<Value>(&body) {
+            state.lock().unwrap().search_bodies.push(query);
+        }
         (200, search_http(path, &body, state))
     } else if method == "GET" && path.ends_with("/_count") {
         let index = path.trim_start_matches('/').trim_end_matches("/_count");
@@ -790,7 +812,39 @@ fn search_http(path: &str, body: &[u8], state: &Arc<Mutex<HttpState>>) -> Value 
     // catalog sweep pages, and a page has to be a page. A request that omits
     // them still gets everything, which is what every older fixture assumes.
     // Ordering is by `_id` so a page boundary is not `HashMap` iteration order.
-    matching.sort_by_key(|(key, _)| *key);
+    //
+    // #1183: honour `sort` when the request states it — the dataset read-back's
+    // time bounds are size-1 searches sorted on the time field, and the first
+    // hit must BE the extreme, the same invariant a doc-values sort gives the
+    // real server. A request without `sort` keeps the `_id` order.
+    let sort_spec: Option<(String, String)> = query
+        .get("sort")
+        .and_then(Value::as_array)
+        .and_then(|clauses| clauses.first())
+        .and_then(|clause| {
+            if let Some(field) = clause.as_str() {
+                return Some((field.to_owned(), "asc".to_owned()));
+            }
+            clause
+                .as_object()
+                .and_then(|object| object.iter().next())
+                .map(|(field, spec)| {
+                    (
+                        field.clone(),
+                        spec.get("order")
+                            .and_then(Value::as_str)
+                            .unwrap_or("asc")
+                            .to_owned(),
+                    )
+                })
+        });
+    match &sort_spec {
+        Some((field, order)) if order == "desc" => {
+            matching.sort_by(|(_, a), (_, b)| cmp_docs_by_field(b, a, field))
+        }
+        Some((field, _)) => matching.sort_by(|(_, a), (_, b)| cmp_docs_by_field(a, b, field)),
+        None => matching.sort_by_key(|(key, _)| *key),
+    }
     let total = matching.len();
     let from = query
         .get("from")
@@ -813,6 +867,20 @@ fn search_http(path: &str, body: &[u8], state: &Arc<Mutex<HttpState>>) -> Value 
         },
         "aggregations": {}
     })
+}
+
+/// Compare two docs on one field for the fake's `sort` support: numbers
+/// numerically, strings lexically, a missing value sorting first (the null
+/// ordering the real server gives an unmapped/absent field).
+fn cmp_docs_by_field(a: &Value, b: &Value, field: &str) -> std::cmp::Ordering {
+    let rank = |doc: &Value| match doc.get(field) {
+        Some(Value::Number(n)) => (1u8, n.as_f64().unwrap_or(0.0), String::new()),
+        Some(Value::String(s)) => (2u8, 0.0, s.clone()),
+        _ => (0u8, 0.0, String::new()),
+    };
+    rank(a)
+        .partial_cmp(&rank(b))
+        .unwrap_or(std::cmp::Ordering::Equal)
 }
 
 fn cfg(root: &Path, state_dir: &Path, url: &str, semantic: bool) -> IndexCfg {
@@ -1247,6 +1315,89 @@ fn no_semantic_generation_does_not_require_embedding_identity_endpoint() {
     assert_eq!(journal_events(state_dir.path(), "finish"), 1);
     assert_eq!(final_snapshot_count(state_dir.path()), 1);
     assert_eq!(endpoint.data_docs().len(), 1);
+}
+
+/// #1183: the finalize read-back must not carry `aggs`. A `min`/`max` agg on
+/// the dataset's time field has no columnar fast path under the sharded
+/// memtable, so a real server deep-clones every matching document into owned
+/// Values ("aggregation corpus materialisation", ~2KB a doc against
+/// `max_query_memory_mb`) — on the xerj-search rebuild one ~570k-record
+/// dataset estimated 1.1GB against the 512MB default, the server answered
+/// 429 circuit_breaking_exception, and the client retried for its full 600s
+/// budget before aborting: the multi-hour "finalize-catalog deadlock". The
+/// count now runs without aggs; the time bounds come from size-1 searches
+/// sorted on the time field, which sort from doc values and clone nothing.
+#[test]
+fn dataset_read_back_is_agg_free_and_bounds_time_by_sort() {
+    let _guard = HTTP_E2E_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _replay_guard = sync_executor::REPLAY_FAILPOINT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let corpus = tempfile::tempdir().unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    fs::write(
+        corpus.path().join("a.csv"),
+        "id,cloned_at\n1,2026-10-01T00:00:00.000Z\n2,2026-10-02T00:00:00.000Z\n3,2026-10-03T00:00:00.000Z\n",
+    )
+    .unwrap();
+    let endpoint = HttpEndpoint::start();
+    let config = cfg(corpus.path(), state_dir.path(), &endpoint.url, false);
+
+    let (code, _) = run_index_report(config).unwrap();
+    assert_eq!(code, 0);
+
+    // 1. No search this run issued carries an aggregation — the read-back's
+    //    count included.
+    let bodies = endpoint.search_bodies();
+    assert!(!bodies.is_empty());
+    for body in &bodies {
+        assert!(
+            body.get("aggs").is_none() && body.get("aggregations").is_none(),
+            "#1183: a search carried aggs: {body}"
+        );
+    }
+
+    // 2. The time bounds are the sorted size-1 searches: one ascending, one
+    //    descending, on the dataset's elected time field, under the dataset's
+    //    own ax_dataset filter.
+    let sorted: Vec<&Value> = bodies
+        .iter()
+        .filter(|body| body.pointer("/sort/0/cloned_at").is_some())
+        .collect();
+    assert_eq!(
+        sorted.len(),
+        2,
+        "one ascending and one descending bound query: {bodies:?}"
+    );
+    assert!(
+        sorted
+            .iter()
+            .any(|body| body.pointer("/sort/0/cloned_at/order") == Some(&json!("asc"))),
+        "ascending bound missing: {bodies:?}"
+    );
+    assert!(
+        sorted
+            .iter()
+            .any(|body| body.pointer("/sort/0/cloned_at/order") == Some(&json!("desc"))),
+        "descending bound missing: {bodies:?}"
+    );
+    for body in &sorted {
+        assert_eq!(body.get("size"), Some(&json!(1)), "size-1 query: {body}");
+        assert!(
+            body.pointer("/query/bool/filter").is_some(),
+            "bound query keeps the dataset filter: {body}"
+        );
+    }
+
+    // 3. The catalog document carries the corpus's TRUE bounds — the fake
+    //    honours `sort`, so the first hit is the extreme, exactly like the
+    //    doc-values sort on a real server.
+    let dataset = endpoint
+        .catalog_doc("ds:incremental-http:csv")
+        .expect("dataset catalog document must exist");
+    assert_eq!(dataset["time_field"], json!("cloned_at"));
+    assert_eq!(dataset["time_min"], json!("2026-10-01T00:00:00.000Z"));
+    assert_eq!(dataset["time_max"], json!("2026-10-03T00:00:00.000Z"));
 }
 
 #[test]
