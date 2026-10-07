@@ -1447,13 +1447,22 @@ impl Journal {
         operation_id: &str,
         state: crate::sync::SyncOperationState,
     ) -> Result<()> {
+        // This runs twice per replayed operation (Started, then Committed).
+        // The copy-on-write this used to do cloned the ENTIRE pending sync —
+        // desired manifest, every group, every operation — per state write,
+        // which on the 402,744-operation cve-records run was ~0.7 s of
+        // client CPU per file and a 5.7 GB client RSS (#1224). The durable
+        // journal line is the transaction boundary: validate the transition
+        // first (pure), append durably, and only then mutate the in-memory
+        // map. A crash between append and mutation loses nothing — the next
+        // open replays the journal, which now carries the event; a failed
+        // append returns before any mutation, same as the clone did.
         let pending = self
             .pending_sync
             .as_ref()
             .context("cannot record operation state without sync_begin")?;
         let tx_id = pending.tx_id.clone();
-        let mut candidate = pending.clone();
-        candidate.apply_operation_state(&tx_id, operation_id, state.clone())?;
+        pending.validate_operation_state(&tx_id, operation_id, &state)?;
         self.append_transaction(
             &serde_json::json!({
                 "kind": "sync_operation_state",
@@ -1463,7 +1472,9 @@ impl Journal {
             }),
             "sync_operation_state",
         )?;
-        self.pending_sync = Some(candidate);
+        if let Some(pending) = self.pending_sync.as_mut() {
+            pending.record_operation_state(operation_id, state);
+        }
         Ok(())
     }
 
