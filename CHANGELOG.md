@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`xerj corpus index` now proves the store answers a search before it says "searchable"** (issue
+  [#1183](https://github.com/xerj-org/xerj/issues/1183)) — a resume over an index left with a
+  dangling segment by a killed finalize printed `corpus 'xerj-search' searchable: 642 records`
+  and exited 0 while the store answered every `_search` — and the salvage path's own
+  `delete_by_query` — with `store_exception: Segment … not found`. `_count` is metadata-only and
+  returned 642 over that same store, so every verification built on counts certified a corpus
+  that could not be queried. Verification now has a third leg: one `size:0` `_search` over
+  exactly the glob `xerj code` reads (`{prefix}-*`), with the node's own reason surfaced when it
+  fails. In the build arm a build whose verification search fails is not verified — nothing is
+  switched, the existing index stays what `xerj code` serves, and the unsearchable build's own
+  indices are retired by exact name (an unsearchable index left under the namespace is what
+  poisoned the live one); the #367 salvage can no longer record a store that cannot be searched.
+  The update arm refuses to rewrite the ledger over a live corpus that cannot be searched, and
+  the legacy arm — the exact live failure — refuses to print any verdict at all, because one
+  unsearchable index anywhere under the wildcard makes "the corpus is queryable" untrue whatever
+  the counts said. The probe is a `size:0` search, which the server already classifies as
+  machine traffic in the audit log (#1109), so `xerj gain` still measures only the user's
+  queries. The finalize-catalog deadlock that produces the dangling segment (item 1 of #1183)
+  remains open, tracked in the same issue.
+
 ## [1.0.0-rc.86] - 2026-10-06
 
 ### Security
