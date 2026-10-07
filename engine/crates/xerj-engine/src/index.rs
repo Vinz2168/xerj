@@ -29003,6 +29003,9 @@ impl Index {
                             return None;
                         }
                     }
+                    // No doc-values column, no stats: per-row presence is
+                    // resolved from the stored slices in the walk below.
+                    ScoredFilterLeaf::SourceExists { .. } => {}
                 }
             }
         }
@@ -29298,6 +29301,11 @@ impl Index {
             }
         };
         let constant_plan: bool = !any_ghosts
+            // Source-backed `exists` leaves have no closed-form count —
+            // their per-segment total is only knowable row by row.
+            && !filters
+                .iter()
+                .any(|f| matches!(f, ScoredFilterLeaf::SourceExists { .. }))
             && match plan {
                 ScoredPlan::Filtered {
                     filter, must_not, ..
@@ -29553,6 +29561,15 @@ impl Index {
                             max: *max,
                             min_inc: *min_inc,
                             max_inc: *max_inc,
+                        });
+                    }
+                    ScoredFilterLeaf::SourceExists { field } => {
+                        // Cache-backed stored slices for this segment; the
+                        // `?` bails the whole columnar path (brute answers).
+                        let slices = self.stored_slices_for(meta.id.as_str(), meta.doc_count)?;
+                        fev.push(FilterEval::Source {
+                            field: field.clone(),
+                            slices,
                         });
                     }
                 }
@@ -51684,6 +51701,14 @@ enum FilterEval<'a> {
         min_inc: bool,
         max_inc: bool,
     },
+    /// `exists` on a column-less (text / semantic_text) field: per-row
+    /// presence from the segment's cached stored slices, using the SAME
+    /// `get_field_value` + `value_present` predicate as the brute scan.
+    /// Owned `Resident` so the eval outlives the segment iteration.
+    Source {
+        field: String,
+        slices: Resident<StoredSlices>,
+    },
 }
 impl FilterEval<'_> {
     #[inline]
@@ -51712,6 +51737,24 @@ impl FilterEval<'_> {
                 let v = f64::from_bits(col.data[row as usize] as u64);
                 (if *min_inc { v >= *min } else { v > *min })
                     && (if *max_inc { v <= *max } else { v < *max })
+            }
+            FilterEval::Source { field, slices } => {
+                // The brute path's exact `exists` arm (source-scanned):
+                // value present and non-null.  Reached only on rows that
+                // passed the cheaper conjuncts ahead of this leaf in the
+                // same row walk, so a `term` + `exists` conjunction pays
+                // one stored-slice parse per TERM survivor, not per row.
+                let Some(&(start, end)) = slices.offsets.get(row as usize) else {
+                    return false;
+                };
+                let Some(slice) = slices.bytes.get(start as usize..end as usize) else {
+                    return false;
+                };
+                let Ok(doc) = serde_json::from_slice::<Value>(slice) else {
+                    return false;
+                };
+                let source = doc.get("_source").unwrap_or(&doc);
+                get_field_value(source, field).is_some_and(|v| value_present(&v))
             }
         }
     }
@@ -51754,6 +51797,13 @@ impl FilterEval<'_> {
                     }
                 });
                 (hi - lo) as u64
+            }
+            // No closed form — presence is only knowable per row from the
+            // stored source.  The `constant_plan` gate excludes any plan
+            // carrying a SourceExists leaf, so this arm is unreachable
+            // from the lane that calls `count()`; a plain walk tallies.
+            FilterEval::Source { .. } => {
+                unreachable!("source-backed exists has no closed-form count")
             }
         }
     }
@@ -51970,6 +52020,22 @@ enum ScoredFilterLeaf {
         min_inc: bool,
         max_inc: bool,
     },
+    /// `exists` on a field with NO doc-values column (text /
+    /// semantic_text): per-row presence is only observable in the stored
+    /// source.  Evaluated from the segment's cached stored slices — the
+    /// SAME `get_field_value` + `value_present` predicate the brute scan
+    /// applies, so the hit set cannot drift — but only reached on rows
+    /// that already passed every cheaper conjunct in the same loop (each
+    /// row walk short-circuits in fev order), which is what turns
+    /// `bool.filter: [term, exists]` from a whole-index source scan into
+    /// a term-column walk plus a handful of source parses.  #1183's
+    /// finalize-verify query (`term: ax_file` + `exists: <semantic
+    /// field>`) measured took=9638ms / 0 hits on a 91k-doc segment
+    /// because `exists` in a bool forced the brute path; this leaf makes
+    /// it columnar.  Keyword/numeric `exists` does NOT come here — those
+    /// lower to the empty-prefix dictionary range / unbounded window
+    /// above and never touch the source.
+    SourceExists { field: String },
 }
 
 /// The exact query shape the scored-family columnar executor serves.
@@ -52371,6 +52437,42 @@ fn scored_fast_plan(
                     max,
                     min_inc,
                     max_inc,
+                })
+            }
+            // `exists` in FILTER context — the same lowering the
+            // standalone root shapes use (empty-prefix dictionary range
+            // for keyword, unbounded window for numeric/boolean; null
+            // rows are excluded by `FilterEval`'s null check, matching
+            // `exists` semantics).  Fields with no column (text /
+            // semantic_text) become the source-backed leaf: exact via
+            // the same stored-source predicate the brute path applies,
+            // and cheap whenever a column-backed conjunct runs first in
+            // the same filter list.  Meta fields keep the brute path —
+            // their `exists` semantics (`_id`/`_index`/… always true,
+            // `_routing` from the doc envelope) are not source-derived.
+            QueryNode::Exists { field } if fs.kw.contains(field) => {
+                Some(ScoredFilterLeaf::KeywordPrefix {
+                    field: field.clone(),
+                    prefix: String::new(),
+                })
+            }
+            QueryNode::Exists { field } if fs.num.contains(field) || fs.boolean.contains(field) => {
+                Some(ScoredFilterLeaf::NumericWindow {
+                    field: field.clone(),
+                    min: f64::NEG_INFINITY,
+                    max: f64::INFINITY,
+                    min_inc: true,
+                    max_inc: true,
+                })
+            }
+            QueryNode::Exists { field }
+                if !matches!(
+                    field.as_str(),
+                    "_id" | "_index" | "_seq_no" | "_version" | "_primary_term" | "_routing"
+                ) =>
+            {
+                Some(ScoredFilterLeaf::SourceExists {
+                    field: field.clone(),
                 })
             }
             _ => None,

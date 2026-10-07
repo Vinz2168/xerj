@@ -659,7 +659,14 @@ impl<'a> EsSyncBackend<'a> {
                 &serde_json::json!({
                     "size": 0,
                     "track_total_hits": true,
-                    "query": {"bool": {"must": [
+                    // Filter context, term first: the engine's columnar
+                    // filter executor checks leaves in order, so the
+                    // ax_file term narrows the walk before the `exists`
+                    // leaf parses any stored source. In scoring context
+                    // (`must`) this query source-scanned every row —
+                    // 9.6s per call on a 91k-doc segment, one call per
+                    // changed group at finalize (#1183).
+                    "query": {"bool": {"filter": [
                         {"term": {"ax_file": &group.content_id}},
                         {"exists": {"field": field}}
                     ]}}
