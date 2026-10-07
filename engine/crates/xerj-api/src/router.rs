@@ -637,6 +637,8 @@ pub fn build_es_compat_router(state: AppState) -> Router {
         )
         // ── More _cat APIs ──────────────────────────────────────────────────
         .route("/_cat/recovery", get(es_compat::cat_recovery))
+        // #1202: the whole-cluster form ES also serves (every index's rows).
+        .route("/_cat/segments", get(es_compat::cat_segments_all))
         .route("/_cat/segments/:index", get(es_compat::cat_segments))
         .route("/_cat/thread_pool", get(es_compat::cat_thread_pool))
         .route("/_cat/fielddata", get(es_compat::cat_fielddata))

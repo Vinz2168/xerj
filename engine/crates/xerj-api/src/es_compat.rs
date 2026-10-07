@@ -704,6 +704,25 @@ pub struct CatFormatParams {
     pub v: Option<String>,
     #[serde(default)]
     pub format: Option<String>,
+    /// #1201: `h=a,b` — column selection/order (`*` = all).
+    #[serde(default)]
+    pub h: Option<String>,
+    /// #1201: `bytes=b|k|kb|…` — re-render size columns in that unit.
+    #[serde(default)]
+    pub bytes: Option<String>,
+}
+
+impl CatFormatParams {
+    /// Resolve into the shared renderer's params (validating `bytes=` and
+    /// `v=`, which are honoured-or-refused, never ignored).
+    pub fn cat_params(&self) -> Result<crate::cat::CatParams, ApiError> {
+        crate::cat::CatParams::resolve(
+            self.v.as_deref(),
+            self.format.as_deref(),
+            self.h.as_deref(),
+            self.bytes.as_deref(),
+        )
+    }
 }
 
 pub async fn cat_indices(
@@ -793,6 +812,7 @@ async fn cat_indices_inner(
             info.name.clone(),
             stable_index_uuid(&info.name),
             info.doc_count,
+            size,
             human_bytes(size),
         ));
     }
@@ -822,65 +842,59 @@ async fn cat_indices_inner(
         .map(|f| (f.name.clone(), stable_index_uuid(&f.name)))
         .collect();
 
-    if params.format.as_deref() == Some("json") {
-        let mut arr: Vec<Value> = rows
-            .iter()
-            .map(|(name, uuid, doc_count, hsize)| {
-                json!({
-                    "health": "green",
-                    "status": "open",
-                    "index": name,
-                    "uuid": uuid,
-                    "pri": "1",
-                    "rep": "0",
-                    "docs.count": doc_count.to_string(),
-                    "docs.deleted": "0",
-                    "store.size": hsize,
-                    "pri.store.size": hsize,
-                })
-            })
-            .collect();
-        arr.extend(failed_rows.iter().map(|(name, uuid)| {
-            json!({
-                "health": "red",
-                "status": "open",
-                "index": name,
-                "uuid": uuid,
-                "pri": "1",
-                "rep": "0",
-                "docs.count": "0",
-                "docs.deleted": "0",
-                "store.size": "0b",
-                "pri.store.size": "0b",
-            })
-        }));
-        return Json(arr).into_response();
-    }
-
-    let mut lines: Vec<String> = rows
-        .iter()
-        .map(|(name, uuid, doc_count, hsize)| {
-            format!("green open {name} {uuid} 1 0 {doc_count} 0 {hsize} {hsize} {hsize}")
-        })
-        .collect();
-    for (name, uuid) in &failed_rows {
-        lines.push(format!("red open {name} {uuid} 1 0 0 0 0b 0b 0b"));
-    }
-    // ES returns an empty body (not a bare newline) when nothing matches.
-    let body = if lines.is_empty() {
-        String::new()
-    } else {
-        lines.join("\n") + "\n"
+    // #1201: the shared `_cat` renderer — `h`, `v`, `bytes` and `format=json`
+    // all behave (previously every call returned the full row, no header,
+    // sizes always human-readable). Columns are ES 8.13's defaults; text rows
+    // used to carry an extra trailing dataset.size token the JSON form never
+    // had — both forms now agree on the same ten.
+    let cat_params = match params.cat_params() {
+        Ok(p) => p,
+        Err(e) => return e.into_response(),
     };
-    (
-        StatusCode::OK,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/plain; charset=utf-8",
-        )],
-        body,
-    )
-        .into_response()
+    let mut table = crate::cat::CatTable {
+        columns: vec![
+            "health",
+            "status",
+            "index",
+            "uuid",
+            "pri",
+            "rep",
+            "docs.count",
+            "docs.deleted",
+            "store.size",
+            "pri.store.size",
+        ],
+        rows: Vec::new(),
+    };
+    for (name, uuid, doc_count, size, hsize) in &rows {
+        table.rows.push(vec![
+            crate::cat::CatCell::plain("green"),
+            crate::cat::CatCell::plain("open"),
+            crate::cat::CatCell::plain(name.clone()),
+            crate::cat::CatCell::plain(uuid.clone()),
+            crate::cat::CatCell::plain("1"),
+            crate::cat::CatCell::plain("0"),
+            crate::cat::CatCell::plain(doc_count.to_string()),
+            crate::cat::CatCell::plain("0"),
+            crate::cat::CatCell::size(*size, hsize.clone()),
+            crate::cat::CatCell::size(*size, hsize.clone()),
+        ]);
+    }
+    for (name, uuid) in &failed_rows {
+        table.rows.push(vec![
+            crate::cat::CatCell::plain("red"),
+            crate::cat::CatCell::plain("open"),
+            crate::cat::CatCell::plain(name.clone()),
+            crate::cat::CatCell::plain(uuid.clone()),
+            crate::cat::CatCell::plain("1"),
+            crate::cat::CatCell::plain("0"),
+            crate::cat::CatCell::plain("0"),
+            crate::cat::CatCell::plain("0"),
+            crate::cat::CatCell::size(0, "0b".into()),
+            crate::cat::CatCell::size(0, "0b".into()),
+        ]);
+    }
+    table.render(&cat_params)
 }
 
 /// Format a raw byte count the way ES `_cat` columns do (`ByteSizeValue`):
@@ -33134,78 +33148,93 @@ pub async fn cat_segments(
     Path(index): Path<String>,
     Query(params): Query<CatFormatParams>,
 ) -> impl IntoResponse {
-    // index  shard  prirep  ip           segment  generation  docs.count  docs.deleted  size  size.memory  committed  searchable  version  compound
-    let node = state.engine.node_id.as_str();
-    let mut rows: Vec<(String, u64, u64)> = Vec::new();
+    cat_segments_inner(state, &index, params).await
+}
+
+/// `GET /_cat/segments` — the whole-cluster form ES also serves.
+pub async fn cat_segments_all(
+    State(state): State<AppState>,
+    Query(params): Query<CatFormatParams>,
+) -> impl IntoResponse {
+    cat_segments_inner(state, "*", params).await
+}
+
+async fn cat_segments_inner(
+    state: AppState,
+    index: &str,
+    params: CatFormatParams,
+) -> axum::response::Response {
+    // index  shard  prirep  ip  segment  generation  docs.count  docs.deleted
+    //        size  size.memory  committed  searchable  version  compound
+    //
+    // #1202: one row per LIVE segment from the durable snapshot. The
+    // predecessor fabricated a single `_0` row per index ("one logical
+    // segment") — an index the node log showed merging 13 segments listed
+    // "1 segment, 0 deleted" (the #1186 investigation), pointing the
+    // operator away from the cause. Real per-segment values come from
+    // `Index::segment_rows`: id, docs (physical, tombstones excluded by
+    // construction),
+    // deleted (the segment's own ZTB2 tombstone section) and the
+    // segment's on-disk bytes. `generation` stays 0: our segment ids are
+    // UUIDs, not ES's monotonically numbered `_N` names, so there is no
+    // generation ordering to report, and inventing one would be the same
+    // fabrication this fix removes. `version` is the xerj build — there is
+    // no Lucene here and no Lucene version to fake.
+    let cat_params = match params.cat_params() {
+        Ok(p) => p,
+        Err(e) => return e.into_response(),
+    };
     // Resolve the selector through the shared resolver (#451): an alias expands
     // to every member (`get_index` collapsed it to `aliased.first()`, so an
     // alias listed a single row under the alias name), and `_all` / `*` / glob /
     // comma forms resolve uniformly. A cat endpoint lists what exists rather
     // than 404ing, so an unknown selector is an empty listing.
-    let members = resolve_selector_with_filters(&state, &index)
+    let members = resolve_selector_with_filters(&state, index)
         .await
         .map(|(m, _filters)| m)
         .unwrap_or_default();
-    for (idx_name, idx) in &members {
-        let stats = idx.stats().await;
-        // Real on-disk size: recursive byte sum of the index's data_dir.
-        let size = dir_size_bytes(idx.data_dir());
-        // Represent the index's durable data as one logical segment.
-        // generation 0; committed + searchable are true (data is queryable
-        // and persisted). We do NOT fabricate a Lucene version string —
-        // xerj has no Lucene segments — so we report the xerj build version.
-        let _ = node; // segments output has no node column in ES; kept for parity
-        rows.push((idx_name.clone(), stats.doc_count, size));
-    }
 
-    if params.format.as_deref() == Some("json") {
-        let arr: Vec<Value> = rows
-            .iter()
-            .map(|(idx_name, doc_count, size)| {
-                json!({
-                    "index": idx_name,
-                    "shard": "0",
-                    "prirep": "p",
-                    "ip": "127.0.0.1",
-                    "segment": "_0",
-                    "generation": "0",
-                    "docs.count": doc_count.to_string(),
-                    "docs.deleted": "0",
-                    "size": format!("{size}b"),
-                    "size.memory": "0",
-                    "committed": "true",
-                    "searchable": "true",
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "compound": "true",
-                })
-            })
-            .collect();
-        return Json(arr).into_response();
-    }
-
-    let lines: Vec<String> = rows
-        .iter()
-        .map(|(idx_name, doc_count, size)| {
-            format!(
-                "{idx_name} 0 p 127.0.0.1 _0 0 {doc_count} 0 {size}b 0 true true {} true",
-                env!("CARGO_PKG_VERSION"),
-            )
-        })
-        .collect();
-    let body = if lines.is_empty() {
-        String::new()
-    } else {
-        lines.join("\n") + "\n"
+    let mut table = crate::cat::CatTable {
+        columns: vec![
+            "index",
+            "shard",
+            "prirep",
+            "ip",
+            "segment",
+            "generation",
+            "docs.count",
+            "docs.deleted",
+            "size",
+            "size.memory",
+            "committed",
+            "searchable",
+            "version",
+            "compound",
+        ],
+        rows: Vec::new(),
     };
-    (
-        StatusCode::OK,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/plain; charset=utf-8",
-        )],
-        body,
-    )
-        .into_response()
+    let node_ip = "127.0.0.1";
+    for (idx_name, idx) in &members {
+        for seg in idx.segment_rows() {
+            table.rows.push(vec![
+                crate::cat::CatCell::plain(idx_name.clone()),
+                crate::cat::CatCell::plain("0"),
+                crate::cat::CatCell::plain("p"),
+                crate::cat::CatCell::plain(node_ip),
+                crate::cat::CatCell::plain(seg.id),
+                crate::cat::CatCell::plain("0"),
+                crate::cat::CatCell::plain(seg.doc_count.to_string()),
+                crate::cat::CatCell::plain(seg.deleted_doc_count.to_string()),
+                crate::cat::CatCell::size(seg.size_bytes, human_bytes(seg.size_bytes)),
+                crate::cat::CatCell::plain("0"),
+                crate::cat::CatCell::plain("true"),
+                crate::cat::CatCell::plain("true"),
+                crate::cat::CatCell::plain(env!("CARGO_PKG_VERSION")),
+                crate::cat::CatCell::plain("true"),
+            ]);
+        }
+    }
+    table.render(&cat_params)
 }
 
 pub async fn cat_thread_pool(
