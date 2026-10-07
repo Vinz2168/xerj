@@ -88,7 +88,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the sealed projection's document count, bounded at three attempts, and returns the LAST
   observation when all fall short so `validate_observed` still produces its loud, precise mismatch.
   The #971 prior-run stray sweep is deliberately not re-walked: it is a subset check, an unflagged
-  truncated page can only under-report strays, and a false pass is impossible.
+  truncated page can only under-report strays, and a false pass is impossible. The engine-side truncation itself
+  is fixed in this release by PR
+  [#1218](https://github.com/xerj-org/xerj/pull/1218);
+  [#1212](https://github.com/xerj-org/xerj/issues/1212) stays open until the
+  standing xerj-search rebuild verifies against the released fix.
 - **Scans no longer drop their captured hits when a merge or flush publishes mid-walk** (part of issue
   [#1212](https://github.com/xerj-org/xerj/issues/1212), PR
   [#1218](https://github.com/xerj-org/xerj/pull/1218)) — the #1013 capture bracket validates a
