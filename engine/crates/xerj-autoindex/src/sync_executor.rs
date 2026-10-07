@@ -407,6 +407,117 @@ fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+/// Per-replay id→position caches for the manifests and snapshot a replay
+/// walks (#1224).
+///
+/// `apply_shared` resolves every operation's group in the base and desired
+/// manifests and its content in the snapshot, and the linear `iter().find()`
+/// each resolution used is quadratic over a corpus run — the 402,744-operation
+/// cve-records build paid milliseconds of scanning per file. Built once per
+/// [`EsSyncBackend::replay_operations`] call from that call's arguments, so
+/// inside a replay every hit is exact. A lookup outside a replay (or against
+/// differently-shaped data than the cache was built from — guarded by the
+/// recorded lengths) falls back to the scan the cache replaced, and every hit
+/// is verified against the slice it answers from, so a stale cache can never
+/// return a group the scan would not have.
+#[derive(Debug, Clone, Default)]
+struct ReplayLookup {
+    base_len: usize,
+    base: std::collections::HashMap<String, usize>,
+    desired_len: usize,
+    desired: std::collections::HashMap<String, usize>,
+    files_len: usize,
+    files: std::collections::HashMap<String, usize>,
+}
+
+impl ReplayLookup {
+    fn build(
+        base: &crate::sync::CommittedManifest,
+        desired: &crate::sync::GenerationManifest,
+        snapshot: &SourceSnapshot,
+    ) -> Self {
+        Self {
+            base_len: base.groups.len(),
+            base: base
+                .groups
+                .iter()
+                .enumerate()
+                .map(|(position, group)| (group.group_id.clone(), position))
+                .collect(),
+            desired_len: desired.groups.len(),
+            desired: desired
+                .groups
+                .iter()
+                .enumerate()
+                .map(|(position, group)| (group.group_id.clone(), position))
+                .collect(),
+            files_len: snapshot.files.len(),
+            files: snapshot
+                .files
+                .iter()
+                .enumerate()
+                .map(|(position, file)| (file.content_id.clone(), position))
+                .collect(),
+        }
+    }
+
+    /// `groups` by id through a cache side, falling back to the scan when the
+    /// cache does not describe this exact slice.
+    fn group<'m, G>(
+        side: &std::collections::HashMap<String, usize>,
+        cached_len: usize,
+        groups: &'m [G],
+        group_id: &str,
+        id_of: impl Fn(&G) -> &str,
+    ) -> Option<&'m G> {
+        if cached_len != groups.len() {
+            return groups.iter().find(|group| id_of(group) == group_id);
+        }
+        side.get(group_id)
+            .copied()
+            .and_then(|position| groups.get(position))
+            .filter(|group| id_of(group) == group_id)
+    }
+
+    fn base_group<'m>(
+        &self,
+        base: &'m crate::sync::CommittedManifest,
+        group_id: &str,
+    ) -> Option<&'m crate::sync::ManifestGroup> {
+        Self::group(&self.base, self.base_len, &base.groups, group_id, |group| {
+            &group.group_id
+        })
+    }
+
+    fn desired_group<'m>(
+        &self,
+        desired: &'m crate::sync::GenerationManifest,
+        group_id: &str,
+    ) -> Option<&'m crate::sync::ManifestGroup> {
+        Self::group(
+            &self.desired,
+            self.desired_len,
+            &desired.groups,
+            group_id,
+            |group| &group.group_id,
+        )
+    }
+
+    fn file<'m>(&self, snapshot: &'m SourceSnapshot, content_id: &str) -> Option<&'m SnapshotFile> {
+        if self.files_len != snapshot.files.len() {
+            return snapshot
+                .files
+                .iter()
+                .find(|file| file.content_id == content_id);
+        }
+        self.files
+            .get(content_id)
+            .copied()
+            .and_then(|position| snapshot.files.get(position))
+            .filter(|file| file.content_id == content_id)
+    }
+}
+
 /// Production ES-compatible operation backend for graph-disabled generations.
 ///
 /// Upserts stream sealed index actions after removing both replaced and
@@ -418,6 +529,10 @@ pub struct EsSyncBackend<'a> {
     es: &'a crate::esclient::Es,
     state_dir: &'a Path,
     bulk_bytes: usize,
+    /// #1224: per-replay lookup caches; empty outside
+    /// [`Self::replay_operations`], where every lookup falls back to the
+    /// linear scan this field exists to avoid. See [`ReplayLookup`].
+    lookup: ReplayLookup,
     /// #755: the run's progress surface, so a legacy-catalog mapping warning
     /// reaches the operator through the surface that owns stderr (#241) rather
     /// than a bare `eprintln!` that `--progress none` cannot silence and
@@ -451,6 +566,7 @@ impl<'a> EsSyncBackend<'a> {
             es,
             state_dir,
             bulk_bytes: bulk_bytes.max(64 * 1024),
+            lookup: ReplayLookup::default(),
             pr,
             installed_index_identity: None,
             in_flight: None,
@@ -545,14 +661,8 @@ impl<'a> EsSyncBackend<'a> {
                 .is_some_and(|execution| !execution.graph_enabled),
             "production incremental graph reconciliation is not enabled yet"
         );
-        let old = base
-            .groups
-            .iter()
-            .find(|group| group.group_id == operation.group_id);
-        let new = desired
-            .groups
-            .iter()
-            .find(|group| group.group_id == operation.group_id);
+        let old = self.lookup.base_group(base, &operation.group_id);
+        let new = self.lookup.desired_group(desired, &operation.group_id);
         match operation.kind {
             crate::sync::SyncOperationKind::Delete => self.delete_group(
                 old.context("delete operation has no committed group")?,
@@ -578,7 +688,15 @@ impl<'a> EsSyncBackend<'a> {
     }
 
     fn replay_prepared(&self, snapshot: &SourceSnapshot, content_id: &str) -> Result<()> {
-        let prepared = prepared_for(snapshot, content_id)?;
+        // Cache-first resolution of the sealed artifact (#1224): a linear
+        // scan of the snapshot's files per upsert is quadratic over a corpus
+        // run. Falls back to `prepared_for`'s scan when no replay cache
+        // describes this snapshot.
+        let prepared = self
+            .lookup
+            .file(snapshot, content_id)
+            .and_then(|file| file.prepared.as_ref())
+            .with_context(|| format!("content {content_id} has no sealed prepared artifact"))?;
         let snapshot_dir = self.state_dir.join("sync-snapshots").join(&snapshot.tx_id);
         let file = File::open(snapshot_dir.join(&prepared.relative_ndjson))?;
         stream_ndjson_pairs(BufReader::new(file), self.bulk_bytes, |body| {
@@ -592,10 +710,9 @@ impl<'a> EsSyncBackend<'a> {
         desired_group: &ManifestGroup,
     ) -> Result<()> {
         let base_snapshot = open_committed_snapshot(self.state_dir, base)?;
-        let old_group = base
-            .groups
-            .iter()
-            .find(|group| group.group_id == desired_group.group_id)
+        let old_group = self
+            .lookup
+            .base_group(base, &desired_group.group_id)
             .context("metadata operation has no committed group")?;
         let prepared = prepared_for(&base_snapshot, &old_group.content_id)?;
         let snapshot_dir = self
@@ -1023,6 +1140,9 @@ impl SyncOperationBackend for EsSyncBackend<'_> {
         snapshot: &SourceSnapshot,
         journal: &mut Journal,
     ) -> Result<()> {
+        // #1224: resolve per-operation groups and prepared artifacts through
+        // id indexes built once here, not a linear scan per operation.
+        self.lookup = ReplayLookup::build(base, desired, snapshot);
         let width = self.replay_workers;
         if width <= 1 || items.len() <= 1 {
             return replay_serial(self, items, base, desired, snapshot, journal);
