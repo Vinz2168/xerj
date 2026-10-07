@@ -4936,11 +4936,11 @@ pub(crate) fn java_to_strftime(pattern: &str) -> String {
 /// Format a Unix epoch in milliseconds as the ISO-8601 UTC string with
 /// millisecond precision, matching Elasticsearch's default date format
 /// (`"yyyy-MM-dd'T'HH:mm:ss.SSSZ"` → `"2016-05-03T00:00:00.000Z"`).
-pub(crate) fn epoch_ms_to_iso8601_utc(ms: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
-        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-        .unwrap_or_default()
-}
+///
+/// Moved to `xerj_common::schema` (one definition: the autoindex catalog
+/// read-back renders raw-millis date fields with the same format, #1183) and
+/// re-exported here so this module's call sites keep the bare name.
+pub(crate) use xerj_common::schema::epoch_ms_to_iso8601_utc;
 
 /// Count fractional-second digits in an ISO-8601 string
 /// (e.g. "2021-08-12T00:00:00.000000000+02:00" → 9).
