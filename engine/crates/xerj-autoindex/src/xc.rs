@@ -1438,13 +1438,54 @@ fn corpus_index_flow(
     let (old_indices, _listed_ok) = corpus_indices(node, name, root);
     if fresh {
         mode = "build";
-    } else if old_build.is_some()
-        && old_index_prefix.is_some()
-        && old_state_dir
+    } else if old_build.is_some() {
+        // A recorded build pins this corpus to one url, one prefix and one
+        // state dir. When any of those does not hold, the run CANNOT resume
+        // that build — and must not silently fall through to legacy mode:
+        // without --state-dir, autoindex opens its default hash-of-root
+        // journal, which can hold a stale pending sync from a retired
+        // attempt under the legacy prefix and start re-applying it beside
+        // the recorded build (#1214). Refuse, naming the recorded values.
+        let prefix_recorded = old_index_prefix.is_some();
+        let state_dir_usable = old_state_dir
             .as_deref()
-            .is_some_and(|d| Path::new(d).is_dir())
-        && old_url.as_deref() == Some(url)
-    {
+            .is_some_and(|d| Path::new(d).is_dir());
+        let url_matches = old_url.as_deref() == Some(url);
+        if !prefix_recorded || !state_dir_usable || !url_matches {
+            let build = old_build.as_deref().unwrap_or("?");
+            eprintln!(
+                "xerj corpus index: state/ records build {build} of '{name}', but this run \
+                 cannot resume it:"
+            );
+            if !url_matches {
+                eprintln!(
+                    "xerj corpus index:   recorded url is {} , this run resolved {url}",
+                    old_url.as_deref().unwrap_or("(none)")
+                );
+            }
+            if !state_dir_usable {
+                eprintln!(
+                    "xerj corpus index:   recorded state dir {} is not a usable directory",
+                    old_state_dir.as_deref().unwrap_or("(none)")
+                );
+            }
+            if !prefix_recorded {
+                eprintln!(
+                    "xerj corpus index:   recorded state has no index prefix for build {build}"
+                );
+            }
+            eprintln!(
+                "xerj corpus index: refusing to continue in legacy mode — that would open the \
+                 default state dir for this corpus, which may hold an abandoned generation \
+                 (#1214)."
+            );
+            eprintln!(
+                "xerj corpus index: resume the recorded build with the matching --url (and its \
+                 state dir in place), or build a verified replacement beside it with:"
+            );
+            eprintln!("xerj corpus index:   xerj corpus index {name} --fresh");
+            return 2;
+        }
         let live = count_under(node, old_index_prefix.as_deref().unwrap_or(""));
         match live {
             Some(n) if n > 0 => mode = "update",
@@ -2240,8 +2281,22 @@ mod tests {
         name: &str,
         fresh: bool,
     ) -> i32 {
+        self::run_flow_url(node, auto, clock, root, name, fresh, "http://x")
+    }
+
+    /// [`run_flow`] with the URL the caller resolved — the recorded state's
+    /// URL is "http://x", so anything else models the #1214 mismatch.
+    fn run_flow_url(
+        node: &FakeNode,
+        auto: &FakeAuto<'_>,
+        clock: &dyn Fn() -> i64,
+        root: &Path,
+        name: &str,
+        fresh: bool,
+        url: &str,
+    ) -> i32 {
         with_fast_count_retries(|| {
-            corpus_index_flow(node, &auto.runner(), clock, root, "http://x", name, fresh)
+            corpus_index_flow(node, &auto.runner(), clock, root, url, name, fresh)
         })
     }
 
@@ -2453,6 +2508,63 @@ mod tests {
         let st = state::load_state(&root, "kv").unwrap();
         assert_eq!(st.index_prefix.as_deref(), Some(old_prefix.as_str()));
         assert_eq!(st.salvaged, Some(false));
+    }
+
+    // ── #1214: a recorded build refuses a run it cannot resume ────────────
+    //
+    // The live failure: `xerj corpus index xerj-search` with no --url
+    // resolved http://localhost:9200 against a state recording
+    // http://127.0.0.1:9200. The update conjunct failed, the flow fell
+    // through to legacy mode, and without --state-dir autoindex opened its
+    // default hash-of-root journal — a stale pending sync from a retired
+    // attempt — and began re-applying 46,308 operations into the legacy
+    // namespace beside the recorded build. A recorded build pins url,
+    // prefix and state dir; a run that cannot present all three must stop,
+    // not switch journals.
+
+    #[test]
+    fn a_url_mismatch_against_a_recorded_build_refuses_instead_of_running_legacy() {
+        let root = corpus_root("kv");
+        let state_dir = root.join("autoindex-state/kv/b1");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let old_prefix = record_build(&root, "kv", "b1", state_dir.to_str());
+        let node = FakeNode::new();
+        node.indices.borrow_mut().push(format!("{old_prefix}-000"));
+        node.seed_count(&format!("{old_prefix}-*"), Count::Number(500));
+
+        let auto = FakeAuto::ok(&node);
+        let rc = self::run_flow_url(&node, &auto, &|| T0, &root, "kv", false, "http://elsewhere");
+
+        assert_eq!(rc, 2, "a recorded build under another URL is a refusal");
+        assert!(
+            auto.calls.borrow().is_empty(),
+            "no autoindex invocation may run from the refusal path"
+        );
+        assert!(node.ops.borrow().iter().all(|o| !o.starts_with("delete:")));
+        let st = state::load_state(&root, "kv").unwrap();
+        assert_eq!(
+            st.index_prefix.as_deref(),
+            Some(old_prefix.as_str()),
+            "the recorded build stays recorded"
+        );
+    }
+
+    #[test]
+    fn a_missing_recorded_state_dir_refuses_instead_of_running_legacy() {
+        let root = corpus_root("kv");
+        // Recorded, but never created on disk.
+        let state_dir = root.join("autoindex-state/kv/b1");
+        let old_prefix = record_build(&root, "kv", "b1", state_dir.to_str());
+        let node = FakeNode::new();
+        node.indices.borrow_mut().push(format!("{old_prefix}-000"));
+        node.seed_count(&format!("{old_prefix}-*"), Count::Number(500));
+
+        let auto = FakeAuto::ok(&node);
+        let rc = run_flow(&node, &auto, &|| T0, &root, "kv", false);
+
+        assert_eq!(rc, 2, "a recorded build without its state dir is a refusal");
+        assert!(auto.calls.borrow().is_empty());
+        assert!(node.ops.borrow().iter().all(|o| !o.starts_with("delete:")));
     }
 
     // ── #1183: "searchable" is a claim about queries, not counts ───────────
