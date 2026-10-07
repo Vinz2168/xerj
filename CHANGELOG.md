@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`xerj autoindex --code-analyzer standard|code`** (issue
+  [#1198](https://github.com/xerj-org/xerj/issues/1198)) — `code` declares the engine's built-in
+  identifier-aware analyzer (standard tokenizer + word-delimiter + lowercase: `snake_case`,
+  `camelCase` and dotted identifiers gain their sub-words, the original token is kept) on newly
+  created datasets that hold at least one source file, so a query that says "connection pool"
+  reaches `get_connection_pool` through BM25. Default `standard` keeps today's election
+  unchanged. With `code` elected the #1059 stemmer defers for that dataset. It rides the #1059
+  create-body path: committed `index_identity` digests do not move and existing indexes keep
+  their analyzer. Measured on SWE-bench Lite file localization: acc@5 +0.11 [+0.03, +0.19] on a
+  pre-registered held-out sample; cost ~15% index size and ~2.4× text-analysis time.
 - **`_cat/indices` and `_cat/segments` accept `h`, `v` and `bytes`** (issue
   [#1201](https://github.com/xerj-org/xerj/issues/1201), PR
   [#1208](https://github.com/xerj-org/xerj/pull/1208)) — all three output parameters were

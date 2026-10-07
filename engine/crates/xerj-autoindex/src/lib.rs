@@ -2945,6 +2945,7 @@ mod phase_a_grouping_tests {
             max_file_gb: 2,
             sample: 500,
             no_semantic: false,
+            code_analyzer: Default::default(),
             brain: None,
             no_graph: true,
             // The gate is switched off in these fixtures on purpose: they assert
@@ -2965,6 +2966,10 @@ mod phase_a_grouping_tests {
     }
 
     fn plan_for(root: &Path) -> Plan {
+        plan_for_cfg(root, &cfg_for(root))
+    }
+
+    fn plan_for_cfg(root: &Path, cfg: &IndexCfg) -> Plan {
         let files = walk::walk(root, false).unwrap();
         let keys: Vec<String> = files
             .iter()
@@ -2984,16 +2989,78 @@ mod phase_a_grouping_tests {
             meter: &meter,
             tally: &ScanTally::default(),
         };
-        build_phase_a(
-            root,
-            &files,
-            &keys,
-            &digests,
-            Vec::new(),
-            &ctx,
-            &cfg_for(root),
+        build_phase_a(root, &files, &keys, &digests, Vec::new(), &ctx, cfg).plan
+    }
+
+    /// #1198 end to end through the real planner: `--code-analyzer code` puts
+    /// `code` on the document dataset that holds source (README included —
+    /// code and prose share the per-scope dataset), while the default leaves
+    /// today's election in place.
+    #[test]
+    fn code_analyzer_code_elects_code_on_a_dataset_holding_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("server.c"), CODE).unwrap();
+        std::fs::write(root.join("README.md"), PROSE).unwrap();
+
+        let mut cfg = cfg_for(root);
+        cfg.code_analyzer = infer::CodeAnalyzer::Code;
+        let with_flag = plan_for_cfg(root, &cfg);
+        let analyzers: Vec<_> = with_flag
+            .datasets
+            .iter()
+            .map(|d| d.text_analyzer.as_deref())
+            .collect();
+        assert_eq!(
+            analyzers,
+            vec![Some(infer::CODE_TEXT_ANALYZER)],
+            "{:?}",
+            with_flag.datasets
+        );
+
+        let default = plan_for(root);
+        assert!(
+            default
+                .datasets
+                .iter()
+                .all(|d| d.text_analyzer.as_deref() != Some(infer::CODE_TEXT_ANALYZER)),
+            "the default must not elect `code`: {:?}",
+            default.datasets
+        );
+    }
+
+    /// #1198: a folder with no file the sniffer routes to the code extractor
+    /// never gets `code`, flag or not — the dataset is labelled
+    /// `Family::Code` regardless of content, so the election must look at the
+    /// members' own families.
+    #[test]
+    fn code_analyzer_code_leaves_a_prose_only_dataset_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("README.md"), PROSE).unwrap();
+        std::fs::write(
+            root.join("GUIDE.md"),
+            format!("{PROSE}\nSee the handler table.\n"),
         )
-        .plan
+        .unwrap();
+
+        let mut cfg = cfg_for(root);
+        cfg.code_analyzer = infer::CodeAnalyzer::Code;
+        let with_flag = plan_for_cfg(root, &cfg);
+        assert!(!with_flag.datasets.is_empty());
+        assert_eq!(
+            with_flag
+                .datasets
+                .iter()
+                .map(|d| d.text_analyzer.clone())
+                .collect::<Vec<_>>(),
+            plan_for(root)
+                .datasets
+                .iter()
+                .map(|d| d.text_analyzer.clone())
+                .collect::<Vec<_>>(),
+            "a prose-only dataset keeps today's election"
+        );
     }
 
     const CODE: &str = "// The event loop dispatches every ready connection to a worker.\n\
@@ -3552,7 +3619,16 @@ fn build_phase_a(
         // #1059: the dataset's text-analyzer election, from the same sampled
         // accumulators that elected the semantic body above. Deterministic in
         // the sample, so the same bytes elect the same analyzer on every run.
-        let text_analyzer = infer::elected_default_analyzer(&specs, &c.fields).map(str::to_string);
+        // #1198: `--code-analyzer code` overrides it for a dataset holding any
+        // file the sniffer routed to the code extractor. Per-file family, not
+        // `c.family`: a docs cluster is labelled `Family::Code` whatever it holds.
+        let has_code = c
+            .members
+            .iter()
+            .any(|&m| matches!(file_meta[m], Some((Family::Code, _))));
+        let text_analyzer =
+            infer::elect_dataset_analyzer(&specs, &c.fields, has_code, cfg.code_analyzer)
+                .map(str::to_string);
         datasets.push(PlanDataset {
             slug: c.slug.clone(),
             index: format!("{}-{}", cfg.prefix, c.slug),
@@ -10759,6 +10835,30 @@ mod stem_default_tests {
             Some(&json!({"type": "keyword"}))
         );
         assert!(body.pointer("/mappings/properties/body/analyzer").is_none());
+    }
+
+    /// #1198: a code dataset elected under `--code-analyzer code` declares the
+    /// built-in `code` analyzer on the CREATE body, through the same #1059
+    /// path: the mapping is byte-identical to an undeclaring dataset's, and
+    /// the frozen identities do not move (existing state dirs never abort).
+    #[test]
+    fn a_code_analyzer_dataset_declares_code_on_the_create_body_outside_the_identities() {
+        let body = dataset_create_body(&dataset("code", Some(infer::CODE_TEXT_ANALYZER)));
+        assert_eq!(
+            body.pointer("/settings/analysis/analyzer/default/type"),
+            Some(&json!("code")),
+            "{body}"
+        );
+        let undeclaring = dataset_create_body(&dataset("code", None));
+        assert_eq!(body["mappings"], undeclaring["mappings"]);
+
+        let mut plan = Plan {
+            datasets: vec![dataset("code", None)],
+            ..Plan::default()
+        };
+        let before = generation_contract_identities(&plan).unwrap();
+        plan.datasets[0].text_analyzer = Some(infer::CODE_TEXT_ANALYZER.to_string());
+        assert_eq!(before, generation_contract_identities(&plan).unwrap());
     }
 
     /// A dataset with no profiler-marked prose sends no ANALYZER settings —

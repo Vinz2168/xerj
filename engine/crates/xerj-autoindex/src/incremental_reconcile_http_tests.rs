@@ -909,6 +909,7 @@ fn cfg(root: &Path, state_dir: &Path, url: &str, semantic: bool) -> IndexCfg {
         max_file_gb: 1,
         sample: 50,
         no_semantic: !semantic,
+        code_analyzer: Default::default(),
         brain: None,
         no_graph: true,
         // Gate off: these fixtures assert reconcile behaviour, not a
