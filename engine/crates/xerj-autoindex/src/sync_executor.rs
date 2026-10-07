@@ -802,9 +802,7 @@ impl<'a> EsSyncBackend<'a> {
                 })?;
             let time_bound = |order: &'static str| -> Result<Option<String>> {
                 match &dataset.time_field {
-                    Some(field) => {
-                        self.extreme_time(&dataset.index, &filter, field, order)
-                    }
+                    Some(field) => self.extreme_time(&dataset.index, &filter, field, order),
                     None => Ok(None),
                 }
             };
@@ -867,9 +865,7 @@ impl<'a> EsSyncBackend<'a> {
             .and_then(|src| src.get(field))
             .and_then(|v| match v {
                 Value::String(s) => Some(s.clone()),
-                Value::Number(n) => n
-                    .as_i64()
-                    .map(xerj_common::schema::epoch_ms_to_iso8601_utc),
+                Value::Number(n) => n.as_i64().map(xerj_common::schema::epoch_ms_to_iso8601_utc),
                 _ => None,
             }))
     }
