@@ -68,6 +68,7 @@ pub mod audit_mw;
 pub mod auth;
 pub mod authz;
 pub mod binary_protocol;
+pub mod cat;
 pub mod error;
 pub mod es_compat;
 pub mod extract;

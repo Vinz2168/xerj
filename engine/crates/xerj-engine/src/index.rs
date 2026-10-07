@@ -7807,6 +7807,20 @@ pub struct SemanticFieldFacts {
     pub embedder_active: bool,
 }
 
+/// One live durable segment, as `_cat/segments` reports it (#1202). See
+/// [`Index::segment_rows`] for the deleted-count and live-count semantics.
+#[derive(Debug, Clone)]
+pub struct SegmentInfo {
+    /// The segment's id (a UUID string; `_cat/segments`' `segment` column).
+    pub id: String,
+    /// Physical docs written in the segment (a tombstone is not a doc).
+    pub doc_count: u64,
+    /// Docs tombstoned in this segment's ZTB2 section.
+    pub deleted_doc_count: u64,
+    /// The segment's on-disk size in bytes.
+    pub size_bytes: u64,
+}
+
 /// Statistics about an index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexStats {
@@ -24405,6 +24419,52 @@ impl Index {
     #[inline]
     pub fn live_doc_count(&self) -> u64 {
         self.store.version_map.live_count() as u64
+    }
+
+    /// Real per-segment rows for `_cat/segments` (#1202): one entry per LIVE
+    /// segment in the durable snapshot — its id, its docs, its deleted docs,
+    /// its on-disk bytes. The predecessor endpoint fabricated a single `_0`
+    /// row per index ("one logical segment"), which pointed operators AWAY
+    /// from the cause during #1186 (an index the log showed merging 13
+    /// segments reported "1 segment, 0 deleted").
+    ///
+    /// `deleted_doc_count` decodes the segment's own ZTB2 tombstone section —
+    /// through the cached reader, so a repeated listing costs no re-open and
+    /// no whole-file CRC. `doc_count` is the segment's physical document
+    /// count, tombstones excluded by construction (a tombstone-only segment
+    /// carries 0 docs). A delete's tombstone can persist in a LATER segment
+    /// than the doc it kills — xerj tombstones are segment-level records, not
+    /// in-place marks — so the honest per-segment reading is
+    /// `Σ docs.count − Σ docs.deleted = live docs`, not per-row liveness.
+    /// Superseded-until-merge versions of an updated document stay counted in
+    /// their segments: only a merge folds them away, the same pre-merge
+    /// over-count `_cat/indices`' doc column documents for whole indices.
+    pub fn segment_rows(&self) -> Vec<SegmentInfo> {
+        let snap = self.store.snapshot();
+        let mut out = Vec::with_capacity(snap.segments.len());
+        for meta in &snap.segments {
+            let mut deleted = 0u64;
+            if meta.has_tombstones {
+                // The Arc (and its mmap) stays alive across the decode — the
+                // section bytes borrow the reader.
+                if let Ok(reader) = self.store.open_segment_arc(&meta.id) {
+                    if let Ok(Some(bytes)) =
+                        reader.section(xerj_storage::segment::SectionType::Tombstones)
+                    {
+                        if let Some(pairs) = xerj_storage::segment::decode_tombstones_v2(bytes) {
+                            deleted = pairs.len() as u64;
+                        }
+                    }
+                }
+            }
+            out.push(SegmentInfo {
+                id: meta.id.clone(),
+                doc_count: meta.doc_count,
+                deleted_doc_count: deleted,
+                size_bytes: meta.size_bytes,
+            });
+        }
+        out
     }
 
     pub async fn stats(&self) -> IndexStats {

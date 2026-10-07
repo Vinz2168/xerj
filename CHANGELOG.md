@@ -19,6 +19,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   create-body path: committed `index_identity` digests do not move and existing indexes keep
   their analyzer. Measured on SWE-bench Lite file localization: acc@5 +0.11 [+0.03, +0.19] on a
   pre-registered held-out sample; cost ~15% index size and ~2.4× text-analysis time.
+- **`_cat/indices` and `_cat/segments` accept `h`, `v` and `bytes`** (issue
+  [#1201](https://github.com/xerj-org/xerj/issues/1201), PR
+  [#1208](https://github.com/xerj-org/xerj/pull/1208)) — all three output parameters were
+  silently ignored on both endpoints. A shared renderer now serves them the way ES does:
+  `h` selects comma-split columns (`*` expands, unknown names drop out, and a `format=json`
+  object carries exactly the selected columns as strings), `v` turns on text padding —
+  which is the *only* mode that pads, a plain response joins columns with one space and
+  still prints the header over zero rows — and `bytes` resizes the byte columns, where
+  `b` is raw and the one-letter units are decimal (10³) while the two-letter ones are
+  binary (2¹⁰); an unknown value for either parameter is a 400 that names the valid set
+  rather than a silently ignored flag.
+
+### Fixed
+
+- **`_cat/segments` returns real segment rows** (issue
+  [#1202](https://github.com/xerj-org/xerj/issues/1202), PR
+  [#1208](https://github.com/xerj-org/xerj/pull/1208)) — the endpoint used to answer
+  405/empty. It now reads per-segment truth from the store: id, physical `docs.count`,
+  `docs.deleted` decoded from the segment's own ZTB2 tombstone section, size, and the
+  remaining ES columns, over a 14-column ES-compatible header, including the
+  whole-cluster `/_cat/segments` form. The per-segment counts follow the store's real
+  geometry, pinned by a test: a delete's tombstone persists in a *later* segment than the
+  document it kills, so a segment's `docs.deleted` is the tombstones persisted in that
+  segment and the live count is the sum invariant `Σ docs.count − Σ docs.deleted` — the
+  same pre-merge over-count `_cat/indices` has always had for superseded update copies,
+  now visible and documented instead of guessed at. Row count matches `_stats`
+  `segments.count` (also pinned).
 
 ## [1.0.0-rc.87] - 2026-10-07
 
