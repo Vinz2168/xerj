@@ -1207,6 +1207,14 @@ impl Es {
                     if failures >= MAX_ATTEMPTS {
                         return Err(e);
                     }
+                    self.failure_notice(
+                        &mut last_notice,
+                        what,
+                        &e,
+                        failures,
+                        MAX_ATTEMPTS,
+                        started.elapsed(),
+                    );
                 }
             }
             self.backoff(delay);
@@ -1233,6 +1241,50 @@ impl Es {
             self.throttle_patience.as_secs()
         );
         *last = Some(Instant::now());
+    }
+
+    /// Say on stderr that a request is retrying after a transport error or a
+    /// 5xx — the first failure immediately, then at most once per
+    /// [`NOTICE_EVERY`] per request, sharing [`Self::throttle_notice`]'s clock
+    /// so an alternating 429/timeout sequence cannot double-announce. Same
+    /// announce gate: loading runs speak, probes and `--quiet` stay silent.
+    ///
+    /// Why the first failure is worth a line: the retry envelope here is
+    /// bounded (six attempts at the client's 300 s request timeout ≈ 31 min
+    /// worst case) but was SILENT, and #1183 reported exactly that silence as
+    /// a deadlock — the caller parks on `reqwest::blocking`'s oneshot, which
+    /// `/proc/<pid>/task/*/wchan` reports as `futex_do_wait`, so eight
+    /// minutes of no output and zero CPU were indistinguishable from a lock
+    /// cycle. A line that names the request, the reason, and the attempt
+    /// count turns "stalled" into "retrying, bounded". Returns whether a
+    /// line was printed, so the gate is testable without capturing stderr.
+    fn failure_notice(
+        &self,
+        last: &mut Option<Instant>,
+        what: &str,
+        error: &anyhow::Error,
+        attempt: usize,
+        max_attempts: usize,
+        waited: Duration,
+    ) -> bool {
+        if !self.admission.announces() || matches!(last, Some(t) if t.elapsed() < NOTICE_EVERY) {
+            return false;
+        }
+        // One line, capped: transport error chains can run long and the point
+        // is the request and the bound, not the whole diagnostic.
+        let mut reason = format!("{error:#}").replace('\n', " ");
+        let cut = reason
+            .char_indices()
+            .nth(120)
+            .map_or(reason.len(), |(i, _)| i);
+        reason.truncate(cut);
+        eprintln!(
+            "autoindex: {what} failed: {reason}; retrying (attempt {attempt} of {max_attempts}, \
+             {} s in this request so far)",
+            waited.as_secs()
+        );
+        *last = Some(Instant::now());
+        true
     }
 
     /// Sleep between attempts, recording how long was actually slept.
@@ -2257,6 +2309,84 @@ mod tests {
         let outcome = es.bulk(b"{\"index\":{}}\n{}\n".to_vec()).unwrap();
         assert_eq!(outcome.item_errors, 0);
         server.join().unwrap();
+    }
+
+    /// #1183: a retrying request must say so, or its bounded envelope reads
+    /// as a deadlock. The gate is the logic — first failure announces,
+    /// the next line waits for NOTICE_EVERY, a silent client never announces
+    /// — so it is pinned directly on the returned flag; the print itself is
+    /// a one-liner the flag stands for.
+    #[test]
+    fn failure_notices_announce_immediately_then_hold_the_cadence() {
+        let mk = |announce| {
+            Es::with_bulk_policy(
+                "http://127.0.0.1:1",
+                None,
+                Duration::from_millis(100),
+                Duration::from_millis(10),
+                Duration::from_millis(20),
+            )
+            .unwrap()
+            .with_bulk_concurrency(1, announce)
+        };
+        let error = anyhow::Error::msg("connection closed before message completed");
+        // a quiet client (probe, --quiet) never announces and never marks
+        let quiet = mk(false);
+        let mut last = None;
+        assert!(!quiet.failure_notice(&mut last, "search", &error, 1, 6, Duration::from_secs(0)));
+        assert!(last.is_none(), "a refused notice must not mark the clock");
+        // a loading run announces the first failure at once…
+        let loud = mk(true);
+        assert!(loud.failure_notice(&mut last, "search", &error, 1, 6, Duration::from_secs(310)));
+        let first = last.expect("an announced notice marks the clock");
+        // …and holds the cadence for the immediate next one
+        assert!(!loud.failure_notice(&mut last, "search", &error, 2, 6, Duration::from_secs(620)));
+        assert_eq!(
+            last,
+            Some(first),
+            "a held notice must not re-mark the clock"
+        );
+    }
+
+    /// The wire-level shape of the same contract: a connection dropped before
+    /// a response is a transport failure, the retry loop announces (loading
+    /// client) and re-offers, and the second attempt succeeds — the run is
+    /// bounded AND visibly so, never a silent stall.
+    #[test]
+    fn a_dropped_connection_is_retried_after_announcing() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_server = requests.clone();
+        let server = std::thread::spawn(move || {
+            // first connection: read the request, answer nothing, close
+            let (mut first, _) = listener.accept().unwrap();
+            requests_server
+                .lock()
+                .unwrap()
+                .push(read_request(&mut first));
+            drop(first);
+            // second connection: the retried request, answered
+            let (mut second, _) = listener.accept().unwrap();
+            requests_server
+                .lock()
+                .unwrap()
+                .push(read_request(&mut second));
+            respond_json(&mut second, br#"{"deleted":0,"failures":[]}"#.as_slice());
+        });
+        let es = Es::with_bulk_policy(
+            &format!("http://{address}"),
+            None,
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+        )
+        .unwrap()
+        .with_bulk_concurrency(1, true);
+        es.delete_by_query("data", &serde_json::json!({"term": {"ax_file": "key"}}))
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 2, "one drop, one retry");
     }
 
     #[test]

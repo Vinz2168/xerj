@@ -28,6 +28,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   machine traffic in the audit log (#1109), so `xerj gain` still measures only the user's
   queries. The finalize-catalog deadlock that produces the dangling segment (item 1 of #1183)
   remains open, tracked in the same issue.
+- **A request retrying after a transport error or a 5xx now says so on stderr** (part of issue
+  [#1183](https://github.com/xerj-org/xerj/issues/1183)) — the autoindex client's retry envelope
+  is bounded (six attempts at a 300 s request timeout each, ≈31 min worst case) but was
+  completely silent on everything except HTTP 429, which is how the #1183 incident read as a
+  deadlock: a finalize-catalog request against a memory-pressured node spent eight minutes inside
+  that envelope with zero output, and since `reqwest::blocking` parks the caller on a oneshot,
+  every thread's `/proc` wchan read `futex_do_wait` — indistinguishable from a lock cycle at that
+  granularity. Diagnosis in the issue: it was never a deadlock; the silence was the defect. A
+  loading run (announce on) now prints `autoindex: search failed: …; retrying (attempt 2 of 6,
+  … s in this request so far)` on the first failure and at most once per 30 s after, sharing the
+  429 notice's clock so alternating failures cannot double-announce; probes, MCP clients and
+  `--quiet` stay silent. The server-side stall root cause (the reference node running at its
+  memory breaker during large rebuilds) remains open under #1183 and the #1122 memory-ceiling
+  class.
 
 ## [1.0.0-rc.86] - 2026-10-06
 

@@ -205,7 +205,10 @@ wrong-and-confident detection gate, unmeasured),
 [#1110](https://github.com/xerj-org/xerj/issues/1110) (the
 generalization proof: second-domain pack + fresh-machine replay) and
 [#1183](https://github.com/xerj-org/xerj/issues/1183) (corpus index
-finalize-catalog deadlocking all 297 threads on a fresh build).
+finalize-catalog reported as an all-thread deadlock: diagnosed as a bounded
+but silent client retry envelope — the silence is fixed; the server-side
+stall under memory pressure stays open, tracked with the #1122
+memory-ceiling class).
 **Closed inside the rc.86 window and recorded in the CHANGELOG, not
 carried here:** #1109, #1189, #1190, #1186, #1146 and #1092 (PRs
 [#1194](https://github.com/xerj-org/xerj/pull/1194),
