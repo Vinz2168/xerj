@@ -2141,11 +2141,23 @@ mod tests {
                 &serde_json::json!({"size": 1000, "sort": [{"_id": "asc"}]}),
             )
             .unwrap();
-        assert_eq!(page.pointer("/hits/hits").unwrap().as_array().unwrap().len(), 1);
+        assert_eq!(
+            page.pointer("/hits/hits")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 3, "two partial answers, one retry each: {seen:?}");
+        assert_eq!(
+            seen.len(),
+            3,
+            "two partial answers, one retry each: {seen:?}"
+        );
         assert!(
-            seen.iter().all(|request| request.contains("\"timeout\":\"120s\"")),
+            seen.iter()
+                .all(|request| request.contains("\"timeout\":\"120s\"")),
             "every attempt must carry the explicit page timeout: {seen:?}"
         );
     }
@@ -2173,9 +2185,7 @@ mod tests {
     /// budget belongs to the walk that knows how slow its node is.
     #[test]
     fn search_page_keeps_a_caller_supplied_timeout() {
-        let (address, seen) = page_server(vec![
-            br#"{"timed_out":false,"hits":{"hits":[]}}"#,
-        ]);
+        let (address, seen) = page_server(vec![br#"{"timed_out":false,"hits":{"hits":[]}}"#]);
         let es = Es::new(&format!("http://{address}"), None).unwrap();
         es.search_page(
             "autoindex-catalog",
@@ -2205,7 +2215,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(String::from_utf8_lossy(&request).into_owned());
-            respond_status(&mut stream, "404 Not Found", br#"{"error":"index_missing"}"#);
+            respond_status(
+                &mut stream,
+                "404 Not Found",
+                br#"{"error":"index_missing"}"#,
+            );
         });
         let es = Es::new(&format!("http://{address}"), None).unwrap();
         assert!(es
