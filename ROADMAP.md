@@ -229,9 +229,13 @@ wrong-and-confident detection gate, unmeasured),
 generalization proof: second-domain pack + fresh-machine replay) and
 [#1183](https://github.com/xerj-org/xerj/issues/1183) (corpus index
 finalize-catalog reported as an all-thread deadlock: diagnosed as a bounded
-but silent client retry envelope — the silence is fixed; the server-side
-stall under memory pressure stays open, tracked with the #1122
-memory-ceiling class).
+but silent client retry envelope — the silence is fixed, and the rc.88
+read-back fix (PR
+[#1207](https://github.com/xerj-org/xerj/pull/1207)) removed the agg that
+made finalize estimate 1.1 GB against the 512 MB query-memory breaker; the
+issue stays open until a full xerj-search rebuild passes finalize-catalog
+end-to-end with the fixed client, and the #1122 memory-ceiling class stays
+its companion).
 **Closed inside the rc.86 window and recorded in the CHANGELOG, not
 carried here:** #1109, #1189, #1190, #1186, #1146 and #1092 (PRs
 [#1194](https://github.com/xerj-org/xerj/pull/1194),
