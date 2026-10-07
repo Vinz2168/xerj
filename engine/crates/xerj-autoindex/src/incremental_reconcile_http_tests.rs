@@ -5949,3 +5949,294 @@ fn journal_events_of_state(state_dir: &Path, state: &str) -> usize {
         })
         .count()
 }
+
+/// #1224 scaffolding: one upsert applied through the real executor against
+/// the stateful endpoint, with everything hand-built so the only moving part
+/// is what [`sync_executor::EsSyncBackend`] sends.
+mod delete_gate {
+    use super::*;
+    use crate::progress::Progress;
+    use crate::state::{Plan, PlanDataset};
+    use crate::sync::{
+        CommittedManifest, ExecutionIdentity, GenerationManifest, ManifestGroup, ManifestPath,
+        SourceExecutionPolicy, SyncOperation, SyncOperationKind,
+    };
+    use crate::sync_executor::{
+        EsSyncBackend, PreparedArtifact, SnapshotFile, SnapshotFootprint, SourceSnapshot,
+        SyncOperationBackend,
+    };
+    use std::collections::BTreeMap;
+
+    const DS_INDEX: &str = "delete-gate-ds";
+
+    struct Fixture {
+        endpoint: HttpEndpoint,
+        /// Keeps the prepared artifact alive; dropped with the fixture. The
+        /// backend holds only a leaked path string, never a borrow of this.
+        _state_dir: tempfile::TempDir,
+        backend: EsSyncBackend<'static>,
+        desired: GenerationManifest,
+        snapshot: SourceSnapshot,
+        operation: SyncOperation,
+    }
+
+    fn execution() -> ExecutionIdentity {
+        ExecutionIdentity {
+            version: 2,
+            root_identity: "/corpus".into(),
+            url: "http://ignored".into(),
+            prefix: "xc-gate".into(),
+            follow_symlinks: false,
+            chunker_identity: "chunker".into(),
+            embedding_identity_sha256: "a".repeat(64),
+            embedding_backend: "lexical".into(),
+            embedding_dimension: None,
+            embedding_semantic_contract: "none".into(),
+            embedding_resumable: true,
+            graph_enabled: false,
+            brain: "none".into(),
+            detector_identity: "detector".into(),
+            schema_identity: "schema".into(),
+            index_identity: "index".into(),
+            source_policy: SourceExecutionPolicy::DurableSnapshot {
+                reference: "ref".into(),
+                snapshot_digest: "digest".into(),
+            },
+        }
+    }
+
+    fn plan() -> Plan {
+        Plan {
+            datasets: vec![PlanDataset {
+                slug: "reports".into(),
+                index: DS_INDEX.into(),
+                family: "json".into(),
+                group: None,
+                specs: Vec::new(),
+                time_field: None,
+                semantic_field: None,
+                text_analyzer: None,
+                sampled_records: 1,
+                file_count: 1,
+            }],
+            ..Plan::default()
+        }
+    }
+
+    fn group(content_id: &str) -> ManifestGroup {
+        ManifestGroup {
+            group_id: "g1".into(),
+            content_id: content_id.into(),
+            content_digest: format!("digest-{content_id}"),
+            content_size: 10,
+            canonical: ManifestPath {
+                path_id: "unix:1".into(),
+                rel: "a.json".into(),
+                is_symlink: false,
+            },
+            aliases: Vec::new(),
+            dataset_slugs: vec!["reports".into()],
+            expected_records: 1,
+            expected_passages: 1,
+            expected_vectors: 1,
+            expected_junk_records: 0,
+            expected_records_by_dataset: BTreeMap::from([("reports".to_string(), 1)]),
+        }
+    }
+
+    /// One upsert whose prepared artifact holds one document.
+    fn fixture(content_id: &str, doc_body: &str) -> Fixture {
+        let endpoint = HttpEndpoint::start();
+        {
+            // The endpoint asserts a bulk never precedes mapping PUTs; this
+            // fixture tests the delete gate, not provisioning.
+            let mut st = endpoint.state.lock().unwrap();
+            st.saw_dataset_mapping_update = true;
+            st.saw_catalog_mapping_update = true;
+        }
+        let es = Es::with_bulk_timeout(&endpoint.url, None, 30).expect("es client");
+        let state_dir = tempfile::tempdir().unwrap();
+        let tx = "run-gate-0000-g1";
+        let ndjson = "prepared/0001.ndjson";
+        let prepared_dir = state_dir
+            .path()
+            .join("sync-snapshots")
+            .join(tx)
+            .join("prepared");
+        fs::create_dir_all(&prepared_dir).unwrap();
+        fs::write(
+            state_dir
+                .path()
+                .join("sync-snapshots")
+                .join(tx)
+                .join(ndjson),
+            format!("{{\"index\":{{\"_index\":\"{DS_INDEX}\",\"_id\":\"doc-1\"}}}}\n{doc_body}\n"),
+        )
+        .unwrap();
+
+        let content = group(content_id);
+        let plan = plan();
+        let desired = GenerationManifest {
+            generation: 1,
+            execution: Some(execution()),
+            plan: plan.clone(),
+            groups: vec![content.clone()],
+        };
+        let snapshot = SourceSnapshot {
+            version: 1,
+            tx_id: tx.into(),
+            started: "2026-10-07T00:00:00Z".into(),
+            preparation_contract_digest: "contract".into(),
+            footprint: SnapshotFootprint {
+                source_bytes: 10,
+                prepared_bytes: 10,
+                total_bytes: 20,
+                hard_budget_bytes: 1000,
+            },
+            files: vec![SnapshotFile {
+                content_id: content_id.into(),
+                content_digest: content.content_digest.clone(),
+                content_size: 10,
+                relative_blob: "blobs/0001".into(),
+                prepared: Some(PreparedArtifact {
+                    relative_ndjson: ndjson.to_string(),
+                    records: 1,
+                    passages: 1,
+                    vectors: 1,
+                    junk: 0,
+                    truncated: false,
+                    records_by_dataset: BTreeMap::from([("reports".to_string(), 1)]),
+                    bytes: 10,
+                    digest: "prepared".into(),
+                }),
+                prepared_identity: None,
+            }],
+            snapshot_digest: "snapshot".into(),
+        };
+        let operation = SyncOperation {
+            operation_id: "upsert:g1".into(),
+            kind: SyncOperationKind::Upsert,
+            group_id: "g1".into(),
+            desired_content_id: Some(content_id.into()),
+        };
+
+        // The backend borrows the ES client, the progress surface and the
+        // state-dir path for 'a. Leak all three for the test's lifetime; the
+        // TempDir itself stays owned by the fixture so the directory still
+        // exists while the leaked path points at it.
+        let es: &'static mut Es = Box::leak(Box::new(es));
+        let pr: &'static mut Arc<Progress> = Box::leak(Box::new(Progress::silent()));
+        let dir: &'static Path = Box::leak(state_dir.path().to_path_buf().into_boxed_path());
+        let backend = EsSyncBackend::new(&*es, dir, 64 * 1024, pr);
+        Fixture {
+            endpoint,
+            _state_dir: state_dir,
+            backend,
+            desired,
+            snapshot,
+            operation,
+        }
+    }
+
+    fn delete_requests(endpoint: &HttpEndpoint) -> Vec<String> {
+        endpoint
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(method, path)| method == "POST" && path.contains("/_delete_by_query"))
+            .map(|(_, path)| path.clone())
+            .collect()
+    }
+
+    /// #1224: an upsert whose target index holds NONE of the group's content
+    /// must not fire the `?refresh=true` delete_by_query at all. Every upsert
+    /// used to fire it unconditionally, and a one-record-per-file corpus pays
+    /// one upsert per FILE — cvelistV5 is 402,744 groups, each a defensive
+    /// delete that matched nothing and still cost 5-16 s of server refresh
+    /// under concurrent write load: ~1 op/s measured, ~74 h projected for a
+    /// corpus the node itself can bulk in minutes.
+    #[test]
+    fn upsert_skips_delete_by_query_when_the_index_holds_none_of_the_group() {
+        let mut f = fixture(
+            "content-fresh",
+            r#"{"ax_file":"content-fresh","text":"one"}"#,
+        );
+        f.backend
+            .apply(&f.operation, &base(), &f.desired, &f.snapshot)
+            .expect("apply");
+
+        let deletes = delete_requests(&f.endpoint);
+        // Copy out of the lock before asserting (#890's lesson: an assert
+        // under the endpoint lock poisons the mutex the server thread takes).
+        let (probed, landed) = {
+            let st = f.endpoint.state.lock().unwrap();
+            (
+                st.requests
+                    .iter()
+                    .any(|(m, p)| m == "POST" && *p == format!("/{DS_INDEX}/_search")),
+                st.docs
+                    .contains_key(&(DS_INDEX.to_string(), "doc-1".into())),
+            )
+        };
+        assert!(
+            deletes.is_empty(),
+            "#1224: a first-time group has no partials to clear; the delete_by_query is a \
+             no-op that still forces a refresh. Sent: {deletes:?}"
+        );
+        // The probe IS the contract: the gate asks the index instead of
+        // assuming, and the document still lands.
+        assert!(probed, "the gate must ask the index, not assume");
+        assert!(landed, "the upsert's own document still lands");
+    }
+
+    /// The gate must not swallow the delete when it has real work: an index
+    /// that already holds documents of this content identity (a retried
+    /// operation's partial, or a prior generation's record) still gets the
+    /// delete_by_query before the replay.
+    #[test]
+    fn upsert_still_deletes_when_the_index_holds_the_group_content() {
+        let mut f = fixture("content-live", r#"{"ax_file":"content-live","text":"two"}"#);
+        f.endpoint.state.lock().unwrap().docs.insert(
+            (DS_INDEX.to_string(), "stale-partial".into()),
+            json!({"ax_file": "content-live", "text": "stale"}),
+        );
+        f.backend
+            .apply(&f.operation, &base(), &f.desired, &f.snapshot)
+            .expect("apply");
+
+        let deletes = delete_requests(&f.endpoint);
+        // TWO requests is the delete loop's contract, not a bug: a pass that
+        // reports deletions runs again until a pass reports 0, so a delete
+        // with real work is always followed by its empty confirmation pass.
+        assert_eq!(
+            deletes,
+            vec![
+                format!("/{DS_INDEX}/_delete_by_query?refresh=true"),
+                format!("/{DS_INDEX}/_delete_by_query?refresh=true"),
+            ],
+            "#1224: the gate may skip no-op deletes, never real ones"
+        );
+        let st = f.endpoint.state.lock().unwrap();
+        let (stale_gone, landed) = (
+            !st.docs
+                .contains_key(&(DS_INDEX.to_string(), "stale-partial".into())),
+            st.docs
+                .contains_key(&(DS_INDEX.to_string(), "doc-1".into())),
+        );
+        drop(st);
+        assert!(stale_gone, "the stale partial is gone");
+        assert!(landed, "the replayed document landed");
+    }
+
+    fn base() -> CommittedManifest {
+        CommittedManifest {
+            generation: 0,
+            manifest_digest: "genesis".into(),
+            plan: plan(),
+            groups: Vec::new(),
+            execution: None,
+        }
+    }
+}

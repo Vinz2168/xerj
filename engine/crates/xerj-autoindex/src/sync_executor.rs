@@ -475,6 +475,23 @@ impl<'a> EsSyncBackend<'a> {
 
     fn delete_group(&self, group: &ManifestGroup, plan: &Plan) -> Result<()> {
         for index in group_indices(group, plan)? {
+            // The delete only has work when the index already holds documents
+            // of this content identity. Every upsert used to fire it
+            // unconditionally, and a one-record-per-file corpus pays one
+            // upsert per FILE — cvelistV5 is 402,744 groups, each a defensive
+            // `?refresh=true` delete_by_query that matched nothing and still
+            // cost 5-16 s of server refresh under concurrent write load:
+            // ~1 op/s measured, days projected (#1224). A first-time group
+            // cannot hold partials, and a retried op replays the SAME
+            // prepared artifact over the same deterministic `_id`s, so an
+            // unrefreshed partial is overwritten by the replay itself. A
+            // size:0 term search answers "is anything visible" in <1 ms; a
+            // missing index (404) holds nothing by definition (#1173's
+            // rule). A probe the node did not answer is an error, never a
+            // skip — the delete path stays exactly as strict as before.
+            if !self.index_holds_content(&index, &group.content_id)? {
+                continue;
+            }
             self.es.delete_by_query(
                 &index,
                 &serde_json::json!({"term": {
@@ -483,6 +500,30 @@ impl<'a> EsSyncBackend<'a> {
             )?;
         }
         Ok(())
+    }
+
+    /// Does this index hold any visible document of this content identity?
+    /// The [#1224] gate in front of [`Self::delete_group`]'s
+    /// `delete_by_query`: `None` (index absent) and 0 hits both mean "the
+    /// delete would remove nothing", every other outcome propagates.
+    fn index_holds_content(&self, index: &str, content_id: &str) -> Result<bool> {
+        let Some(v) = self.es.search_present(
+            index,
+            &serde_json::json!({
+                "size": 0,
+                "track_total_hits": true,
+                "query": {"term": {"ax_file": content_id}},
+            }),
+        )?
+        else {
+            return Ok(false);
+        };
+        let total = v
+            .pointer("/hits/total/value")
+            .and_then(Value::as_u64)
+            .or_else(|| v.pointer("/hits/total").and_then(Value::as_u64))
+            .with_context(|| format!("no total in probe of {index} for {content_id}"))?;
+        Ok(total > 0)
     }
 
     /// The remote work of one operation, through a shared reference: the
