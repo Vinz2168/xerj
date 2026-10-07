@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.90] - 2026-10-07
+
+### Added
+
+- **A second community contribution from Vinz2168: the agent field report for the #1091
+  diagnosis session** (PR
+  [#1219](https://github.com/xerj-org/xerj/pull/1219)) — one report under
+  `user-feedback/16-agent-field-reports/`, written by the AI coding agent that ran the session
+  and reviewed by its operator, alongside the #1217 fix that session produced (rc.89). Every
+  number in it comes from a command run in that session (the A/B harness and the ES-YAML runner
+  output quoted in #1217). Filing it closed the tracker
+  [#1091](https://github.com/xerj-org/xerj/issues/1091) it diagnoses.
+
+### Fixed
+
+- **The kNN exact scan could silently drop a document it had already captured** (issue
+  [#1220](https://github.com/xerj-org/xerj/issues/1220), PR
+  [#1223](https://github.com/xerj-org/xerj/pull/1223)) — two holes, both fixed. The scan read
+  the memtable and the store snapshot with no generation check between them, so a concurrent
+  flush or merge publication could land mid-capture and the "captured" set was half old
+  generation, half new; and the admission predicate consulted the *live* version map, so a
+  post-capture update of the same id made the captured copy look stale and the scan forgot it.
+  Both walkers now bracket the capture (generation-checked) and admit candidates against the
+  capture-scoped view, not the live one.
+
+- **A no-match `delete_by_query` / `update_by_query` run no longer flushes the index** (issue
+  [#1222](https://github.com/xerj-org/xerj/issues/1222), PR
+  [#1227](https://github.com/xerj-org/xerj/pull/1227)) — by-query runs flushed the member
+  index FIRST, unconditionally, as the #1019 paging precondition; a run whose query matched
+  nothing still paid it. A `size:0` probe through the ordinary search path now runs first and a
+  zero-match returns the zero response without flushing; a matching unflushed doc still counts
+  and takes the flush arm exactly as before. This also corrects the #1222 root cause on
+  record: the idle-flush fingerprint loop was already dead (`Index::flush()` clears the
+  idle-probe pair since #878) — the measured "6,848 one-doc segments for ~3,005 writes" was
+  this unconditional flush firing under the corpus apply loop's per-op defensive deletes.
+  Live A/B on a throwaway node, one doc written with `refresh=false`: old binary, no-match
+  delete → 1-doc segment created; this build → 0 segments, and a matching delete still
+  deletes (`total 1 / deleted 1 / batches 1`).
+
+- **The corpus apply loop asks before deleting: the per-group defensive `delete_by_query` is
+  gated on a visibility probe** (one leg of
+  [#1224](https://github.com/xerj-org/xerj/issues/1224), PR
+  [#1225](https://github.com/xerj-org/xerj/pull/1225)) — every upsert used to fire a
+  defensive `delete_by_query?refresh=true` even when the index held nothing of that content,
+  and one-record-per-file corpora pay one upsert per FILE: cvelistV5's cve-records build is
+  402,744 groups, i.e. 402,744 no-match deletes at a measured 5–16 s each under concurrent
+  bulk load (the forced `refresh=true`), against a `size:0` term probe that answers in <1 ms.
+  The delete now fires only when the probe sees something.
+  #1224 stays open pending the end-to-end re-measure: the O(1) journal fix below removed the
+  measured client-CPU ceiling, and the tracker closes on the completed apply-run numbers, not
+  on the individual legs.
+
+### Performance
+
+- **Corpus apply: O(1) journal state writes and per-replay lookups** (the client-CPU leg of
+  [#1224](https://github.com/xerj-org/xerj/issues/1224), PR
+  [#1228](https://github.com/xerj-org/xerj/pull/1228)) — `Journal::sync_operation_state` ran
+  twice per replayed operation and cloned the entire `PendingSync` (the desired manifest with
+  all 402,695 groups, the 402,744-entry operations Vec, the growing operation_states map) to
+  append one small durable line: ~350 ms × 2 per file, measured on cve-records as apply at
+  **1.18 items/s** with 0.72 s client CPU per file, one core 82% user, RSS 5.7 GB. State
+  writes are now validate → durable append → record in place (the journal line stays the
+  transaction boundary); `PendingSync` carries a lazily-built membership index; the replay
+  path resolves groups and artifacts through a once-per-replay lookup table instead of
+  O(402k) scans. `xerj-autoindex` lib suite 1299 passed / 0 failed; journal failpoint suites
+  unchanged (same events, same order). The after-rate posts on
+  [#1224](https://github.com/xerj-org/xerj/issues/1224) when the in-flight re-measure
+  completes.
+
 ## [1.0.0-rc.89] - 2026-10-07
 
 ### Added
