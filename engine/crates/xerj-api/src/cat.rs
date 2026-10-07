@@ -140,9 +140,9 @@ impl CatParams {
                 "" | "true" | "1" | "yes" => true,
                 "false" | "0" | "no" => false,
                 other => {
-                    return Err(ApiError::new(xerj_common::XerjError::invalid_query(format!(
-                        "unknown v value `{other}` (expected true or false)"
-                    ))))
+                    return Err(ApiError::new(xerj_common::XerjError::invalid_query(
+                        format!("unknown v value `{other}` (expected true or false)"),
+                    )))
                 }
             },
         };
@@ -224,7 +224,11 @@ impl CatTable {
         let body_rows: Vec<Vec<String>> = self
             .rows
             .iter()
-            .map(|row| cols.iter().map(|&i| Self::cell_text(&row[i], params.bytes)).collect())
+            .map(|row| {
+                cols.iter()
+                    .map(|&i| Self::cell_text(&row[i], params.bytes))
+                    .collect()
+            })
             .collect();
 
         // ES pads columns only under `v` — that alignment is the documented
@@ -406,20 +410,28 @@ mod tests {
     #[test]
     fn unknown_bytes_or_v_values_are_refused() {
         let err = CatParams::resolve(None, None, None, Some("mbb")).unwrap_err();
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         let resp = rt.block_on(async {
             let r = err.into_response();
-            let b = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+            let b = axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap();
             String::from_utf8(b.to_vec()).unwrap()
         });
         assert!(resp.contains("bytes"), "{resp}");
         assert!(resp.contains("kb"), "{resp}");
 
         let err = CatParams::resolve(Some("maybe"), None, None, None).unwrap_err();
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         let resp = rt.block_on(async {
             let r = err.into_response();
-            let b = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+            let b = axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap();
             String::from_utf8(b.to_vec()).unwrap()
         });
         assert!(resp.contains("v"), "{resp}");

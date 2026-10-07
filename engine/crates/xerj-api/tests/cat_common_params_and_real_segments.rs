@@ -56,13 +56,7 @@ async fn seeded_index(app: &axum::Router, name: &str) {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "create {name}: {body}");
-    let (st, body) = call(
-        app,
-        "PUT",
-        &format!("/{name}/_doc/1"),
-        json!({"v": "one"}),
-    )
-    .await;
+    let (st, body) = call(app, "PUT", &format!("/{name}/_doc/1"), json!({"v": "one"})).await;
     assert_eq!(st, StatusCode::CREATED, "index doc into {name}: {body}");
     let (st, body) = call(app, "POST", &format!("/{name}/_refresh"), Value::Null).await;
     assert_eq!(st, StatusCode::OK, "refresh {name}: {body}");
@@ -76,11 +70,19 @@ async fn cat_indices_h_selects_and_v_adds_header() {
     let (app, _dir) = app().await;
     seeded_index(&app, "books").await;
 
-    let (st, text) = call(&app, "GET", "/_cat/indices?h=docs.count,index&v=true", Value::Null)
-        .await;
+    let (st, text) = call(
+        &app,
+        "GET",
+        "/_cat/indices?h=docs.count,index&v=true",
+        Value::Null,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{text}");
     let lines: Vec<&str> = text.trim_end().lines().collect();
-    assert_eq!(lines[0], "docs.count index", "header is the selected columns in request order");
+    assert_eq!(
+        lines[0], "docs.count index",
+        "header is the selected columns in request order"
+    );
     assert_eq!(lines.len(), 2, "one header + one row: {text}");
     assert!(
         lines[1].starts_with("1 ") && lines[1].ends_with(" books"),
@@ -88,8 +90,13 @@ async fn cat_indices_h_selects_and_v_adds_header() {
     );
 
     // json honours h the same way, without the header.
-    let rows = call_json(&app, "GET", "/_cat/indices?h=docs.count,index&format=json", Value::Null)
-        .await;
+    let rows = call_json(
+        &app,
+        "GET",
+        "/_cat/indices?h=docs.count,index&format=json",
+        Value::Null,
+    )
+    .await;
     let row = rows[0].as_object().unwrap();
     let keys: Vec<&str> = row.keys().map(|k| k.as_str()).collect();
     assert_eq!(
@@ -106,7 +113,13 @@ async fn cat_indices_bytes_re_renders_and_refuses_unknown_units() {
     let (app, _dir) = app().await;
     seeded_index(&app, "films").await;
 
-    let rows = call_json(&app, "GET", "/_cat/indices?bytes=b&format=json", Value::Null).await;
+    let rows = call_json(
+        &app,
+        "GET",
+        "/_cat/indices?bytes=b&format=json",
+        Value::Null,
+    )
+    .await;
     let raw = rows[0]["store.size"].as_str().unwrap();
     assert!(
         raw.chars().all(|c| c.is_ascii_digit()),
@@ -114,12 +127,23 @@ async fn cat_indices_bytes_re_renders_and_refuses_unknown_units() {
     );
 
     let (st, body) = call(&app, "GET", "/_cat/indices?bytes=nonsense", Value::Null).await;
-    assert_eq!(st, StatusCode::BAD_REQUEST, "unknown bytes unit must 400: {body}");
+    assert_eq!(
+        st,
+        StatusCode::BAD_REQUEST,
+        "unknown bytes unit must 400: {body}"
+    );
     assert!(body.contains("kb"), "the 400 names the valid units: {body}");
 
-    let (st, body) = call(&app, "GET", "/_cat/segments/films?bytes=nonsense", Value::Null).await;
+    let (st, body) = call(
+        &app,
+        "GET",
+        "/_cat/segments/films?bytes=nonsense",
+        Value::Null,
+    )
+    .await;
     assert_eq!(
-        st, StatusCode::BAD_REQUEST,
+        st,
+        StatusCode::BAD_REQUEST,
         "every _cat endpoint refuses the same way: {body}"
     );
 }
@@ -135,13 +159,7 @@ async fn cat_segments_rows_are_real_per_segment() {
     seeded_index(&app, "segidx").await;
     // A second flush forces a second durable segment, so row-count == 1 is
     // not vacuous.
-    let (st, body) = call(
-        &app,
-        "PUT",
-        "/segidx/_doc/2",
-        json!({"v": "two"}),
-    )
-    .await;
+    let (st, body) = call(&app, "PUT", "/segidx/_doc/2", json!({"v": "two"})).await;
     assert_eq!(st, StatusCode::CREATED, "{body}");
     let (st, body) = call(&app, "POST", "/segidx/_flush", Value::Null).await;
     assert_eq!(st, StatusCode::OK, "flush: {body}");
@@ -153,7 +171,10 @@ async fn cat_segments_rows_are_real_per_segment() {
         Value::Null,
     )
     .await;
-    assert!(!rows.as_array().unwrap().is_empty(), "at least one segment row");
+    assert!(
+        !rows.as_array().unwrap().is_empty(),
+        "at least one segment row"
+    );
     for row in rows.as_array().unwrap() {
         assert_eq!(row["index"].as_str(), Some("segidx"));
         let id = row["segment"].as_str().unwrap();
@@ -163,7 +184,11 @@ async fn cat_segments_rows_are_real_per_segment() {
             "segment id is the durable segment's UUID: {rows}"
         );
         assert!(
-            row["docs.count"].as_str().unwrap().chars().all(|c| c.is_ascii_digit()),
+            row["docs.count"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .all(|c| c.is_ascii_digit()),
             "docs.count is numeric: {rows}"
         );
     }
@@ -207,7 +232,11 @@ async fn cat_segments_shows_deletes_after_flush() {
     )
     .await;
     let (live_before, del_before) = live_and_deleted(&before);
-    assert_eq!(live_before - del_before, 3, "3 live docs before the delete: {before}");
+    assert_eq!(
+        live_before - del_before,
+        3,
+        "3 live docs before the delete: {before}"
+    );
 
     let (st, body) = call(&app, "DELETE", "/delidx/_doc/1", Value::Null).await;
     assert_eq!(st, StatusCode::OK, "delete doc 1: {body}");
@@ -258,7 +287,13 @@ async fn cat_segments_whole_cluster_and_empty_header() {
     seeded_index(&app, "cluster-a").await;
     seeded_index(&app, "cluster-b").await;
 
-    let rows = call_json(&app, "GET", "/_cat/segments?format=json&h=index", Value::Null).await;
+    let rows = call_json(
+        &app,
+        "GET",
+        "/_cat/segments?format=json&h=index",
+        Value::Null,
+    )
+    .await;
     let mut indices: Vec<String> = rows
         .as_array()
         .unwrap()
@@ -276,8 +311,13 @@ async fn cat_segments_whole_cluster_and_empty_header() {
     // v prints the header line even when the selector matches nothing. With
     // no rows the column widths are the header widths themselves, so the
     // header cells join with a single space.
-    let (st, text) = call(&app, "GET", "/_cat/segments/no-such-*?v=true&h=index,segment", Value::Null)
-        .await;
+    let (st, text) = call(
+        &app,
+        "GET",
+        "/_cat/segments/no-such-*?v=true&h=index,segment",
+        Value::Null,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{text}");
     assert_eq!(text, "index segment\n", "header only, no rows: {text:?}");
 }
