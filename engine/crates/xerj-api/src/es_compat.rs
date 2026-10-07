@@ -27798,6 +27798,49 @@ const DEFAULT_BY_QUERY_SCROLL_SIZE: u64 = 1_000;
 /// single-pass id-set collection (`Index::matching_ids_sorted`) and delete it
 /// in `scroll_size` batches; every other query shape takes the `_id`-keyset
 /// paged loop below, whose pages run with the ids-only projection.
+/// #1222 gate in front of both by-query runners' flush-first precondition:
+/// does this query match anything, read through the ordinary search path
+/// (active memtable + segments)?
+///
+/// A `_delete_by_query` / `_update_by_query` that matches nothing used to
+/// flush the index unconditionally anyway — and a flush is a full memtable
+/// drain into a segment, so a caller firing defensive no-match deletes pays
+/// one segment per call. The corpus apply loop is that caller at scale:
+/// #1224's cve-records build issued 402,744 no-match `delete_by_query`s,
+/// and the node log showed 6,848 one-doc segments for ~3,005 writes — every
+/// bulk's document flushed straight back out by the next op's delete. (The
+/// idle-flush fingerprint #1222 first blamed is NOT this mechanism: that
+/// node ran `flush_idle_secs = 0`, and a single write under that config
+/// provably stays in the memtable.) Reading the probe through the search
+/// path matters for the same reason: a matching doc that was never flushed
+/// still counts, and the run proceeds to the flush arm exactly as before.
+///
+/// `Err` carries the error response value and propagates — an unanswered
+/// probe never authorizes a skip, the same strictness as the client-side
+/// twin in xerj-autoindex (#1225). A script resource limit during the probe
+/// refuses the whole run, matching the fail-closed per-batch check below.
+async fn by_query_matches_anything(
+    idx: &std::sync::Arc<xerj_engine::Index>,
+    query: &Value,
+) -> Result<bool, Value> {
+    let probe = match xerj_query::parse_request(&json!({ "query": query, "size": 0 })) {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(
+                ApiError::new(xerj_common::XerjError::invalid_query(e.to_string())).into_value(),
+            )
+        }
+    };
+    let results = match idx.search(&probe).await {
+        Ok(r) => r,
+        Err(e) => return Err(ApiError::new(xerj_common::XerjError::from(e)).into_value()),
+    };
+    if let Some(reason) = &results.script_failure {
+        return Err(script_limit_error_value(reason));
+    }
+    Ok(results.total.value > 0)
+}
+
 async fn run_delete_by_query(
     idx: &std::sync::Arc<xerj_engine::Index>,
     query: &Value,
@@ -27805,6 +27848,29 @@ async fn run_delete_by_query(
     scroll_size: usize,
 ) -> Value {
     let started = Instant::now();
+
+    // #1222: no match, no flush (see `by_query_matches_anything`). The zero
+    // response mirrors what both arms below already return for a no-match
+    // run over a flushed index: `batches: 0` with `total: 0`.
+    match by_query_matches_anything(idx, query).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return json!({
+                "took": started.elapsed().as_millis() as u64,
+                "timed_out": false,
+                "total": 0,
+                "deleted": 0,
+                "batches": 0,
+                "version_conflicts": 0,
+                "noops": 0,
+                "failures": [],
+                "throttled_millis": 0,
+                "requests_per_second": -1,
+                "throttled_until_millis": 0,
+            });
+        }
+        Err(value) => return value,
+    }
 
     // Flush precondition (see doc comment). Propagated, not swallowed, for
     // the same reason as `reindex`: the flush is a precondition of the
@@ -28243,6 +28309,30 @@ async fn run_update_by_query(
     pipeline: Option<(std::sync::Arc<xerj_engine::Engine>, String)>,
 ) -> Value {
     let started = Instant::now();
+
+    // #1222: no match, no flush (see `by_query_matches_anything`) — the
+    // update twin of the delete gate, same zero shape the arms below return
+    // for a no-match run over a flushed index.
+    match by_query_matches_anything(idx, query).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return json!({
+                "took": started.elapsed().as_millis() as u64,
+                "timed_out": false,
+                "total": 0,
+                "updated": 0,
+                "deleted": 0,
+                "batches": 0,
+                "version_conflicts": 0,
+                "noops": 0,
+                "failures": [],
+                "throttled_millis": 0,
+                "requests_per_second": -1,
+                "throttled_until_millis": 0,
+            });
+        }
+        Err(value) => return value,
+    }
 
     // Flush precondition (see doc comment): the keyset paging below is only
     // correct over on-disk segments, and the single-pass id collection reads
@@ -28756,6 +28846,102 @@ mod scripted_update_publication_tests {
             idx.get_document("counter").await.unwrap(),
             None,
             "the doc must actually be purged, not just reported"
+        );
+    }
+
+    /// #1222: a no-match `_delete_by_query` (and its `_update_by_query`
+    /// twin) must NOT flush. The flush-first is the runners' paging
+    /// precondition (#1019), but a no-op run pages over nothing — and the
+    /// corpus apply loop fires one defensive no-match delete per group op
+    /// (#1224: 402,744 on cve-records), so pre-fix every bulk's document
+    /// was flushed straight back out into a one-doc segment (6,848 of them
+    /// for ~3,005 writes in the node log; ~121 files each on the cvelistV5
+    /// dynamic mapping). Observable here at the unit level: the
+    /// just-written document stays IN the memtable after the no-match run.
+    #[tokio::test]
+    async fn no_match_by_query_does_not_flush() {
+        let state = test_state();
+        let idx = state
+            .engine
+            .get_or_create_index("noop-byquery-no-flush")
+            .unwrap();
+        idx.index_document(Some("d1".into()), json!({"kind": "keep"}))
+            .await
+            .unwrap();
+        assert!(idx.memtable_bytes() > 0, "precondition: doc unflushed");
+
+        let out = run_delete_by_query(
+            &idx,
+            &json!({ "term": { "kind": "absent" } }),
+            None,
+            DEFAULT_BY_QUERY_SCROLL_SIZE as usize,
+        )
+        .await;
+        assert_eq!(out["total"], json!(0));
+        assert_eq!(out["deleted"], json!(0));
+        assert_eq!(out["batches"], json!(0));
+        assert_eq!(out["failures"], json!([]));
+        assert!(
+            idx.memtable_bytes() > 0,
+            "a no-match delete must not drain the memtable (#1222: the flush \
+             itself was the per-write segment storm)"
+        );
+
+        let out = run_update_by_query(
+            &idx,
+            &json!({ "term": { "kind": "absent" } }),
+            None,
+            DEFAULT_BY_QUERY_SCROLL_SIZE as usize,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(out["total"], json!(0));
+        assert_eq!(out["updated"], json!(0));
+        assert_eq!(out["failures"], json!([]));
+        assert!(
+            idx.memtable_bytes() > 0,
+            "a no-match update must not drain the memtable either"
+        );
+    }
+
+    /// The #1222 gate must not weaken the real run: a matching
+    /// `_delete_by_query` still flushes, purges, and reports ES totals —
+    /// the unflushed matching doc is visible to the gate's probe (ordinary
+    /// search path), so it takes the flush arm exactly as before.
+    #[tokio::test]
+    async fn matching_delete_by_query_still_flushes_and_purges() {
+        let state = test_state();
+        let idx = state
+            .engine
+            .get_or_create_index("byquery-gate-real-delete")
+            .unwrap();
+        idx.index_document(Some("gone".into()), json!({"kind": "purge-me"}))
+            .await
+            .unwrap();
+        idx.index_document(Some("stay".into()), json!({"kind": "keep"}))
+            .await
+            .unwrap();
+        assert!(idx.memtable_bytes() > 0, "precondition: docs unflushed");
+
+        let out = run_delete_by_query(
+            &idx,
+            &json!({ "term": { "kind": "purge-me" } }),
+            None,
+            DEFAULT_BY_QUERY_SCROLL_SIZE as usize,
+        )
+        .await;
+        assert_eq!(out["failures"], json!([]));
+        assert_eq!(out["total"], json!(1));
+        assert_eq!(out["deleted"], json!(1));
+        assert_eq!(
+            idx.get_document("gone").await.unwrap(),
+            None,
+            "the matching doc must be purged"
+        );
+        assert!(
+            idx.get_document("stay").await.unwrap().is_some(),
+            "the non-matching doc must survive"
         );
     }
 }
