@@ -4981,7 +4981,18 @@ fn delete_catalog_hits_where(
     let mut ids: Vec<String> = Vec::new();
     let mut from = 0usize;
     for _ in 0..SCOPED_SWEEP_MAX_PAGES {
-        let page = es.search(
+        // #1212: `search_page`, not `search` — the engine answers a missed
+        // default search deadline with a partial 200 (`timed_out`), and a
+        // partial page here would end the sweep early holding a prefix of
+        // the candidate set: the deletes below would remove only what the
+        // prefix contained while `Ok(())` reported the sweep complete. (The
+        // `relation` check below cannot catch it either — a timed-out scan
+        // can still answer `relation: "eq"` with an under-counted total,
+        // live-observed against 58,568 real documents answering
+        // `{value: 0, relation: "eq"}`.) The page variant retries a timed-out
+        // page instead of returning it, so every page this loop sees is
+        // complete.
+        let page = es.search_page(
             catalog::CATALOG_INDEX,
             &json!({"query": query.clone(), "from": from, "size": SCOPED_SWEEP_PAGE}),
         )?;

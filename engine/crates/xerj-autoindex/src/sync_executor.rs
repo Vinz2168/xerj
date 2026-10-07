@@ -648,7 +648,14 @@ impl<'a> EsSyncBackend<'a> {
             if let Some(after) = &search_after {
                 body["search_after"] = after.clone();
             }
-            let response = self.es.search(crate::catalog::CATALOG_INDEX, &body)?;
+            // #1212: a `search_page`, not a `search` — the engine answers a
+            // missed 30 s default deadline with a partial 200 (`timed_out`),
+            // and this walk's short-page break read one partial page as the
+            // end of the catalog: 56,441 documents observed against 58,568
+            // that were all there, on a node whose sorted pages took 11-40 s
+            // while its breaker drained. The page variant retries a timed-out
+            // page at the same continuation key instead of returning it.
+            let response = self.es.search_page(crate::catalog::CATALOG_INDEX, &body)?;
             let hits = response
                 .pointer("/hits/hits")
                 .and_then(Value::as_array)
