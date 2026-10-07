@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A JSON record with no prose now carries a synthesized `text` passage, and a dataset that maps no text-searchable field says so at plan time** (the build-time half of issue [#1158](https://github.com/xerj-org/xerj/issues/1158); the query-time half — falling back to an index's own text-typed fields — shipped in rc.86). Raw-JSON corpora indexed as typed records (ids, enums, numbers, dates) were invisible to `xerj code` passage search: 36,263 GHSA advisories indexed to 193k records that answered `No passage matches` while the same index returned 10,000+ hits over its typed fields. Now a record whose flattened fields carry no prose-like string (≥ 24 chars and ≥ 4 tokens — below that a string is an id, an enum or a date, and maps `keyword`) gains a `text` passage rendered from its own fields (`key: value` lines, values capped at 256 chars, the passage at 4,096, scalar arrays joined so identifiers stay matchable); a record that already carries prose is left alone — the query side already searches it, and a rendered key/value soup would only outrank the real prose — and a record that owns a field named `text` keeps it untouched. Separately, any dataset whose sampled mapping contains no text-searchable field (a csv of enums, a keyword-only XML set) now warns at plan time: `dataset 'x' maps no text-searchable field — 'xerj code' passage search will find nothing in it (sampled fields: …)`, through the progress surface so `--quiet` stays silent. Scoped to the JSON family (whole-file and JSONL) — the measured class is raw-JSON mirrors; the same helper can ride the csv/yaml/xml data sites when a real corpus needs it. Existing state dirs re-provision their JSON datasets once to gain the field; every already-built corpus keeps working, and the 100 hub corpora are unaffected (their graded snapshots map standard fields).
+
 ## [1.0.0-rc.86] - 2026-10-06
 
 ### Security

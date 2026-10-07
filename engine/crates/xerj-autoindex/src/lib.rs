@@ -3546,6 +3546,9 @@ fn build_phase_a(
             .iter()
             .find(|s| s.es_type == "semantic_text")
             .map(|s| s.name.clone());
+        if let Some(note) = textless_dataset_note(&specs, &c.slug) {
+            pr.note(&note);
+        }
         // #1059: the dataset's text-analyzer election, from the same sampled
         // accumulators that elected the semantic body above. Deterministic in
         // the sample, so the same bytes elect the same analyzer on every run.
@@ -3591,6 +3594,35 @@ fn build_phase_a(
         clusters,
         pdf_spools,
     }
+}
+
+/// #1158's zero-text warning, the build-time backstop: a dataset whose
+/// mapping carries no text-searchable field is invisible to `xerj code`
+/// passage search (it reads `body`/`defs`/`title`/`text` and then the index's
+/// own text-typed fields — `xerj-common/src/xccode/fields.rs`). The JSON
+/// family synthesizes a `text` passage for prose-less records, so it stops
+/// hitting this; every other shape (a csv of enums, a keyword-only xml set)
+/// still does, and the operator hears it at plan time instead of wondering
+/// why every query comes back empty. `None` means the dataset is searchable.
+fn textless_dataset_note(specs: &[infer::FieldSpec], slug: &str) -> Option<String> {
+    let searchable = specs
+        .iter()
+        .any(|s| matches!(s.es_type.as_str(), "text" | "semantic_text"));
+    if searchable {
+        return None;
+    }
+    let field_list = specs
+        .iter()
+        .take(6)
+        .map(|s| format!("{}:{}", s.name, s.es_type))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(format!(
+        "dataset '{slug}' maps no text-searchable field — `xerj code` passage search will \
+         find nothing in it (sampled fields: {field_list}{}); structured queries over \
+         typed fields still work",
+        if specs.len() > 6 { " …" } else { "" }
+    ))
 }
 
 // ─── mapping builder ─────────────────────────────────────────────────────
@@ -11053,6 +11085,36 @@ mod unity_pipeline_tests {
         cfg.sample = sample;
         let plan = build_phase_a(root, &files, &keys, &digests, Vec::new(), &ctx, &cfg).plan;
         (plan, files)
+    }
+
+    /// #1158's zero-text warning: a dataset whose sampled fields are all
+    /// keyword/numeric warns, one with any text-searchable spec does not.
+    #[test]
+    fn a_dataset_with_no_text_searchable_field_warns_at_plan_time() {
+        let kw = |name: &str| {
+            let mut s = pipeline_keyword_spec(name);
+            s.es_type = "keyword".into();
+            s
+        };
+        let warned = textless_dataset_note(&[kw("sha256"), kw("size")], "gitsnap");
+        let Some(note) = warned else {
+            panic!("a keyword-only dataset must warn");
+        };
+        assert!(note.contains("gitsnap"), "{note}");
+        assert!(note.contains("sha256:keyword"), "{note}");
+        assert!(note.contains("passage search"), "{note}");
+
+        let mut text = kw("summary");
+        text.es_type = "text".into();
+        assert!(
+            textless_dataset_note(&[kw("id"), text.clone()], "advisories").is_none(),
+            "a dataset with a text field is searchable"
+        );
+        text.es_type = "semantic_text".into();
+        assert!(
+            textless_dataset_note(&[kw("id"), text], "advisories").is_none(),
+            "semantic_text counts as searchable too"
+        );
     }
 
     #[test]
