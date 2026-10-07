@@ -5191,6 +5191,228 @@ mod merge_publication_transaction_tests {
         assert_eq!(result.total.value, 1);
     }
 
+    // ── #1220: the kNN exact-scan admission predicate, capture-scoped ──────
+
+    async fn wait_for_knn_parked(index: &Index) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !index.test_knn_capture_parked.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("kNN scan did not park at its capture");
+    }
+
+    /// A vector corpus for the #1220 tests: one doc per distinct flushed
+    /// segment so the scan's SEGMENT arms (stored documents and vector
+    /// column) are the ones under test — an empty memtable means the
+    /// memtable arm pre-seeds `seen` with nothing.
+    async fn knn_capture_fixture(dir: &TempDir, texts: &[&str]) -> (Engine, Arc<Index>) {
+        // `hand_driven_index` also stops the background merge loop, which is
+        // what these tests want: the only publications inside a parked window
+        // are the ones the test publishes itself.
+        let mut schema = Schema::empty();
+        let mut field = FieldConfig::new("body", FieldType::Text);
+        field.options.dimensions = Some(32);
+        field.options.similarity = Some("cosine".into());
+        field.embedding = Some(xerj_common::types::EmbeddingConfig {
+            endpoint: None,
+            model: None,
+            target_field: Some("body_vector".into()),
+        });
+        schema.add_field(field).unwrap();
+        let mut companion = FieldConfig::new("body_vector", FieldType::Vector);
+        companion.options.dimensions = Some(32);
+        companion.options.similarity = Some("cosine".into());
+        schema.add_field(companion).unwrap();
+        let (engine_instance, idx) = hand_driven_index(dir, "knn-capture", schema);
+        for (n, text) in texts.iter().enumerate() {
+            idx.index_document(Some(format!("d{n}")), serde_json::json!({ "body": text }))
+                .await
+                .unwrap();
+            // One flushed segment per doc: distinct captured segments, and a
+            // memtable left empty for the parked windows below.
+            idx.flush().await.unwrap();
+        }
+        (engine_instance, idx)
+    }
+
+    /// A kNN request that takes the EXACT scan (not HNSW): a no-op `boost`
+    /// (1.0, applied as identity) makes the request non-plain, so it is
+    /// served brute-force — the arm whose admission predicate #1220 scopes —
+    /// while a `similarity` cutoff would exclude sub-threshold docs from the
+    /// answer entirely (ES 8.13 semantics) and hide the low-score hits these
+    /// tests observe. The knn clause rides under `query`: the TOP-LEVEL
+    /// `knn` body key is an ES-wire form the api layer synthesises into this
+    /// same clause (`es_compat.rs`), while `xerj_query::parse_request`
+    /// ignores it — a top-level spelling here would silently parse as
+    /// `match_all` and never reach the scan.
+    fn knn_exact_request(k: usize) -> SearchRequest {
+        xerj_query::parse_request(&serde_json::json!({
+            "query": {
+                "knn": {
+                    "field": "body_vector",
+                    "query_vector": xerj_ai::local::local_embed("alpha one", 32),
+                    "k": k,
+                    "num_candidates": 100,
+                    "boost": 1.0
+                }
+            },
+            "size": k
+        }))
+        .unwrap()
+    }
+
+    /// #1220 control helper: the score of the exact-scan kNN answer for
+    /// `text` against the single-doc corpus "d0", asserting the doc answers
+    /// exactly once on the way in.
+    async fn knn_self_query_score(index: &Index, text: &str) -> f32 {
+        let request = xerj_query::parse_request(&serde_json::json!({
+            "query": {
+                "knn": {
+                    "field": "body_vector",
+                    "query_vector": xerj_ai::local::local_embed(text, 32),
+                    "k": 1,
+                    "num_candidates": 100,
+                    "boost": 1.0
+                }
+            },
+            "size": 1
+        }))
+        .unwrap();
+        let result = index.search(&request).await.unwrap();
+        assert_eq!(
+            result.hits.len(),
+            1,
+            "one live doc must answer once: {:?}",
+            result.hits.iter().map(|h| &h.id).collect::<Vec<_>>()
+        );
+        assert_eq!(result.hits[0].id, "d0");
+        result.hits[0].score
+    }
+
+    /// #1220, post-capture update flavor — the vanish this fix exists for.
+    /// A kNN scan parks the instant its capture validates; an update to a
+    /// captured doc then lands in the memtable (its publication bracket
+    /// completed after the capture, so the capture did NOT retry). The live
+    /// version entry now bumps `seq_no` on `__memtable__`; pre-fix, the
+    /// admission predicate compared the captured copy's `_seq_no` against
+    /// that LATER world's number, dropped the captured copy as stale, and
+    /// the fresh copy sat in a memtable this scan never captured — the doc
+    /// vanished from the answer. The capture-scoped verdict reads the entry
+    /// as PostCapture and the captured copy stands.
+    #[tokio::test]
+    async fn a_knn_scan_parked_across_a_post_capture_update_keeps_the_captured_copy() {
+        let dir = TempDir::new().unwrap();
+        let (_engine, index) = knn_capture_fixture(&dir, &["alpha one", "beta two"]).await;
+        assert_eq!(index.store.snapshot().segments.len(), 2);
+
+        index
+            .test_pause_knn_after_capture
+            .store(true, Ordering::Release);
+        let search_index = Arc::clone(&index);
+        let search =
+            tokio::spawn(async move { search_index.search(&knn_exact_request(2)).await });
+        wait_for_knn_parked(&index).await;
+
+        // A post-capture write: "d1" is updated while the scan is parked.
+        index
+            .index_document(Some("d1".into()), serde_json::json!({ "body": "gamma three" }))
+            .await
+            .unwrap();
+        let ver = index.store.version_map.get("d1").unwrap();
+        assert_eq!(
+            ver.segment_id.as_ref(),
+            xerj_storage::version_map::IN_MEMORY_SEGMENT_ID,
+            "the update must be memtable-resident for the parked-scan window"
+        );
+
+        index
+            .test_pause_knn_after_capture
+            .store(false, Ordering::Release);
+        let result = search.await.unwrap().unwrap();
+        let ids: std::collections::HashSet<_> = result.hits.iter().map(|h| h.id.as_str()).collect();
+        assert!(
+            ids.contains("d1"),
+            "the captured copy of d1 must survive a post-capture update: {ids:?}"
+        );
+        assert_eq!(ids.len(), 2, "k=2 over two docs: {ids:?}");
+    }
+
+    /// #1220, merge flavor. The parked scan's captured world holds two
+    /// segments; a merge publishes inside the window and repoints the live
+    /// entries at its output segment. The pre-fix kNN predicate never
+    /// checked segment identity, so this shape passed by luck (a merge
+    /// preserves `seq_no`); the capture-scoped verdict now decides it
+    /// structurally (PostCapture), and the answer must stay whole.
+    #[tokio::test]
+    async fn a_knn_scan_parked_across_a_merge_publication_keeps_its_captured_hits() {
+        let dir = TempDir::new().unwrap();
+        let (_engine, index) = knn_capture_fixture(&dir, &["alpha one", "beta two"]).await;
+
+        index
+            .test_pause_knn_after_capture
+            .store(true, Ordering::Release);
+        let search_index = Arc::clone(&index);
+        let search =
+            tokio::spawn(async move { search_index.search(&knn_exact_request(2)).await });
+        wait_for_knn_parked(&index).await;
+
+        let merged =
+            tokio::time::timeout(std::time::Duration::from_secs(10), index.run_merge_once())
+                .await
+                .expect("merge blocked on the parked scan's read lease");
+        assert_eq!(merged.unwrap(), 1);
+
+        index
+            .test_pause_knn_after_capture
+            .store(false, Ordering::Release);
+        let result = search.await.unwrap().unwrap();
+        let mut ids: Vec<_> = result.hits.iter().map(|hit| hit.id.clone()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["d0".to_string(), "d1".to_string()]);
+    }
+
+    /// #1220 control: capture-scoping must NOT resurrect a superseded copy
+    /// WITHIN the captured world. Both copies of "d0" are flushed segments
+    /// at capture time (update + flush, both pre-capture); the entry names
+    /// the new segment, so the old segment's copy is Invisible and the doc
+    /// is answered by its CURRENT vector. The 2026-07-12 live-verified bug
+    /// (kNN returned the PRE-update vector) is pinned by score ordering,
+    /// which no score transform can hide: a query for the new text must
+    /// outscore a query for the old text on the same doc iff the live copy
+    /// is the one serving — a resurrected stale copy inverts it.
+    #[tokio::test]
+    async fn a_knn_scan_still_drops_superseded_copies_within_its_capture() {
+        let dir = TempDir::new().unwrap();
+        let (_engine, index) = knn_capture_fixture(&dir, &["alpha one"]).await;
+        // The update, flushed too: a second captured segment, one live entry.
+        index
+            .index_document(Some("d0".into()), serde_json::json!({ "body": "beta two" }))
+            .await
+            .unwrap();
+        index.flush().await.unwrap();
+        assert_eq!(index.store.snapshot().segments.len(), 2);
+        assert_ne!(
+            index
+                .store
+                .version_map
+                .get("d0")
+                .unwrap()
+                .segment_id
+                .as_ref(),
+            xerj_storage::version_map::IN_MEMORY_SEGMENT_ID
+        );
+
+        let new_text_score = knn_self_query_score(&index, "beta two").await;
+        let old_text_score = knn_self_query_score(&index, "alpha one").await;
+        assert!(
+            new_text_score > old_text_score,
+            "the live (beta two) copy must outscore the stale (alpha one) query: \
+             new={new_text_score} old={old_text_score}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn cancellation_inside_guarded_repoint_fails_closed_and_recovery_restores_inputs() {
         let dir = TempDir::new().unwrap();
@@ -8391,6 +8613,16 @@ pub struct Index {
     test_pause_search_after_capture: Arc<AtomicBool>,
     #[cfg(test)]
     test_search_capture_parked: Arc<AtomicBool>,
+    /// #1220 — the kNN exact-scan twin of the pair above: park the next
+    /// kNN scan the instant its capture bracket validates
+    /// (`test_pause_knn_after_capture`), announcing via
+    /// `test_knn_capture_parked` so a test can publish a write, merge or
+    /// flush into the exact window the capture-scoped admission predicate
+    /// exists to make harmless.
+    #[cfg(test)]
+    test_pause_knn_after_capture: Arc<AtomicBool>,
+    #[cfg(test)]
+    test_knn_capture_parked: Arc<AtomicBool>,
     doc_count: Arc<AtomicU64>,
     /// Counter for `update` operations that detected no change to the
     /// existing source — surfaced via `indices.stats` as
@@ -9255,6 +9487,10 @@ impl Index {
             test_pause_search_after_capture: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             test_search_capture_parked: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            test_pause_knn_after_capture: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            test_knn_capture_parked: Arc::new(AtomicBool::new(false)),
             doc_count: Arc::new(AtomicU64::new(0)),
             noop_update_count: Arc::new(AtomicU64::new(0)),
             request_cache_seen: Arc::new(RwLock::new(RequestCacheSeen::new(65_536))),
@@ -9733,6 +9969,10 @@ impl Index {
             test_pause_search_after_capture: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             test_search_capture_parked: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            test_pause_knn_after_capture: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            test_knn_capture_parked: Arc::new(AtomicBool::new(false)),
             doc_count: Arc::new(AtomicU64::new(total_doc_count)),
             noop_update_count: Arc::new(AtomicU64::new(0)),
             request_cache_seen: Arc::new(RwLock::new(RequestCacheSeen::new(65_536))),
@@ -15274,37 +15514,73 @@ impl Index {
     }
 
     /// Whether the exact scan makes a candidate of the stored copy `id` with
-    /// `doc_seq`, recording it in `seen` when it does. Shared by the scan over
-    /// stored documents and the scan over a cached column (#1091), so the two
-    /// cannot disagree about which copy is live.
+    /// `doc_seq` in captured segment `hit_segment`, recording it in `seen`
+    /// when it does. Shared by the scan over stored documents and the scan
+    /// over a cached column (#1091), so the two cannot disagree about which
+    /// copy is live.
+    ///
+    /// #1220: the version-map read is scoped to the scan's capture (see
+    /// [`CapturedEntryVerdict`]). `seen` is consulted FIRST, and its pre-seed
+    /// is the memtable capture's ids — so an id that reaches the version-map
+    /// read is one the memtable capture did NOT hold, which makes a
+    /// memtable-resident entry here a write that landed AFTER the capture:
+    /// every write takes its own publication bracket, and one that straddles
+    /// the capture makes the bracket below answer with the retry signal. A
+    /// later world's entry cannot retire the captured copy, and its `seq_no`
+    /// belongs to that later world, so neither the tombstone check nor the
+    /// stale-copy check may see it. Pre-fix, a post-capture update read the
+    /// live entry's bumped `seq_no`, dropped the captured copy as stale, and
+    /// the fresh copy sat in a world this scan never saw — the #1212 vanish
+    /// shape on the vector path, whose walk runs long enough (#1091 FiQA:
+    /// seconds) for concurrent writes to land inside it. A post-capture
+    /// DELETE still takes effect (`deletes win`, the same semantic the #1218
+    /// legs chose); only the not-deleted entries of a later world are
+    /// ignored.
     fn admit_exact_scan_candidate(
         &self,
         seen: &mut HashSet<String>,
         id: &str,
         doc_seq: Option<u64>,
+        hit_segment: &str,
+        captured_segment_ids: &std::collections::HashSet<&str>,
     ) -> bool {
-        if let Some(ver) = self.store.version_map.get(id) {
-            // Skip tombstoned (deleted) docs.
-            if ver.deleted {
-                return false;
-            }
-            // Superseded stale copy (same predicate as the b8 T2
-            // fix in the count path): an updated doc appears in
-            // both its old and new segments, and first-seen dedup
-            // over oldest-first segment order would resurrect the
-            // PRE-update vector (live-verified 2026-07-12: update
-            // + flush + kNN returned the old vector as if the
-            // update never happened). Skip BEFORE `seen` so the
-            // stale copy can't shadow the live one. Legacy docs
-            // without `_seq_no` keep the first-seen dedup.
-            if let Some(doc_seq) = doc_seq {
-                if doc_seq < ver.seq_no {
-                    return false;
-                }
-            }
-        }
         if seen.contains(id) {
             return false;
+        }
+        if let Some(ver) = self.store.version_map.get(id) {
+            let verdict = if !ver.deleted
+                && ver.segment_id.as_ref()
+                    == xerj_storage::version_map::IN_MEMORY_SEGMENT_ID
+            {
+                CapturedEntryVerdict::PostCapture
+            } else {
+                captured_verdict_for_segment_hit(&ver, hit_segment, captured_segment_ids)
+            };
+            match verdict {
+                // Tombstoned or superseded WITHIN the captured world (the
+                // same predicates the count path's b8 T2 fix uses): an
+                // updated doc appears in both its old and new segments, and
+                // first-seen dedup over oldest-first segment order would
+                // resurrect the PRE-update vector (live-verified
+                // 2026-07-12: update + flush + kNN returned the old vector
+                // as if the update never happened). The live copy is the
+                // one this hit must equal: same segment, not deleted, and
+                // not itself superseded by a higher `seq_no` inside the
+                // captured world.
+                CapturedEntryVerdict::Invisible => return false,
+                CapturedEntryVerdict::Live => {
+                    if let Some(doc_seq) = doc_seq {
+                        if doc_seq < ver.seq_no {
+                            return false;
+                        }
+                    }
+                }
+                // A later world's entry: neither its tombstone nor its
+                // `seq_no` may retire the captured copy (see the #1220
+                // note above). Deletes are the one exception — they win
+                // before the verdict is computed.
+                CapturedEntryVerdict::PostCapture => {}
+            }
         }
         seen.insert(id.to_string());
         true
@@ -15631,12 +15907,56 @@ impl Index {
         // Candidate ORDER is unchanged — memtable first, then segments in
         // snapshot order, then position — because the rank below is a stable
         // sort and that order is what breaks score ties.
+        // #1220 — the capture, bracketed like the BM25 leg's (#1013): the
+        // memtable capture and the segment snapshot below must describe ONE
+        // publication world, or the admission predicate's version-map reads
+        // below have no world to be scoped against. The reference is taken
+        // immediately before the pair and validated immediately after (a
+        // writer-free instant, not a writer-free scan); a straddling
+        // publication answers with the typed retry signal `search()`'s loop
+        // already knows how to recapture on. The pre-fix capture had no
+        // bracket: this leg returns before `search_inner` validates its own
+        // capture at the #1013 check, so nothing ever established that
+        // `mem_docs` and `snap` agreed.
+        let (capture_generation, _, capture_poisoned) = self.collection_publication.state();
+        if capture_poisoned {
+            return Err(collection_publication_interrupted());
+        }
         // Memtable first (newest writes). `Arc` clones, not tree clones.
         let mem_docs: Vec<(String, Arc<Value>)> = self.memtable.all_docs_with_sources_arc();
         let mut candidates: Vec<KnnCandidateAt> =
             (0..mem_docs.len()).map(KnnCandidateAt::Memtable).collect();
         // Then every flushed segment's stored section.
         let snap = self.store.snapshot();
+        {
+            let (generation, in_flight, poisoned) = self.collection_publication.state();
+            if poisoned {
+                return Err(collection_publication_interrupted());
+            }
+            if generation != capture_generation || in_flight != 0 {
+                return Err(collection_capture_crossed());
+            }
+        }
+        // #1220 regression hook: park the scan the instant its capture
+        // validates, so a test can publish a write, merge or flush into the
+        // window this fix exists to make harmless.
+        #[cfg(test)]
+        {
+            if self.test_pause_knn_after_capture.load(Ordering::Acquire) {
+                self.test_knn_capture_parked.store(true, Ordering::Release);
+                while self.test_pause_knn_after_capture.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+                self.test_knn_capture_parked
+                    .store(false, Ordering::Release);
+            }
+        }
+        // #1220 — the captured world's segment ids, scoping every LIVE
+        // version-map read the admission predicate performs below (see
+        // [`CapturedEntryVerdict`]). O(segments) once per search; the walk
+        // that consumes it is O(candidates).
+        let captured_segment_ids: std::collections::HashSet<&str> =
+            snap.segments.iter().map(|meta| meta.id.as_str()).collect();
         // Track seen IDs so later-segment copies don't duplicate memtable entries.
         let mut seen: HashSet<String> = mem_docs.iter().map(|(id, _)| id.clone()).collect();
         let mut segment_views: Vec<KnnSegmentView> = Vec::with_capacity(snap.segments.len());
@@ -15707,7 +16027,13 @@ impl Index {
                         let Some((id, doc_seq)) = column.identity(position) else {
                             continue;
                         };
-                        if self.admit_exact_scan_candidate(&mut seen, id, doc_seq) {
+                        if self.admit_exact_scan_candidate(
+                            &mut seen,
+                            id,
+                            doc_seq,
+                            &meta.id,
+                            &captured_segment_ids,
+                        ) {
                             candidates.push(KnnCandidateAt::Segment { view, position });
                         }
                     }
@@ -15766,7 +16092,13 @@ impl Index {
                     continue;
                 };
                 let doc_seq = doc.get("_seq_no").and_then(Value::as_u64);
-                if self.admit_exact_scan_candidate(&mut seen, id, doc_seq) {
+                if self.admit_exact_scan_candidate(
+                    &mut seen,
+                    id,
+                    doc_seq,
+                    &meta.id,
+                    &captured_segment_ids,
+                ) {
                     candidates.push(KnnCandidateAt::Segment { view, position });
                 }
             }
@@ -17440,12 +17772,33 @@ impl Index {
             .to_string();
 
         // ── Collect candidate parent docs ─────────────────────────────
+        // #1220 — the same capture discipline the top-level exact scan now
+        // applies: memtable capture + segment snapshot inside a validated
+        // writer-free instant, and every version-map read below scoped to
+        // the captured segment ids (see [`CapturedEntryVerdict`]). The
+        // pre-fix inline predicate read the LIVE map, so a delete or update
+        // publishing after the capture silently dropped captured candidates.
+        let (capture_generation, _, capture_poisoned) = self.collection_publication.state();
+        if capture_poisoned {
+            return Err(collection_publication_interrupted());
+        }
         let mut candidates: Vec<(String, Value)> = Vec::new();
         {
             let mem = &*self.memtable;
             candidates.extend(mem.all_docs_with_sources());
         }
         let snap = self.store.snapshot();
+        {
+            let (generation, in_flight, poisoned) = self.collection_publication.state();
+            if poisoned {
+                return Err(collection_publication_interrupted());
+            }
+            if generation != capture_generation || in_flight != 0 {
+                return Err(collection_capture_crossed());
+            }
+        }
+        let captured_segment_ids: std::collections::HashSet<&str> =
+            snap.segments.iter().map(|meta| meta.id.as_str()).collect();
         let mut seen: HashSet<String> = candidates.iter().map(|(id, _)| id.clone()).collect();
         'segments: for meta in snap.segments.iter() {
             if std::time::Instant::now() >= deadline {
@@ -17481,20 +17834,19 @@ impl Index {
                     Some(s) => s.to_string(),
                     None => continue,
                 };
-                if let Some(ver) = self.store.version_map.get(&id) {
-                    if ver.deleted {
-                        continue;
-                    }
-                    // Superseded stale copy — same guard as the top-level
-                    // kNN collector (see run_knn_brute_force): never let an
-                    // old segment's pre-update copy shadow the live one.
-                    if let Some(doc_seq) = doc.get("_seq_no").and_then(Value::as_u64) {
-                        if doc_seq < ver.seq_no {
-                            continue;
-                        }
-                    }
-                }
-                if !seen.insert(id.clone()) {
+                // #1220: the SAME capture-scoped admission the top-level
+                // exact scan applies (never a divergent copy of the
+                // predicate): a later world's entry cannot retire a
+                // captured parent, a captured-world tombstone or superseding
+                // copy still drops it.
+                let doc_seq = doc.get("_seq_no").and_then(Value::as_u64);
+                if !self.admit_exact_scan_candidate(
+                    &mut seen,
+                    &id,
+                    doc_seq,
+                    &meta.id,
+                    &captured_segment_ids,
+                ) {
                     continue;
                 }
                 // Reassembled segment docs have shape
