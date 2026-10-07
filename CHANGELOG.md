@@ -7,10 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.89] - 2026-10-07
+
+### Added
+
+- **A guest post on the blog: "Six eval scars from a production agent-memory system"** (PR
+  [#1211](https://github.com/xerj-org/xerj/pull/1211)) — the community contribution from Chunxiao Wang
+  (Assay / nautilus-compass), landed as a guest post with every measurement his and attributed: topic
+  slicing beating token windows on recall@1 by double digits, an MTEB-leading embedder losing his
+  embedder bakeoff on recall@1, qid grouping against leakage, three-valued retrieval judged with
+  Brier 0.069, cached-input variance attribution, and the paired-vs-unpaired overstatement (a 4×
+  claim collapsing under a paired re-run against an always-yes baseline). The XERJ-side section
+  answers the question the post asks back, checked rather than guessed: 0 of 99 live hub corpora and
+  0 of 132 backlog rows are session or trajectory data, our chunk unit is file/section, and the
+  memory features store curated facts retrieved by BM25 — so the eval shapes the post scars describe
+  are not yet measurable on this engine, which is the honest answer.
+
 ### Performance
 
 - **Exact semantic/kNN scans on passage-chunked corpora no longer re-parse every stored
-  document per query** (issue [#1091](https://github.com/xerj-org/xerj/issues/1091)) — a
+  document per query** (issue
+  [#1091](https://github.com/xerj-org/xerj/issues/1091), PR
+  [#1217](https://github.com/xerj-org/xerj/pull/1217)) — a
   `semantic_text` field whose documents carry passage vectors stays on the exact scan by design
   (309f0b6f), and that scan parsed each segment's stored documents (vectors included, ~53 KB a
   document on FiQA) to read two fields per candidate; they overflowed the hydration budget, the
@@ -24,7 +42,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   261 ms, `hybrid` p50 5,772 → 289 ms, memory-watermark crossings 25 → 0
   (`benchmarks/beir-hybrid/results/2026-10-07-issue-1091/`). Filtered and `scalar8` scans keep
   the stored-document path; a segment stored as LZ4 (under 128 documents) still builds its column
-  and hydrates its winners from parsed documents.
+  and hydrates its winners from parsed documents. The issue stays open: this is the latency half
+  under the lexical embedder — the 13-26 s readings were taken under `--embed-mode neural` on a
+  loaded box, not re-measured here, and the capture-scoping follow-up the review surfaced is
+  separately tracked in [#1220](https://github.com/xerj-org/xerj/issues/1220).
+
+### Fixed
+
+- **The autoindex page walkers no longer read a timed-out partial page as end-of-data** (part of issue
+  [#1212](https://github.com/xerj-org/xerj/issues/1212), PR
+  [#1213](https://github.com/xerj-org/xerj/pull/1213)) — the engine applies a 30 s cooperative deadline
+  to any search whose body carries no timeout and answers a missed deadline with HTTP 200, PARTIAL hits
+  and `timed_out: true`, which is legal on the wire; the xerj-search finalize read-back walked into one
+  on a breaker-drained node (a sorted page answered 441 hits with the flag set) and
+  `catalog_generation`'s short-page break read it as the last page — 56,441 of 58,568 documents
+  certified. `Es::search_page` now sends every page with an explicit 120 s timeout (added only when the
+  caller set none; above the slowest sorted page measured on that node) and retries the SAME page,
+  bounded at six attempts, then fails loudly naming the index; all three walkers
+  (`catalog_generation`, `detect::scan_by_id`, the `delete_catalog_hits_where` sweep) use it. The
+  engine-side question — whether the 30 s default should stand — stays open on
+  [#1212](https://github.com/xerj-org/xerj/issues/1212).
+- **`xerj corpus index` refuses a run it cannot resume over a recorded build** (issue
+  [#1214](https://github.com/xerj-org/xerj/issues/1214), PR
+  [#1215](https://github.com/xerj-org/xerj/pull/1215)) — a state file that records a build pins the
+  corpus to one url, one prefix and one state dir, but a failed conjunct (observed live: `localhost`
+  vs the recorded `127.0.0.1`) fell through to legacy mode silently, and autoindex then opened its
+  default hash-of-root journal — a DIFFERENT journal holding a stale pending sync from a retired
+  attempt — which began re-applying 46,308 operations into the legacy namespace beside the recorded,
+  still-unverified build. Because `xerj code` reads the corpus namespace as one wildcard, both
+  generations served and every hit was duplicated across incompatible groupings. Any failed conjunct
+  now exits 2, printing each recorded value that did not hold and the two recovery routes (matching
+  `--url` to resume; `--fresh` to rebuild beside it); no autoindex invocation runs from the refusal
+  path.
+- **The finalize catalog read-back re-walks while it falls short of the projection** (part of issue
+  [#1212](https://github.com/xerj-org/xerj/issues/1212), PR
+  [#1216](https://github.com/xerj-org/xerj/pull/1216)) — the standing rebuild's read-back walk read 9
+  full 1,000-hit pages, then an EMPTY page with `timed_out` absent: 9,000 of 58,568 documents, no
+  flag, no error, while a terms aggregation on the same field counted all 58,568 and the same walk on
+  an idle node minutes later read all 59 pages clean. Neither existing defense can see that shape (a
+  5xx retry only re-sends failed requests — this answer was 200; the #1213 page check keys on
+  `timed_out` — the flag was absent; page answers report `total {relation: "gte"}` under the
+  track_total_hits cap, so total cannot validate a page either). The one signal that distinguishes a
+  starved walk from a complete one is observed-count-versus-expected, which the barrier already
+  computes: `catalog_generation_complete()` now refreshes and re-walks while the observation is short
+  of the sealed projection's document count, bounded at three attempts, and returns the LAST
+  observation when all fall short so `validate_observed` still produces its loud, precise mismatch.
+  The #971 prior-run stray sweep is deliberately not re-walked: it is a subset check, an unflagged
+  truncated page can only under-report strays, and a false pass is impossible.
+- **Scans no longer drop their captured hits when a merge or flush publishes mid-walk** (part of issue
+  [#1212](https://github.com/xerj-org/xerj/issues/1212), PR
+  [#1218](https://github.com/xerj-org/xerj/pull/1218)) — the #1013 capture bracket validates a
+  writer-free instant and the scan then runs on frozen state (segment snapshot, read lease, captured
+  memtable), but three per-hit liveness checks read the LIVE version map and dropped any hit whose
+  entry no longer named its own segment: a merge publishing after the capture repoints surviving docs
+  at the merged segment (`snapshot.rcu` + version-repoints), a flush repoints off `__memtable__`, and
+  the frozen hits then failed the equality check and were silently dropped — a short or empty page,
+  HTTP 200, `timed_out` absent, self-healing on the next capture. Exactly the read-back shape the
+  client legs above defend around, now fixed at the source. A scan may only apply version entries
+  that describe the world it captured (`CapturedEntryVerdict`): an entry on `__memtable__` or a
+  captured segment decides live/invisible as before; an entry naming a real segment outside the
+  captured set is post-capture and invisible in both directions. The design follows tantivy's
+  reader-generation pinning (SearcherInner behind an ArcSwap swap, segment readers under META_LOCK,
+  live generations pinned via Inventory — the snapshot as the only scan authority, adapted not
+  copied). Park-hook regression tests park a scan between capture and walk across a merge and a flush
+  publication; both lost their captured hits before the fix. The memtable ghost filter, the scored
+  walk and the fused-bool residual walk are all capture-scoped now.
+  [#1212](https://github.com/xerj-org/xerj/issues/1212) stays open until this ships in a release and
+  the standing xerj-search rebuild completes against it; the kNN exact scan's admission predicate
+  still reads the live map (a pre-existing predicate #1217 extracted into a helper, window ~15×
+  narrower for it) and is separately tracked in
+  [#1220](https://github.com/xerj-org/xerj/issues/1220).
 
 ## [1.0.0-rc.88] - 2026-10-07
 
