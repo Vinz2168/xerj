@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`xerj autoindex --code-analyzer standard|code`** (issue
-  [#1198](https://github.com/xerj-org/xerj/issues/1198)) — `code` declares the engine's built-in
+  [#1198](https://github.com/xerj-org/xerj/issues/1198), landed as PR
+  [#1205](https://github.com/xerj-org/xerj/pull/1205)) — `code` declares the engine's built-in
   identifier-aware analyzer (standard tokenizer + word-delimiter + lowercase: `snake_case`,
   `camelCase` and dotted identifiers gain their sub-words, the original token is kept) on newly
   created datasets that hold at least one source file, so a query that says "connection pool"
@@ -48,6 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same pre-merge over-count `_cat/indices` has always had for superseded update copies,
   now visible and documented instead of guessed at. Row count matches `_stats`
   `segments.count` (also pinned).
+- **The rc.87 landing sweep is on main, and the landing constants guard is green again** (PR
+  [#1206](https://github.com/xerj-org/xerj/pull/1206)) — the rc.87 roll stamped the engine and
+  Cargo.lock but not the 92 `V1.0.0-RC.86` landing-page download stamps the rc.86 release commit
+  had included, so the newest-tag comparison in CI's landing-constants guard went red for a day
+  after the rc.87 tag. The sweep moved all 91 `V1.0.0-RC.86` stamps (plus the lowercase
+  `data-latest-tag` span on the index) to RC.87 and regenerated the sitemap (55 lastmods moved).
+  This is also the rule going forward: every rc roll includes the landing stamp sweep as its own
+  commit, which the rc.88 roll below follows.
 - **The finalize-catalog read-back no longer trips the server's query-memory breaker** (part of issue
   [#1183](https://github.com/xerj-org/xerj/issues/1183), PR
   [#1207](https://github.com/xerj-org/xerj/pull/1207)) — the catalog read-back sent
@@ -66,7 +75,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timestamps through one helper and catalog documents keep the agg's `value_as_string` shape. The
   finalize refresh — previously 1,479 serial per-index round trips that read as a stall for the better
   part of an hour against a node whose memory breaker was draining between them — is windowed: 50
-  comma-joined index names per request, one progress tick per index.
+  comma-joined index names per request, one progress tick per index. This is the read-back half
+  only: [#1183](https://github.com/xerj-org/xerj/issues/1183) stays open until the standing
+  xerj-search rebuild completes end-to-end against this client, which is the proof the fix was
+  cut for.
 
 ## [1.0.0-rc.87] - 2026-10-07
 
