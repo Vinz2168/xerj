@@ -56,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after the rc.87 tag. The sweep moved all 91 `V1.0.0-RC.86` stamps (plus the lowercase
   `data-latest-tag` span on the index) to RC.87 and regenerated the sitemap (55 lastmods moved).
   This is also the rule going forward: every rc roll includes the landing stamp sweep as its own
-  commit, which the rc.88 roll below follows.
+  commit, which this rc.88 roll follows (54 pages swept to RC.88, sitemap regen, 183 URLs).
 - **The finalize-catalog read-back no longer trips the server's query-memory breaker** (part of issue
   [#1183](https://github.com/xerj-org/xerj/issues/1183), PR
   [#1207](https://github.com/xerj-org/xerj/pull/1207)) — the catalog read-back sent
