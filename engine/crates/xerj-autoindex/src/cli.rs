@@ -82,6 +82,9 @@ pub struct IndexCfg {
     pub max_file_gb: u64,
     pub sample: usize,
     pub no_semantic: bool,
+    /// `--code-analyzer` (#1198): `code` declares the built-in identifier-aware
+    /// analyzer on newly created datasets that hold source code.
+    pub code_analyzer: crate::infer::CodeAnalyzer,
     /// Second-brain name; None derives it from the root folder basename.
     pub brain: Option<String>,
     /// Disable edge detection entirely (no `.xerj-memory-*-edges` writes).
@@ -294,6 +297,12 @@ pub fn help_text_with(feedback: bool) -> String {
              --max-file-gb <N>    skip+record oversized non-streamable files (default 2)\n\
              --sample <N>         records sampled per file for inference (default 500)\n\
              --no-semantic        skip semantic_text on body fields (pure BM25+keyword)\n\
+             --code-analyzer <A>  standard (default) or code: `code` declares the built-in\n\
+                                  identifier-aware analyzer (splits snake_case/camelCase,\n\
+                                  keeps the original token) on NEWLY created datasets\n\
+                                  holding source code; existing indexes keep theirs.\n\
+                                  Measured +0.11 file-localization acc@5 (#1198); costs\n\
+                                  ~15% index size and ~2.4x text-analysis time\n\
              --brain <NAME>       second-brain name; relationship edges land in\n\
                                   .xerj-memory-<NAME>-edges (default: folder name slug)\n\
              --no-graph           skip relationship detection (wikilinks, local links,\n\
@@ -666,6 +675,7 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
     let mut max_file_gb = 2u64;
     let mut sample = 500usize;
     let mut no_semantic = false;
+    let mut code_analyzer = crate::infer::CodeAnalyzer::default();
     let mut brain: Option<String> = None;
     let mut no_graph = false;
     let mut watch = false;
@@ -898,6 +908,12 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
             "--dry-run" => dry_run = true,
             "--json" => json = true,
             "--md" => json = false,
+            "--code-analyzer" => {
+                let raw = it
+                    .next()
+                    .ok_or("--code-analyzer needs a value: standard or code")?;
+                code_analyzer = crate::infer::CodeAnalyzer::parse(&raw)?;
+            }
             "--progress" => {
                 let raw = it
                     .next()
@@ -1467,6 +1483,7 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
                 max_file_gb,
                 sample: sample.max(50),
                 no_semantic,
+                code_analyzer,
                 brain,
                 no_graph,
                 dry_run,
@@ -2094,6 +2111,33 @@ mod tests {
             index(&["data", "--max-minutes", "10080"]).max_minutes,
             10080
         );
+    }
+
+    /// #1198: `--code-analyzer` defaults to `standard`, takes `code`, and
+    /// refuses anything else by name instead of silently falling back.
+    #[test]
+    fn code_analyzer_flag_parses_and_refuses_unknown_values() {
+        assert_eq!(
+            index(&["data"]).code_analyzer,
+            crate::infer::CodeAnalyzer::Standard
+        );
+        assert_eq!(
+            index(&["data", "--code-analyzer", "code"]).code_analyzer,
+            crate::infer::CodeAnalyzer::Code
+        );
+        assert_eq!(
+            index(&["data", "--code-analyzer", "standard"]).code_analyzer,
+            crate::infer::CodeAnalyzer::Standard
+        );
+        for args in [
+            vec!["data", "--code-analyzer"],
+            vec!["data", "--code-analyzer", "stemmer"],
+        ] {
+            let rendered = args.join(" ");
+            let err = parse(args.into_iter().map(str::to_string).collect())
+                .expect_err(&format!("`{rendered}` must be refused"));
+            assert!(err.contains("--code-analyzer"), "{err}");
+        }
     }
 
     /// `--approve fast` is an instruction, not a label: the run must really

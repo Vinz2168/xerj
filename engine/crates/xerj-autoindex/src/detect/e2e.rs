@@ -365,6 +365,7 @@ pub(super) fn cfg(root: &Path, state_dir: &Path, url: &str) -> IndexCfg {
         max_file_gb: 1,
         sample: 50,
         no_semantic: true,
+        code_analyzer: Default::default(),
         brain: Some("notes".into()),
         no_graph: false,
         // The gate is switched off in these fixtures on purpose: they assert

@@ -335,6 +335,7 @@ fn cfg(root: &Path, state_dir: &Path, url: &str, label: &Path) -> IndexCfg {
         max_file_gb: 1,
         sample: 100,
         no_semantic: true,
+        code_analyzer: Default::default(),
         brain: None,
         no_graph: true,
         max_minutes: 0,
