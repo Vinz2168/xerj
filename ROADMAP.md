@@ -217,13 +217,8 @@ and the console review's), the #1062 wrong-and-confident detection gate, the
 `xerj-decide-v1` Hugging Face publication (operator credentials), and the GA
 bar itself — *The road to v1.0.0 GA* below.
 
-**Open defects.** Eleven, all live on the tracker — the
+**Open defects.** Ten, all live on the tracker — the
 shortlist the release-notes gate checks. From the rc.80 gate runs:
-[#1091](https://github.com/xerj-org/xerj/issues/1091) (hybrid first stage
-13–26 s/query on the 57,638-doc FiQA index; the latency half fixed in
-rc.89 by PR [#1217](https://github.com/xerj-org/xerj/pull/1217) — semantic
-p50 3,865→261 ms — with the original `--embed-mode neural` conditions not
-yet re-measured) and
 [#1094](https://github.com/xerj-org/xerj/issues/1094) (decision
 flywheel write-back freezes once the history index has BM25 support).
 From the rc.80 console knowledge-surface review:
@@ -255,10 +250,25 @@ truncating when a merge or flush publishes mid-walk: the engine fix is
 [#1218](https://github.com/xerj-org/xerj/pull/1218), the client legs
 [#1213](https://github.com/xerj-org/xerj/pull/1213)/[#1216](https://github.com/xerj-org/xerj/pull/1216), all in rc.89; resume3 of the
 standing rebuild aborted on exactly this short read-back, and the issue
-closes only when a rebuild completes against the released fix) and
-[#1220](https://github.com/xerj-org/xerj/issues/1220) (the kNN exact
-scan's admission predicate reads the live version map — pre-existing,
-window ~15× narrower after #1217, capture-scoping filed as the follow-up).
+closes only when a rebuild completes against the released fix) and, from
+the rc.90 window,
+[#1226](https://github.com/xerj-org/xerj/issues/1226) (`_refresh` /
+`delete_by_query?refresh=true` costs 5–16 s under concurrent bulk write
+load — mostly reframed by #1227: those latencies were the unconditional
+no-match flush that #1225 and #1227 removed the callers of; what stays
+open is the flush itself under concurrent bulk load, measured 14–16 s on
+the corpus-builder node).
+**Closed inside the rc.90 window and recorded in the CHANGELOG, not
+carried here:** #1220 (the kNN exact scan's capture bracket and
+capture-scoped admission, PR
+[#1223](https://github.com/xerj-org/xerj/pull/1223)), #1222 (a no-match
+by-query run no longer flushes, PR
+[#1227](https://github.com/xerj-org/xerj/pull/1227)) and #1091 (hybrid
+first-stage latency on FiQA; the latency half fixed in rc.89 by PR
+[#1217](https://github.com/xerj-org/xerj/pull/1217) — semantic p50
+3,865→261 ms — and closed by the #1219 field report that documented the
+session; the `--embed-mode neural` re-measure it flagged is recorded
+here, not left as a silent condition).
 **Closed inside the rc.86 window and recorded in the CHANGELOG, not
 carried here:** #1109, #1189, #1190, #1186, #1146 and #1092 (PRs
 [#1194](https://github.com/xerj-org/xerj/pull/1194),
