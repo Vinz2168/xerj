@@ -329,6 +329,126 @@ fn flatten_into(key: &str, v: Value, depth: usize, out: &mut Map<String, Value>)
     }
 }
 
+/// A string field counts as prose at this many characters …
+const PASSAGE_PROSE_MIN_CHARS: usize = 24;
+/// … and this many whitespace-separated tokens. Below both, a string is an
+/// id, an enum or a date — the values that map `keyword` and leave a record
+/// invisible to passage search.
+const PASSAGE_PROSE_MIN_TOKENS: usize = 4;
+/// Cap on a synthesized passage, in characters. The passage exists so a
+/// record's own field names and values are matchable; past this size the
+/// record is prose-like and synthesis never ran anyway.
+pub const SYNTH_PASSAGE_MAX_CHARS: usize = 4 << 10;
+/// Cap per rendered value inside a synthesized passage, in characters.
+const SYNTH_PASSAGE_VALUE_CHARS: usize = 256;
+
+/// Does this record already carry a string field that reads as prose? Such a
+/// field maps `text` and the query side already searches it (`resolve_fields`
+/// includes `text` and, since rc.86, falls back to the index's own text-typed
+/// fields — `xerj-common/src/xccode/fields.rs`), so synthesizing anything
+/// would only shadow it.
+fn carries_prose(fields: &Map<String, Value>) -> bool {
+    fields.values().any(|v| {
+        v.as_str().is_some_and(|s| {
+            let t = s.trim();
+            t.chars().count() >= PASSAGE_PROSE_MIN_CHARS
+                && t.split_whitespace().count() >= PASSAGE_PROSE_MIN_TOKENS
+        })
+    })
+}
+
+/// #1158's invisible-record class, fixed at the source: a JSON record whose
+/// flattened fields carry no prose-like string is a row of ids, enums and
+/// numbers — nothing `xerj code` passage search can match, because it reads
+/// `body`/`defs`/`title`/`text` and none of them exist. Measured on the live
+/// case: `ghsa-db`, 36,263 raw advisory JSONs indexed to 193k typed records
+/// that answered `No passage matches` while the same index returned 10,000+
+/// hits over its typed fields. This synthesizes a `text` passage from the
+/// record's own fields (`key: value` lines, bounded) so the corpus is
+/// passage-searchable by default instead of only after an undocumented
+/// pre-flatten workaround.
+///
+/// Bounds and rules:
+/// - Never clobbers an existing `text` field (even a short one — the record
+///   owns that name, and its dataset already maps it).
+/// - Only runs when the record carries NO prose field: a record with real
+///   prose is already reachable through the query-side field resolution, and
+///   a rendered key/value soup would outrank that prose in the field order.
+/// - Values are capped ([`SYNTH_PASSAGE_VALUE_CHARS`]) and the passage with
+///   them ([`SYNTH_PASSAGE_MAX_CHARS`]); scalar arrays (ids, aliases) render
+///   joined so an identifier query can reach the record.
+/// - Scoped to the JSON family (whole-file and JSONL) — the measured class is
+///   raw-JSON mirrors. The same helper can ride the csv/yaml/xml Data sites
+///   if a real corpus ever needs it; until then those families are covered
+///   by the dataset-level zero-text warning instead.
+///
+/// Returns whether a passage was inserted, so the call sites' tests can pin
+/// the predicate without reading the record back out.
+pub(crate) fn ensure_text_passage(fields: &mut Map<String, Value>) -> bool {
+    if carries_prose(fields) || fields.contains_key("text") {
+        return false;
+    }
+    let mut passage = String::new();
+    for (k, v) in fields.iter() {
+        let render_value = |txt: &mut String, s: &str| {
+            // Char cap, checked in chars: a byte check would stop a multibyte
+            // passage at a third of its budget (the values that trip it are
+            // exactly the ones already capped to 256 chars, so this recount
+            // is bounded and cheap).
+            if txt.chars().count() >= SYNTH_PASSAGE_MAX_CHARS {
+                return;
+            }
+            if !txt.is_empty() {
+                txt.push('\n');
+            }
+            txt.push_str(k);
+            txt.push_str(": ");
+            let cut = s
+                .trim()
+                .chars()
+                .take(SYNTH_PASSAGE_VALUE_CHARS)
+                .collect::<String>();
+            txt.push_str(&cut);
+        };
+        match v {
+            Value::String(s) => render_value(&mut passage, s),
+            Value::Number(n) => render_value(&mut passage, &n.to_string()),
+            Value::Bool(b) => render_value(&mut passage, &b.to_string()),
+            // Scalar arrays (aliases, tags, versions) join with ", " — their
+            // identifiers are exactly what a passage exists to make matchable.
+            Value::Array(a) if a.iter().all(|e| !e.is_object() && !e.is_array()) => {
+                let joined = a
+                    .iter()
+                    .map(|e| match e {
+                        Value::String(s) => s.trim().to_string(),
+                        other => other.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                render_value(&mut passage, &joined);
+            }
+            _ => {}
+        }
+        if passage.chars().count() >= SYNTH_PASSAGE_MAX_CHARS {
+            break;
+        }
+    }
+    if passage.is_empty() {
+        return false;
+    }
+    // The per-line cap check runs before each append, so a final line can
+    // push past the bound by one line's worth. Enforce it exactly, on a
+    // char boundary (a byte slice could land mid-character: panic = abort).
+    if passage.chars().count() > SYNTH_PASSAGE_MAX_CHARS {
+        passage = passage
+            .chars()
+            .take(SYNTH_PASSAGE_MAX_CHARS)
+            .collect::<String>();
+    }
+    fields.insert("text".to_string(), Value::String(passage));
+    true
+}
+
 /// Convert a parsed YAML value into JSON (shared by the YAML and Unity
 /// extractors). Tagged values unwrap to their inner value; non-string mapping
 /// keys are stringified.
