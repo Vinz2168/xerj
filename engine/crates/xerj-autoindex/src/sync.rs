@@ -1547,11 +1547,11 @@ mod tests {
         assert!(pending
             .apply_operation_state("other", "op-1", SyncOperationState::Started)
             .is_err());
-        assert!(pending.operation_states.get("op-1").is_none());
+        assert!(!pending.operation_states.contains_key("op-1"));
         assert!(pending
             .validate_operation_state("tx", "op-2", &SyncOperationState::Committed)
             .is_err());
-        assert!(pending.operation_states.get("op-2").is_none());
+        assert!(!pending.operation_states.contains_key("op-2"));
 
         // A restructured operations list must not be answered from a stale
         // index built for the old shape.
