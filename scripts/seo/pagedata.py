@@ -157,11 +157,23 @@ PAGES: dict[str, dict[str, str]] = {
         description="A public registry of corpora for AI agents: reference code pinned to SHAs, record packs ed25519-signed, every source licence-reviewed by a human. The measured use case (2.7× fewer output tokens), the tie we published anyway, and how to contribute yours by PR.",
         published="2026-10-01", updated="2026-10-01",
     ),
+    # Guest post, 2026-10-07: Chunxiao Wang (Assay / nautilus-compass)
+    # answered our practitioner invitation in #1118 + #1138. Every measurement
+    # in the post is theirs, quoted from the issues; the only XERJ-side claims
+    # are the §05 registry counts (validate_hub.py run 2026-10-07: 98
+    # manifests, backlog 132 rows after PR #1210, 99 live, zero session/
+    # trajectory corpora).
+    "blog/eval-scars-from-agent-memory.html": dict(
+        label="Guest eval scars", kind="article",
+        title="Six eval scars from a production agent-memory system",
+        description="Guest recipes from Chunxiao Wang (Assay): topic slicing beat token windows on recall@1 by double digits, a 0.87 classifier nearly matched by a 0.78 always-yes baseline, and the mask bug that scored every query zero. Plus the corpus gap we checked and confirmed.",
+        published="2026-10-07", updated="2026-10-07",
+    ),
     "blog/index.html": dict(
         label="Blog", kind="collection",
         title="XERJ.ai — Blog: the engineering log",
-        description="Measured results with the losses left in: the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
-        updated="2026-09-30",
+        description="Measured results with the losses left in: guest eval scars from a production agent-memory system, the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
+        updated="2026-10-07",
     ),
     "demo/index.html": dict(
         label="Real-data demo", kind="software",

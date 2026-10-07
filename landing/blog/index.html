@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>XERJ.ai — Blog: the engineering log</title>
-<meta name="description" content="Measured results with the losses left in: the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
+<meta name="description" content="Measured results with the losses left in: guest eval scars from a production agent-memory system, the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@400;700;800;900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -16,7 +16,7 @@
 <meta property="og:site_name" content="XERJ.ai">
 <meta property="og:type" content="website">
 <meta property="og:title" content="XERJ.ai — Blog: the engineering log">
-<meta property="og:description" content="Measured results with the losses left in: the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
+<meta property="og:description" content="Measured results with the losses left in: guest eval scars from a production agent-memory system, the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
 <meta property="og:url" content="https://xerj.org/blog/">
 <meta property="og:image" content="https://xerj.org/og/xerj-card.png">
 <meta property="og:image:width" content="1200">
@@ -25,7 +25,7 @@
 <meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="XERJ.ai — Blog: the engineering log">
-<meta name="twitter:description" content="Measured results with the losses left in: the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
+<meta name="twitter:description" content="Measured results with the losses left in: guest eval scars from a production agent-memory system, the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
 <meta name="twitter:image" content="https://xerj.org/og/xerj-card.png">
 <script type="application/ld+json">
 {
@@ -59,7 +59,7 @@
   "@context": "https://schema.org",
   "@type": "CollectionPage",
   "name": "XERJ.ai — Blog: the engineering log",
-  "description": "Measured results with the losses left in: the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
+  "description": "Measured results with the losses left in: guest eval scars from a production agent-memory system, the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
   "url": "https://xerj.org/blog/",
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
@@ -126,6 +126,54 @@
   <!-- Reverse-chronological by hand while there is one post; new posts PREPEND.
        Move to a generator only past ~10 posts. -->
   <ol class="blog-list">
+    <li>
+      <a class="bl-card" href="/blog/eval-scars-from-agent-memory">
+        <!-- Guest post: every figure is Chunxiao Wang's, from issues
+             #1118/#1138; the only XERJ-side number is the §05 registry
+             count (0 of 99 live + 0 of 132 backlog, validate_hub.py
+             2026-10-07). Bars share one denominator per row. -->
+        <div class="bl-preview" aria-hidden="true">
+          <div class="blp-kicker">GUEST · AGENT MEMORY · RETRIEVAL EVAL · ISSUES #1118 + #1138</div>
+          <div class="blp-row">
+            <div class="blp-ds">EMBEDDER BAKEOFF</div>
+            <div class="blp-pair">
+              <span class="blp-num">+0.46pt <i>MTEB pick, r@5</i></span><span class="blp-bar b" style="width:14.4%"></span>
+              <span class="blp-num">+2.75pt <i>incumbent, r@1 zh</i></span><span class="blp-bar a" style="width:85.7%"></span>
+            </div>
+          </div>
+          <div class="blp-row">
+            <div class="blp-ds">THE BASELINE</div>
+            <div class="blp-pair">
+              <span class="blp-num">0.87 <i>classifier</i></span><span class="blp-bar a" style="width:100%"></span>
+              <span class="blp-num">0.78 <i>always-yes, n=60</i></span><span class="blp-bar b" style="width:89.7%"></span>
+            </div>
+          </div>
+          <div class="blp-row">
+            <div class="blp-ds">UNPAIRED VS PAIRED</div>
+            <div class="blp-pair">
+              <span class="blp-num">4&times; <i>overstated</i></span><span class="blp-bar b" style="width:100%"></span>
+              <span class="blp-num">1&times; <i>McNemar</i></span><span class="blp-bar a" style="width:25%"></span>
+            </div>
+          </div>
+          <p class="blp-foot">0 of 99 live corpora are agent trajectories · the gap, checked and confirmed</p>
+        </div>
+        <div class="bl-meta">
+          <p class="bl-date"><time datetime="2026-10-07">2026-10-07</time> · GUEST · AGENT MEMORY · EVAL</p>
+          <h2 class="bl-title">Six eval scars from a production agent-memory system</h2>
+          <p class="bl-excerpt">We asked practitioners what agents still miss. Chunxiao Wang (Assay /
+          nautilus-compass) answered with six patterns that each cost a real failure: topic slicing that beat
+          token windows on <strong>recall@1 by double digits</strong> and reversed two embedders' MTEB ranking;
+          a <strong>0.87</strong> classifier a <strong>0.78 always-yes</strong> baseline nearly matched at n=60;
+          the masking bug that scores every query zero; and the paired-vs-unpaired read that overstated an
+          effect <strong>4&times;</strong>. Their price was an honest answer to where our corpus registry is
+          thin against their workload. We checked: <strong>zero</strong> of 99 live corpora are agent
+          trajectories, and our chunking is the wrong shape for topic-sliced session memory. The want now has
+          a named backlog slot.</p>
+          <p class="bl-byline">GUEST · CHUNXIAO WANG, ASSAY / NAUTILUS-COMPASS · PUBLISHED · 2026-10-07</p>
+          <span class="bl-read">READ THE POST &rarr;</span>
+        </div>
+      </a>
+    </li>
     <li>
       <a class="bl-card" href="/blog/the-corpus-hub">
         <!-- Bars share one denominator per row (that row's max). Neutral bar =
