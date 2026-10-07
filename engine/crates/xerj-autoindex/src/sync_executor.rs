@@ -636,6 +636,62 @@ impl<'a> EsSyncBackend<'a> {
         Ok(total)
     }
 
+    /// How many times [`Self::catalog_generation`] may be re-walked when the
+    /// observation falls short of the sealed projection. #1212's second live
+    /// shape: under load the engine can answer a short or empty page with
+    /// `timed_out` absent, so neither the deadline retry nor the flag can
+    /// detect it — only observed-count-versus-expected can. One intermittent
+    /// answer must not cost the whole finalize again.
+    const READBACK_WALK_ATTEMPTS: usize = 3;
+
+    /// The read-back barrier's walk, retried as a whole while it comes back
+    /// short of `expected`. A page-level retry cannot catch an unflagged
+    /// truncation (#1212), but a re-walk can: the answer is intermittent, and
+    /// a fresh walk after a refresh re-reads the full set. Returns the last
+    /// observation when every attempt falls short — the caller's
+    /// exact-equality check then produces the loud, precise mismatch error.
+    fn catalog_generation_complete(
+        &self,
+        run_id: &str,
+        expected: usize,
+    ) -> Result<BTreeMap<String, Value>> {
+        Self::rewalk_while_short(
+            self.pr,
+            expected,
+            || self.catalog_generation(run_id),
+            || self.es.refresh(crate::catalog::CATALOG_INDEX),
+        )
+    }
+
+    /// [`Self::catalog_generation_complete`]'s loop, isolated so its contract
+    /// is pinnable without a node: walk once, and while the observation is
+    /// short of `expected` and attempts remain, refresh and walk again.
+    fn rewalk_while_short(
+        pr: &crate::progress::Progress,
+        expected: usize,
+        mut walk: impl FnMut() -> Result<BTreeMap<String, Value>>,
+        mut refresh: impl FnMut() -> Result<()>,
+    ) -> Result<BTreeMap<String, Value>> {
+        let mut observation = walk()?;
+        for attempt in 2..=Self::READBACK_WALK_ATTEMPTS {
+            if observation.len() >= expected {
+                return Ok(observation);
+            }
+            pr.note(&format!(
+                "autoindex: catalog read-back walk {} of {} saw {} of {} expected documents — \
+                 the node answered a short page without timed_out (#1212); refreshing and \
+                 walking again",
+                attempt - 1,
+                Self::READBACK_WALK_ATTEMPTS,
+                observation.len(),
+                expected,
+            ));
+            refresh()?;
+            observation = walk()?;
+        }
+        Ok(observation)
+    }
+
     fn catalog_generation(&self, run_id: &str) -> Result<BTreeMap<String, Value>> {
         let mut documents = BTreeMap::new();
         let mut search_after: Option<Value> = None;
@@ -1059,7 +1115,12 @@ impl SyncOperationBackend for EsSyncBackend<'_> {
         // Exactly the documents this generation wrote carry its run_id (kept
         // documents keep the run_id of the generation that last touched them),
         // so the run_id-scoped read-back is O(changed) by construction.
-        projection.validate_observed(&self.catalog_generation(&snapshot.tx_id)?)?;
+        // Re-walked while short of the projection: an unflagged truncated page
+        // (#1212) is intermittent, and validate_observed's exact equality is
+        // what should judge a COMPLETE walk, not a starved one.
+        projection.validate_observed(
+            &self.catalog_generation_complete(&snapshot.tx_id, projection.documents.len())?,
+        )?;
         if let Some(prior_run_id) = prior_run_id {
             // #971 sweep. Documents still carrying the prior generation's
             // run_id are legitimate — they are the intentionally kept
@@ -1072,7 +1133,10 @@ impl SyncOperationBackend for EsSyncBackend<'_> {
             // A kept document may legitimately be absent here (a same-prefix
             // journal on another state-dir may have overwritten it — the
             // documented cross-journal collision), so the check is a subset
-            // check, not equality.
+            // check, not equality. Deliberately NOT re-walked when short: this
+            // is a subset check, and an unflagged truncated page (#1212) can
+            // only UNDER-report strays — a false pass is impossible, and a
+            // re-walk here would only re-run the sweep's deletes.
             let remaining = self.catalog_generation(prior_run_id)?;
             let written: BTreeSet<String> = projection.documents.keys().cloned().collect();
             let kept: BTreeSet<&String> = projection.managed_ids.difference(&written).collect();
@@ -4579,6 +4643,120 @@ mod tests {
         assert_eq!(backend.validations, 0);
         assert_eq!(journal.committed_manifest.as_ref().unwrap().generation, 0);
         assert!(journal.pending_sync.is_some());
+    }
+
+    // ── #1212 shape 2: the read-back barrier re-walks an unflagged short page ──
+    //
+    // The live failure: finalize's run_id-scoped sorted walk read 9 full
+    // 1,000-hit pages, then an EMPTY page with `timed_out` absent — 9,000 of
+    // 58,568, no flag, so neither the transport retry nor #1213's page-level
+    // deadline check could see it. Only observed-count-versus-expected can,
+    // and the answer was intermittent: the same walk on an idle node read all
+    // 59 pages clean. These pin the re-walk loop's contract without a node.
+
+    fn doc_map(ids: &[&str]) -> BTreeMap<String, Value> {
+        ids.iter()
+            .map(|id| ((*id).to_string(), Value::String((*id).into())))
+            .collect()
+    }
+
+    #[test]
+    fn a_complete_first_read_back_walk_is_returned_without_refreshing() {
+        let pr = crate::progress::Progress::silent();
+        let walks = std::cell::Cell::new(0u32);
+        let refreshes = std::cell::Cell::new(0u32);
+        let observed = EsSyncBackend::rewalk_while_short(
+            &pr,
+            2,
+            || {
+                walks.set(walks.get() + 1);
+                Ok(doc_map(&["a", "b"]))
+            },
+            || {
+                refreshes.set(refreshes.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(observed.len(), 2);
+        assert_eq!(walks.get(), 1, "the happy path is exactly one walk");
+        assert_eq!(refreshes.get(), 0, "a complete walk never refreshes");
+    }
+
+    #[test]
+    fn a_short_walk_is_refreshed_and_rewalked_until_complete() {
+        let pr = crate::progress::Progress::silent();
+        let walks = std::cell::Cell::new(0u32);
+        let refreshes = std::cell::Cell::new(0u32);
+        let observed = EsSyncBackend::rewalk_while_short(
+            &pr,
+            2,
+            || {
+                walks.set(walks.get() + 1);
+                // walk 1 is the #1212 shape: an unflagged truncated answer;
+                // walk 2 sees the whole set, the way the idle-node probe did
+                Ok(if walks.get() == 1 {
+                    doc_map(&["a"])
+                } else {
+                    doc_map(&["a", "b"])
+                })
+            },
+            || {
+                refreshes.set(refreshes.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(observed.len(), 2, "the complete observation is returned");
+        assert_eq!(walks.get(), 2);
+        assert_eq!(refreshes.get(), 1, "one refresh between the two walks");
+    }
+
+    #[test]
+    fn a_walk_short_every_time_costs_all_attempts_and_returns_the_last_observation() {
+        let pr = crate::progress::Progress::silent();
+        let walks = std::cell::Cell::new(0u32);
+        let observed = EsSyncBackend::rewalk_while_short(
+            &pr,
+            58_568,
+            || {
+                walks.set(walks.get() + 1);
+                // every walk truncates differently short — never complete
+                let id = format!("only-{0}", walks.get());
+                Ok(BTreeMap::from([(id.clone(), Value::String(id))]))
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(
+            walks.get(),
+            EsSyncBackend::READBACK_WALK_ATTEMPTS as u32,
+            "bounded: no infinite re-walk over a persistently truncating node"
+        );
+        assert_eq!(observed.len(), 1);
+        assert_eq!(
+            observed.keys().next().map(String::as_str),
+            Some(format!("only-{0}", EsSyncBackend::READBACK_WALK_ATTEMPTS).as_str()),
+            "the LAST observation is what validate_observed judges — the error \
+             names the final walk's counts, not a stale one"
+        );
+    }
+
+    #[test]
+    fn a_transport_error_in_the_walk_propagates_without_a_retry() {
+        let pr = crate::progress::Progress::silent();
+        let refreshes = std::cell::Cell::new(0u32);
+        let verdict = EsSyncBackend::rewalk_while_short(
+            &pr,
+            2,
+            || Err(anyhow::anyhow!("connection reset")),
+            || {
+                refreshes.set(refreshes.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(verdict.is_err(), "an error is not a short walk");
+        assert_eq!(refreshes.get(), 0, "no refresh over a dead transport");
     }
 }
 
