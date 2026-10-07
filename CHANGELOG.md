@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **Exact semantic/kNN scans on passage-chunked corpora no longer re-parse every stored
+  document per query** (issue [#1091](https://github.com/xerj-org/xerj/issues/1091)) — a
+  `semantic_text` field whose documents carry passage vectors stays on the exact scan by design
+  (309f0b6f), and that scan parsed each segment's stored documents (vectors included, ~53 KB a
+  document on FiQA) to read two fields per candidate; they overflowed the hydration budget, the
+  RSS spike tripped the memory-watermark drain, and every query paid the whole decode again. An
+  unfiltered scan now ranks from per-segment vector columns that also carry `_id`/`_seq_no`,
+  builds a missing column from the stored section's typed kNN projection (no `_source`
+  reconstructed), and hydrates only the ranked winners row-selectively — without the generated
+  embedding companions when the default `_source` would drop them anyway. Answers are unchanged
+  (bit-identical scores against the existing clone-everything oracle; 50/50 identical ranked
+  ids on FiQA). FiQA, 57,638 docs, lexical embedder, same machine: `semantic` p50 3,865 →
+  261 ms, `hybrid` p50 5,772 → 289 ms, memory-watermark crossings 25 → 0
+  (`benchmarks/beir-hybrid/results/2026-10-07-issue-1091/`). Filtered and `scalar8` scans keep
+  the stored-document path; a segment stored as LZ4 (under 128 documents) still builds its column
+  and hydrates its winners from parsed documents.
+
 ## [1.0.0-rc.88] - 2026-10-07
 
 ### Added

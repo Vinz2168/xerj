@@ -15115,6 +15115,206 @@ impl Index {
         ))
     }
 
+    /// Whether the exact scan makes a candidate of the stored copy `id` with
+    /// `doc_seq`, recording it in `seen` when it does. Shared by the scan over
+    /// stored documents and the scan over a cached column (#1091), so the two
+    /// cannot disagree about which copy is live.
+    fn admit_exact_scan_candidate(
+        &self,
+        seen: &mut HashSet<String>,
+        id: &str,
+        doc_seq: Option<u64>,
+    ) -> bool {
+        if let Some(ver) = self.store.version_map.get(id) {
+            // Skip tombstoned (deleted) docs.
+            if ver.deleted {
+                return false;
+            }
+            // Superseded stale copy (same predicate as the b8 T2
+            // fix in the count path): an updated doc appears in
+            // both its old and new segments, and first-seen dedup
+            // over oldest-first segment order would resurrect the
+            // PRE-update vector (live-verified 2026-07-12: update
+            // + flush + kNN returned the old vector as if the
+            // update never happened). Skip BEFORE `seen` so the
+            // stale copy can't shadow the live one. Legacy docs
+            // without `_seq_no` keep the first-seen dedup.
+            if let Some(doc_seq) = doc_seq {
+                if doc_seq < ver.seq_no {
+                    return false;
+                }
+            }
+        }
+        if seen.contains(id) {
+            return false;
+        }
+        seen.insert(id.to_string());
+        true
+    }
+
+    /// Run `work` on the engine's background pool and await its answer —
+    /// never on tokio's blocking pool, for the #751 reason spelled out in
+    /// `stored_values_for_async`. A panic answers `None`, as there.
+    async fn on_background_pool<T, F>(work: F) -> Option<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Option<T> + Send + 'static,
+    {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        crate::background_pool().spawn(move || {
+            let answer =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or(None);
+            let _ = sender.send(answer);
+        });
+        receiver.await.ok().flatten()
+    }
+
+    /// #1091: build a segment's `BestPassage` vector column from the storage
+    /// layer's typed kNN projection — identity and vector columns decoded
+    /// straight to `f32`, no `_source` reconstructed — and publish it under
+    /// `column_key`. The decode it replaces materialised every stored document
+    /// as `serde_json::Value` (~53 KB a document on FiQA's passage-chunked
+    /// corpus), and that transient alone pushed RSS over the memory watermark,
+    /// whose drain then dropped every cached column again.
+    ///
+    /// `Unavailable` whenever the projection cannot stand in for the stored
+    /// documents — a legacy or ZBS3 section, no such vector column, a cell
+    /// shape the typed decoder refuses — and the caller reads the stored
+    /// documents instead.
+    async fn projected_vector_column(
+        &self,
+        segment_id: &str,
+        field: &str,
+        column_key: String,
+    ) -> ProjectedColumn {
+        use crate::vector_column::{ColumnBuilder, ColumnMode};
+        use xerj_storage::stored_codec::{
+            decode_stored_v2_knn_projection, StoredV2KnnProjectionResult,
+        };
+
+        let Ok(permit) = Arc::clone(&self.stored_value_load_semaphore)
+            .acquire_owned()
+            .await
+        else {
+            return ProjectedColumn::Unavailable;
+        };
+        let store = Arc::clone(&self.store);
+        let load_segment_id = segment_id.to_string();
+        let vector_field = field.to_string();
+        let built = Self::on_background_pool(move || {
+            let _permit = permit;
+            let reader = store.open_segment_arc(&load_segment_id).ok()?;
+            // A segment of tombstones alone has no stored section: nothing to
+            // scan, exactly as the stored-document path skips it.
+            let Some(bytes) = reader.section(SectionType::Stored).ok()? else {
+                return Some(None);
+            };
+            let chunk_field = format!("{vector_field}_chunks");
+            let StoredV2KnnProjectionResult::Projected(projection) =
+                decode_stored_v2_knn_projection(bytes, &vector_field, Some(&chunk_field)).ok()?
+            else {
+                return None;
+            };
+            let rows = projection.num_docs;
+            if projection.ids.len() != rows
+                || projection.seq_nos.len() != rows
+                || projection.vectors.len() != rows
+                || projection
+                    .vector_chunks
+                    .as_ref()
+                    .is_some_and(|chunks| chunks.len() != rows)
+            {
+                return None;
+            }
+            let mut builder = ColumnBuilder::new(&vector_field, ColumnMode::BestPassage);
+            for row in 0..rows {
+                builder.push_projected(
+                    projection.ids[row].as_deref(),
+                    projection.seq_nos[row],
+                    projection.vectors[row].as_deref(),
+                    projection
+                        .vector_chunks
+                        .as_ref()
+                        .and_then(|chunks| chunks[row].as_deref()),
+                );
+            }
+            Some(Some(builder.finish()))
+        })
+        .await;
+        let column = match built {
+            Some(Some(column)) => column,
+            Some(None) => return ProjectedColumn::NoStoredSection,
+            None => return ProjectedColumn::Unavailable,
+        };
+        let bytes = column
+            .retained_bytes()
+            .saturating_add(column_key.len() as u64);
+        ProjectedColumn::Built(self.publish_current(
+            &self.vector_column_cache,
+            segment_id,
+            column_key,
+            SegmentCacheCategory::VectorColumn,
+            bytes,
+            column,
+        ))
+    }
+
+    /// #1091: the `(_id, _source)` of the stored documents at `positions` of
+    /// one segment, decoded row-selectively, aligned with `positions`. These
+    /// are the very copies the scan scored — segments are immutable — so the
+    /// hit is what the full decode would have produced, less the top-level
+    /// `omit` fields when given. `None` when the section cannot be hydrated by
+    /// row; the caller then reads the segment's stored documents.
+    async fn hydrate_segment_rows(
+        &self,
+        segment_id: &str,
+        positions: Vec<usize>,
+        omit: Option<Arc<HashSet<String>>>,
+    ) -> Option<Vec<(String, Value)>> {
+        use xerj_storage::stored_codec::{
+            decode_stored_v2_rows, decode_stored_v2_rows_projected, stored_v2_source_column_names,
+            StoredV2RowHydrationResult,
+        };
+
+        let store = Arc::clone(&self.store);
+        let load_segment_id = segment_id.to_string();
+        Self::on_background_pool(move || {
+            let reader = store.open_segment_arc(&load_segment_id).ok()?;
+            let bytes = reader.section(SectionType::Stored).ok()??;
+            let hydrated = match omit {
+                // The vector companions are by far the largest columns of a
+                // passage-chunked segment, and a row-selective decode still
+                // walks a whole column to reach its rows: decoding them for
+                // ten hits cost seconds on FiQA. Every other column is read.
+                Some(omit) => {
+                    let names = stored_v2_source_column_names(bytes).ok()??;
+                    let include: Vec<&str> = names
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|name| !omit.contains(*name))
+                        .collect();
+                    decode_stored_v2_rows_projected(bytes, &positions, &include).ok()?
+                }
+                None => decode_stored_v2_rows(bytes, &positions).ok()?,
+            };
+            let StoredV2RowHydrationResult::Hydrated { rows, .. } = hydrated else {
+                return None;
+            };
+            let mut by_ordinal: HashMap<usize, (String, Value)> = rows
+                .into_iter()
+                .filter_map(|row| {
+                    let id = row.id.as_str()?.to_string();
+                    Some((row.ordinal, (id, Value::Object(row.source))))
+                })
+                .collect();
+            positions
+                .iter()
+                .map(|position| by_ordinal.remove(position))
+                .collect()
+        })
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn run_knn_brute_force_with_deadline(
         &self,
@@ -15128,6 +15328,67 @@ impl Index {
         boost: Option<f32>,
         min_similarity: Option<f32>,
     ) -> Result<SearchResult> {
+        // #1091: an unfiltered scan first ranks from vector columns alone and
+        // hydrates only the winners. It hands the request back (`None`) when a
+        // winner's segment can no longer be read — a merge retired it between
+        // scoring and hydration — and the scan below then answers from the
+        // stored documents, exactly as it always did.
+        if filter.is_none() {
+            if let Some(result) = self
+                .run_knn_exact_scan(
+                    request,
+                    deadline,
+                    field,
+                    query_vec,
+                    k,
+                    None,
+                    similarity,
+                    boost,
+                    min_similarity,
+                    true,
+                )
+                .await?
+            {
+                return Ok(result);
+            }
+        }
+        let result = self
+            .run_knn_exact_scan(
+                request,
+                deadline,
+                field,
+                query_vec,
+                k,
+                filter,
+                similarity,
+                boost,
+                min_similarity,
+                false,
+            )
+            .await?;
+        Ok(result.expect("a scan over stored documents always answers"))
+    }
+
+    /// The exact kNN scan. With `columns_only` (honoured only unfiltered and
+    /// off `scalar8`), a segment whose vector column is cached, or can be
+    /// built from the typed projection, is scanned from that column without
+    /// its stored documents, and the ranked winners are hydrated by position;
+    /// `Ok(None)` means one of them could not be, and the caller must rescan
+    /// without `columns_only`. Without it the result is always `Some`.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_knn_exact_scan(
+        &self,
+        request: &SearchRequest,
+        deadline: std::time::Instant,
+        field: &str,
+        query_vec: &[f32],
+        k: usize,
+        filter: Option<Box<QueryNode>>,
+        similarity: &str,
+        boost: Option<f32>,
+        min_similarity: Option<f32>,
+        columns_only: bool,
+    ) -> Result<Option<SearchResult>> {
         use crate::vector_column::{ColumnBuilder, ColumnMode, DocVectorsView};
 
         let started = std::time::Instant::now();
@@ -15183,9 +15444,12 @@ impl Index {
                 )
                 .await
             {
-                return Ok(result);
+                return Ok(Some(result));
             }
         }
+        // The column-only scan needs no source before ranking; a filter reads
+        // sources, and `scalar8` keeps the scan its filtered oracle pins.
+        let columns_only = columns_only && filter.is_none() && !use_sq8;
 
         // `scalar8` reads only the pooled vector; the default scan prefers the
         // per-passage companion. The two shapes are cached under different keys.
@@ -15232,6 +15496,77 @@ impl Index {
                 timed_out = true;
                 break;
             }
+            // The segment's vectors as flat `f32`s. Cached per immutable
+            // segment; on a miss it is derived in the SAME pass that collects
+            // candidates, so a cold query walks the stored documents once and
+            // keeps the cooperative checkpoints it always had. Every position
+            // is pushed — live or not — because liveness is this query's
+            // business and the column outlives it.
+            let column_key = format!("{}\u{1}{field}\u{1}{}", meta.id, column_mode.key_tag());
+            let cached_column = self
+                .vector_column_cache
+                .get(&column_key)
+                .map(|entry| Arc::clone(entry.value()));
+            // #1091: a cached column carries every position's `_id` and
+            // `_seq_no`, which is all candidate selection reads. Scanning it
+            // alone skips the segment's parsed stored documents — on a
+            // passage-chunked corpus tens of kilobytes a document, so they
+            // overflow the hydration budget and every query used to decode
+            // the whole corpus again (FiQA, 57,638 documents: 6-7 s a query).
+            if columns_only {
+                let column = match cached_column.as_ref() {
+                    Some(column) => Some(Arc::clone(column)),
+                    // Bounded like the stored-document load below: past the
+                    // deadline the request stops waiting and reports a
+                    // timed-out partial answer (the abandoned column is not
+                    // published; the next query builds it again).
+                    None => match tokio::time::timeout_at(
+                        tokio::time::Instant::from_std(deadline),
+                        self.projected_vector_column(&meta.id, field, column_key.clone()),
+                    )
+                    .await
+                    {
+                        Ok(ProjectedColumn::Built(column)) => Some(column),
+                        Ok(ProjectedColumn::NoStoredSection) => continue,
+                        Ok(ProjectedColumn::Unavailable) => None,
+                        Err(_) => {
+                            timed_out = true;
+                            break;
+                        }
+                    },
+                };
+                if let Some(column) = column {
+                    let view = segment_views.len();
+                    let mut segment_complete = true;
+                    for position in 0..column.len() {
+                        if position & 127 == 0
+                            && self.exact_scan_checkpoint(position, deadline).await
+                        {
+                            timed_out = true;
+                            segment_complete = false;
+                            break;
+                        }
+                        let Some((id, doc_seq)) = column.identity(position) else {
+                            continue;
+                        };
+                        if self.admit_exact_scan_candidate(&mut seen, id, doc_seq) {
+                            candidates.push(KnnCandidateAt::Segment { view, position });
+                        }
+                    }
+                    segment_views.push(KnnSegmentView {
+                        segment_id: meta.id.clone(),
+                        docs: None,
+                        column,
+                    });
+                    if trace_phases {
+                        tracing::info!(index=%self.name, segment=%meta.id, elapsed_ms=segment_started.elapsed().as_millis() as u64, candidates=candidates.len(), "semantic_phase=column_segment");
+                    }
+                    if !segment_complete {
+                        break;
+                    }
+                    continue;
+                }
+            }
             let docs_arc = match tokio::time::timeout_at(
                 tokio::time::Instant::from_std(deadline),
                 self.stored_values_for_async(&meta.id),
@@ -15249,17 +15584,6 @@ impl Index {
                 timed_out = true;
                 break;
             }
-            // The segment's vectors as flat `f32`s. Cached per immutable
-            // segment; on a miss it is derived in the SAME pass that collects
-            // candidates, so a cold query walks the stored documents once and
-            // keeps the cooperative checkpoints it always had. Every position
-            // is pushed — live or not — because liveness is this query's
-            // business and the column outlives it.
-            let column_key = format!("{}\u{1}{field}\u{1}{}", meta.id, column_mode.key_tag());
-            let cached_column = self
-                .vector_column_cache
-                .get(&column_key)
-                .map(|entry| Arc::clone(entry.value()));
             let mut builder = cached_column
                 .is_none()
                 .then(|| ColumnBuilder::new(field, column_mode));
@@ -15283,31 +15607,10 @@ impl Index {
                 let Some(id) = doc.get("_id").and_then(Value::as_str) else {
                     continue;
                 };
-                if let Some(ver) = self.store.version_map.get(id) {
-                    // Skip tombstoned (deleted) docs.
-                    if ver.deleted {
-                        continue;
-                    }
-                    // Superseded stale copy (same predicate as the b8 T2
-                    // fix in the count path): an updated doc appears in
-                    // both its old and new segments, and first-seen dedup
-                    // over oldest-first segment order would resurrect the
-                    // PRE-update vector (live-verified 2026-07-12: update
-                    // + flush + kNN returned the old vector as if the
-                    // update never happened). Skip BEFORE `seen` so the
-                    // stale copy can't shadow the live one. Legacy docs
-                    // without `_seq_no` keep the first-seen dedup.
-                    if let Some(doc_seq) = doc.get("_seq_no").and_then(Value::as_u64) {
-                        if doc_seq < ver.seq_no {
-                            continue;
-                        }
-                    }
+                let doc_seq = doc.get("_seq_no").and_then(Value::as_u64);
+                if self.admit_exact_scan_candidate(&mut seen, id, doc_seq) {
+                    candidates.push(KnnCandidateAt::Segment { view, position });
                 }
-                if seen.contains(id) {
-                    continue;
-                }
-                seen.insert(id.to_string());
-                candidates.push(KnnCandidateAt::Segment { view, position });
             }
             let column = match (cached_column, builder) {
                 (Some(column), _) => column,
@@ -15336,7 +15639,8 @@ impl Index {
                 (None, None) => unreachable!("a builder exists whenever the column is not cached"),
             };
             segment_views.push(KnnSegmentView {
-                docs: docs_arc,
+                segment_id: meta.id.clone(),
+                docs: Some(docs_arc),
                 column,
             });
             if trace_phases {
@@ -15581,20 +15885,102 @@ impl Index {
         // shared stored values, so a query pays for `k` sources, not for the
         // corpus.
         rank_knn_pool(&mut scored, k, |entry| entry.1);
-        let ranked: Vec<(String, f32, Value, Option<u32>)> = scored
-            .into_iter()
-            .map(|(candidate, score, ordinal)| {
-                let (id, source) = candidates[candidate].hydrate(&mem_docs, &segment_views);
-                (id, score, source, ordinal)
-            })
-            .collect();
-
-        // (result shaping is shared with the HNSW path so hits format / total
-        // semantics cannot drift between the exact and approximate executors)
+        // #1091: winners in a column-scanned segment are hydrated together,
+        // one row-selective decode per segment, before the page is assembled.
+        let mut by_view: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (candidate, _, _) in &scored {
+            if let KnnCandidateAt::Segment { view, position } = candidates[*candidate] {
+                if segment_views[view].docs.is_none() {
+                    by_view.entry(view).or_default().push(position);
+                }
+            }
+        }
         let generated_companion_fields = {
             let schema = self.schema.read().await;
             generated_embedding_companion_fields(&schema.schema)
         };
+        // The default `_source` drops the generated embedding companions from
+        // every hit without reporting it (`apply_source_filter_measured`), and
+        // none of the shapes below reads a hit's source before that: so for
+        // them the companions are not hydrated at all. Anything else — an
+        // explicit `_source`, aggregations over the neighbours, `fields`,
+        // scripts, sort, collapse, rescore — gets the whole document.
+        let omit_companions = (matches!(request.source, SourceFilter::Default)
+            && !generated_companion_fields.is_empty()
+            && request.aggs.is_none()
+            && request.fields.is_empty()
+            && request.script_fields.is_none()
+            && request.sort.is_empty()
+            && request.collapse.is_none()
+            && request.rescore.is_empty())
+        .then(|| Arc::new(generated_companion_fields.clone()));
+        let mut column_hits: HashMap<(usize, usize), (String, Value)> = HashMap::new();
+        for (view, positions) in by_view {
+            let hydrate_started = std::time::Instant::now();
+            let rows_wanted = positions.len();
+            let rows = match self
+                .hydrate_segment_rows(
+                    &segment_views[view].segment_id,
+                    positions.clone(),
+                    omit_companions.clone(),
+                )
+                .await
+            {
+                Some(rows) => rows,
+                // A section the row decoder cannot address — LZ4 below
+                // `V2_MIN_DOCS` documents, a ZBS3 wrapper, a dependency shape
+                // it refuses — is hydrated the way it always was, from the
+                // segment's parsed stored documents. Only a segment that is
+                // gone altogether sends the request back to a full rescan.
+                None => {
+                    let Some(docs) = self
+                        .stored_values_for_async(&segment_views[view].segment_id)
+                        .await
+                    else {
+                        return Ok(None);
+                    };
+                    let Some(rows) = positions
+                        .iter()
+                        .map(|&position| docs.get(position).map(knn_stored_hit))
+                        .collect::<Option<Vec<_>>>()
+                    else {
+                        return Ok(None);
+                    };
+                    rows
+                }
+            };
+            for (position, (id, source)) in positions.into_iter().zip(rows) {
+                // The row must be the document the column scored.
+                if segment_views[view]
+                    .column
+                    .identity(position)
+                    .map(|(id, _)| id)
+                    != Some(id.as_str())
+                {
+                    return Ok(None);
+                }
+                column_hits.insert((view, position), (id, source));
+            }
+            if trace_phases {
+                tracing::info!(index=%self.name, segment=%segment_views[view].segment_id, rows=rows_wanted, elapsed_ms=hydrate_started.elapsed().as_millis() as u64, "semantic_phase=hydrate_rows");
+            }
+        }
+        let mut ranked: Vec<(String, f32, Value, Option<u32>)> = Vec::with_capacity(scored.len());
+        for (candidate, score, ordinal) in scored {
+            let (id, source) = match candidates[candidate].hydrate(&mem_docs, &segment_views) {
+                KnnHydrated::Ready(id, source) => (id, source),
+                KnnHydrated::Columnar { view, position } => {
+                    match column_hits.remove(&(view, position)) {
+                        Some(hit) => hit,
+                        None => return Ok(None),
+                    }
+                }
+            };
+            ranked.push((id, score, source, ordinal));
+        }
+
+        // (result shaping is shared with the HNSW path so hits format / total
+        // semantics cannot drift between the exact and approximate executors)
         let mut result = knn_result_from_ranked(
             self,
             request,
@@ -15610,7 +15996,7 @@ impl Index {
         if trace_phases {
             tracing::info!(index=%self.name, elapsed_ms=started.elapsed().as_millis() as u64, hits=result.hits.len(), "semantic_phase=complete");
         }
-        Ok(result)
+        Ok(Some(result))
     }
 
     /// PURE multi-KNN executor (the ES top-level `knn: [...]` array form,
@@ -38828,10 +39214,32 @@ enum KnnCandidateAt {
 }
 
 /// One segment as the exact scan sees it: the shared parsed documents and the
-/// flat vectors derived from them, aligned by position.
+/// flat vectors derived from them, aligned by position. `docs` is `None` when
+/// an unfiltered scan read the segment from its cached column alone (#1091).
 struct KnnSegmentView {
-    docs: Resident<Vec<Value>>,
+    segment_id: String,
+    docs: Option<Resident<Vec<Value>>>,
     column: Resident<crate::vector_column::SegmentVectorColumn>,
+}
+
+/// What [`Index::projected_vector_column`] made of a segment (#1091).
+enum ProjectedColumn {
+    Built(Resident<crate::vector_column::SegmentVectorColumn>),
+    /// Tombstones only: there is nothing to scan.
+    NoStoredSection,
+    /// The projection cannot stand in; read the stored documents.
+    Unavailable,
+}
+
+/// A ranked candidate's hit, or what is needed to fetch it (#1091).
+enum KnnHydrated {
+    Ready(String, Value),
+    /// Its segment was scanned from the column alone: the scan hydrates it
+    /// from the segment by position.
+    Columnar {
+        view: usize,
+        position: usize,
+    },
 }
 
 impl KnnCandidateAt {
@@ -38847,7 +39255,10 @@ impl KnnCandidateAt {
                 (id.as_str(), source.as_ref())
             }
             Self::Segment { view, position } => {
-                let doc = &segment_views[view].docs[position];
+                let doc = &segment_views[view]
+                    .docs
+                    .as_ref()
+                    .expect("a filtered scan always loads the stored documents")[position];
                 // A segment candidate is only ever created for a document
                 // with a string `_id`.
                 let id = doc.get("_id").and_then(Value::as_str).unwrap_or_default();
@@ -38861,34 +39272,43 @@ impl KnnCandidateAt {
         &self,
         mem_docs: &[(String, Arc<Value>)],
         segment_views: &[KnnSegmentView],
-    ) -> (String, Value) {
+    ) -> KnnHydrated {
         match *self {
             Self::Memtable(slot) => {
                 let (id, source) = &mem_docs[slot];
-                (id.clone(), (**source).clone())
+                KnnHydrated::Ready(id.clone(), (**source).clone())
             }
             Self::Segment { view, position } => {
-                let doc = &segment_views[view].docs[position];
-                let id = doc
-                    .get("_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                // Reassembled segment docs have shape
-                //   { "_id":..., "_seq_no":..., "_source": {...} }
-                // and a hit carries the `_source`; legacy pre-M7 segments
-                // without `_source` fall through to the wrapper minus `_id`.
-                let source = doc.get("_source").cloned().unwrap_or_else(|| {
-                    let mut d = doc.clone();
-                    if let Some(obj) = d.as_object_mut() {
-                        obj.remove("_id");
-                    }
-                    d
-                });
-                (id, source)
+                let segment = &segment_views[view];
+                let Some(docs) = segment.docs.as_ref() else {
+                    return KnnHydrated::Columnar { view, position };
+                };
+                let (id, source) = knn_stored_hit(&docs[position]);
+                KnnHydrated::Ready(id, source)
             }
         }
     }
+}
+
+/// A segment's stored document as a kNN hit: its `_id` and an owned source.
+/// Reassembled segment docs have shape
+///   { "_id":..., "_seq_no":..., "_source": {...} }
+/// and a hit carries the `_source`; legacy pre-M7 segments without `_source`
+/// fall through to the wrapper minus `_id`.
+fn knn_stored_hit(doc: &Value) -> (String, Value) {
+    let id = doc
+        .get("_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let source = doc.get("_source").cloned().unwrap_or_else(|| {
+        let mut d = doc.clone();
+        if let Some(obj) = d.as_object_mut() {
+            obj.remove("_id");
+        }
+        d
+    });
+    (id, source)
 }
 
 /// How the exact kNN scan shows one document to its `filter` (#939).
@@ -56989,6 +57409,14 @@ mod exact_scan_hydration_tests {
         Engine::new(config).expect("engine")
     }
 
+    /// One ingest shard: a flush writes one segment, not one per shard.
+    fn single_shard_engine(dir: &TempDir) -> Engine {
+        let mut config = xerj_common::config::Config::default();
+        config.server.data_dir = dir.path().to_string_lossy().into_owned();
+        config.engine.ingest_shards = 1;
+        Engine::new(config).expect("engine")
+    }
+
     /// `compute_vector_similarity` as it stood before #939, verbatim. The
     /// oracle must not share code with what it checks.
     fn legacy_similarity(sim: &str, a: &[f32], b: &[f32]) -> f32 {
@@ -57626,6 +58054,211 @@ mod exact_scan_hydration_tests {
         idx.release_memory();
         assert!(idx.vector_column_cache.is_empty());
         assert_eq!(rows(&before), rows(&scan().await.unwrap()));
+    }
+
+    /// `seed` without the shapes the typed projection refuses (a passage that
+    /// is not an array, a passage of the wrong kind), on an engine with one
+    /// ingest shard so each flush is one segment large enough to be written
+    /// columnar (a shard under `V2_MIN_DOCS` documents is written as LZ4).
+    /// Two segments, the second superseding and deleting part of the first,
+    /// plus a live memtable; every third document chunked. Returns how many
+    /// segments hold a columnar stored section.
+    async fn seed_projectable(idx: &Arc<Index>) -> usize {
+        let mut rng = Lcg(0x1091);
+        let shared = rng.vector();
+        for id in 0..400 {
+            idx.index_document_prepared(Some(format!("d{id}")), document(id, &mut rng, &shared))
+                .await
+                .unwrap();
+        }
+        idx.flush().await.unwrap();
+        for id in (0..400).step_by(9) {
+            idx.index_document_prepared(
+                Some(format!("d{id}")),
+                document(id + 1000, &mut rng, &shared),
+            )
+            .await
+            .unwrap();
+        }
+        for id in (5..400).step_by(17) {
+            idx.delete_document(&format!("d{id}")).await.unwrap();
+        }
+        for id in 400..600 {
+            idx.index_document_prepared(Some(format!("d{id}")), document(id, &mut rng, &shared))
+                .await
+                .unwrap();
+        }
+        idx.flush().await.unwrap();
+        for id in (3..600).step_by(31) {
+            idx.index_document_prepared(
+                Some(format!("d{id}")),
+                document(id + 2000, &mut rng, &shared),
+            )
+            .await
+            .unwrap();
+        }
+        idx.store
+            .snapshot()
+            .segments
+            .iter()
+            .filter(|meta| {
+                let reader = idx.store.open_segment_arc(&meta.id).unwrap();
+                reader
+                    .section(SectionType::Stored)
+                    .unwrap()
+                    .is_some_and(xerj_storage::stored_codec::is_columnar_stored_magic)
+            })
+            .count()
+    }
+
+    /// #1091: an unfiltered exact scan ranks from the segments' vector
+    /// columns and hydrates only its winners, so it never parses a segment's
+    /// stored documents — not to build a column (the typed projection does
+    /// that), not to pick candidates, and not after those parsed documents
+    /// have been evicted. On a passage-chunked corpus those documents were
+    /// ~53 KB each and overflowed the hydration budget: FiQA paid a full
+    /// re-parse on every query (6-7 s). The answer stays the oracle's, bit
+    /// for bit.
+    #[tokio::test]
+    async fn unfiltered_exact_scan_never_parses_stored_documents() {
+        let dir = TempDir::new().unwrap();
+        let engine = single_shard_engine(&dir);
+        engine
+            .create_index("scan-1091", vector_schema(None))
+            .unwrap();
+        let idx = engine.get_index("scan-1091").unwrap();
+        idx.schema.write().await.dynamic = xerj_common::schema::DynamicMapping::Runtime;
+        let columnar = seed_projectable(&idx).await;
+        assert!(
+            columnar >= 2,
+            "the fixture needs columnar segments: {columnar}"
+        );
+        let with_stored = idx
+            .store
+            .snapshot()
+            .segments
+            .iter()
+            .filter(|meta| {
+                let reader = idx.store.open_segment_arc(&meta.id).unwrap();
+                reader.section(SectionType::Stored).unwrap().is_some()
+            })
+            .count();
+        assert_eq!(
+            columnar, with_stored,
+            "a legacy segment would be read the old way"
+        );
+        idx.test_stored_value_load_count.store(0, Ordering::Relaxed);
+
+        let mut rng = Lcg(0x5EED);
+        for round in 0..6 {
+            if round == 3 {
+                // What the memory-pressure drain does to parsed documents.
+                idx.stored_value_cache.clear();
+            }
+            let query = rng.vector();
+            for k in [1usize, 10, 1000] {
+                let request = SearchRequest {
+                    size: k,
+                    ..SearchRequest::default()
+                };
+                let got = idx
+                    .run_knn_brute_force(
+                        &request,
+                        "body_vector",
+                        &query,
+                        k,
+                        None,
+                        "cosine",
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    idx.test_stored_value_load_count.load(Ordering::Relaxed),
+                    0,
+                    "round {round} k={k}: the scan parsed a segment's stored documents"
+                );
+                let expected =
+                    legacy_scan(&idx, "body_vector", &query, k, None, "cosine", None, None).await;
+                assert_eq!(
+                    got.hits
+                        .iter()
+                        .map(|h| (h.id.clone(), h.score.to_bits()))
+                        .collect::<Vec<_>>(),
+                    expected
+                        .iter()
+                        .map(|(id, bits, _, _)| (id.clone(), *bits))
+                        .collect::<Vec<_>>(),
+                    "round {round} k={k}: ids, order and score bits"
+                );
+                // The default `_source` is exactly the oracle's document less
+                // the generated companions it never shows — which a
+                // column-scanned winner is hydrated without.
+                let companions = generated_embedding_companion_fields(&idx.schema().await);
+                for (hit, (_, _, _, source)) in got.hits.iter().zip(&expected) {
+                    let mut want = source.clone();
+                    strip_internal_passage_metadata(&mut want);
+                    if let Some(map) = want.as_object_mut() {
+                        map.retain(|key, _| !companions.contains(key));
+                    }
+                    assert_eq!(
+                        hit.source, want,
+                        "round {round} k={k}: source of {}",
+                        hit.id
+                    );
+                }
+            }
+        }
+        let column_keys = idx.vector_column_cache.len();
+        assert!(column_keys >= 2, "columns were never published");
+    }
+
+    /// #1091: a request that can see the generated companions — here an
+    /// explicit `_source: true` — is hydrated with them, from the scored copy.
+    #[tokio::test]
+    async fn column_scanned_hits_keep_companions_when_the_source_is_asked_for() {
+        let dir = TempDir::new().unwrap();
+        let engine = single_shard_engine(&dir);
+        engine
+            .create_index("scan-1091-source", vector_schema(None))
+            .unwrap();
+        let idx = engine.get_index("scan-1091-source").unwrap();
+        idx.schema.write().await.dynamic = xerj_common::schema::DynamicMapping::Runtime;
+        assert!(seed_projectable(&idx).await >= 2);
+        let query = Lcg(11).vector();
+        let request = SearchRequest {
+            size: 20,
+            source: SourceFilter::Enabled(true),
+            ..SearchRequest::default()
+        };
+        let got = idx
+            .run_knn_brute_force(
+                &request,
+                "body_vector",
+                &query,
+                20,
+                None,
+                "cosine",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let expected =
+            legacy_scan(&idx, "body_vector", &query, 20, None, "cosine", None, None).await;
+        assert_eq!(got.hits.len(), expected.len());
+        let mut chunked = 0usize;
+        for (hit, (id, _, _, source)) in got.hits.iter().zip(&expected) {
+            assert_eq!(&hit.id, id);
+            assert_eq!(hit.source.get("body_vector"), source.get("body_vector"));
+            assert_eq!(
+                hit.source.get("body_vector_chunks"),
+                source.get("body_vector_chunks")
+            );
+            chunked += usize::from(hit.source.get("body_vector_chunks").is_some());
+        }
+        assert!(chunked > 0, "no chunked document among the hits");
     }
 
     #[test]
