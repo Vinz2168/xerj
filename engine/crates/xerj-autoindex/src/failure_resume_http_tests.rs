@@ -778,6 +778,7 @@ fn cfg(root: &Path, state_dir: &Path, url: &str) -> IndexCfg {
         max_file_gb: 1,
         sample: 50,
         no_semantic: true,
+        code_analyzer: Default::default(),
         // This module preserves legacy graph-enabled failure behavior;
         // incremental non-graph behavior has its own HTTP suite.
         brain: None,

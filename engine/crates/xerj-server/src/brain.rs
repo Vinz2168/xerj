@@ -627,6 +627,7 @@ fn index_cfg(cfg: &BrainCfg, brain: &str, api_key: Option<String>) -> IndexCfg {
         max_file_gb: 2,
         sample: 500,
         no_semantic: false,
+        code_analyzer: Default::default(),
         brain: Some(brain.to_string()),
         no_graph: false,
         dry_run: false,
