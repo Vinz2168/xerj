@@ -700,20 +700,29 @@ impl<'a> EsSyncBackend<'a> {
             // were sealed under, and stays exact even if two datasets ever share
             // one index. `ax_dataset` is written at every sink site and is a
             // mapped `PROVENANCE_FIELDS` keyword.
-            let mut body = serde_json::json!({
+            //
+            // #1183: this read-back must never carry `aggs`. A `size:0 + aggs`
+            // query whose agg has no columnar fast path makes the server
+            // deep-clone every matching document into owned Values before the
+            // agg runs (the "aggregation corpus materialisation" charge in the
+            // engine's search path, ~2 KB a doc against
+            // `limits.max_query_memory_mb`). On the xerj-search rebuild one
+            // ~570 k-record dataset estimated 1.1 GB against the 512 MB
+            // default, the server answered 429 circuit_breaking_exception, the
+            // client retried for its full 600 s budget, and the run aborted —
+            // the "finalize-catalog deadlock". The count needs no corpus; the
+            // time bounds come from two size-1 searches sorted on the time
+            // field (`extreme_time` below), which sort from doc values and
+            // clone nothing.
+            let filter = serde_json::json!([
+                {"terms": {"ax_file": content_ids}},
+                {"term": {"ax_dataset": dataset.slug}}
+            ]);
+            let body = serde_json::json!({
                 "size": 0,
                 "track_total_hits": true,
-                "query": {"bool": {"filter": [
-                    {"terms": {"ax_file": content_ids}},
-                    {"term": {"ax_dataset": dataset.slug}}
-                ]}}
+                "query": {"bool": {"filter": filter}}
             });
-            if let Some(field) = &dataset.time_field {
-                body["aggs"] = serde_json::json!({
-                    "time_min": {"min": {"field": field}},
-                    "time_max": {"max": {"field": field}}
-                });
-            }
             let response = self.es.search(&dataset.index, &body)?;
             let record_count = response
                 .pointer("/hits/total/value")
@@ -791,11 +800,11 @@ impl<'a> EsSyncBackend<'a> {
                     sum.checked_add(group.expected_junk_records)
                         .context("dataset junk-record count overflow")
                 })?;
-            let time = |name: &str| {
-                response
-                    .pointer(&format!("/aggregations/{name}/value_as_string"))
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
+            let time_bound = |order: &'static str| -> Result<Option<String>> {
+                match &dataset.time_field {
+                    Some(field) => self.extreme_time(&dataset.index, &filter, field, order),
+                    None => Ok(None),
+                }
             };
             out.insert(
                 dataset.slug.clone(),
@@ -804,8 +813,8 @@ impl<'a> EsSyncBackend<'a> {
                     junk_records,
                     bytes,
                     formats,
-                    time_min: time("time_min"),
-                    time_max: time("time_max"),
+                    time_min: time_bound("asc")?,
+                    time_max: time_bound("desc")?,
                     sample_queries: crate::catalog::build_sample_queries(dataset, &[]),
                     notes: dataset
                         .group
@@ -822,6 +831,43 @@ impl<'a> EsSyncBackend<'a> {
             self.pr.item_done(0);
         }
         Ok(out)
+    }
+
+    /// One end of a dataset's time range, via a size-1 search sorted on the
+    /// time field under the dataset's own filter (#1183). This replaced a
+    /// `min`/`max` aggregation on the same field: the agg made the server
+    /// materialise the aggregation corpus for the whole dataset and refuse at
+    /// the query-memory breaker on large ones, while a sort reads doc values
+    /// and clones nothing. Exact for the same reason the agg was: the filter
+    /// is the dataset's own identity, and the sort's first hit IS the extreme.
+    ///
+    /// The returned string matches the agg's `value_as_string`: the stored
+    /// `_source` value verbatim when the field holds strings (autoindex date
+    /// fields are ISO strings), and epoch-milliseconds rendered by the same
+    /// ISO helper the engine's `min`/`max` aggs use when it holds numbers —
+    /// so the catalog document does not change shape between corpus builds.
+    fn extreme_time(
+        &self,
+        index: &str,
+        filter: &Value,
+        field: &str,
+        order: &str,
+    ) -> Result<Option<String>> {
+        let body = serde_json::json!({
+            "size": 1,
+            "query": {"bool": {"filter": filter}},
+            "sort": [{field: {"order": order}}],
+            "_source": [field]
+        });
+        let response = self.es.search(index, &body)?;
+        Ok(response
+            .pointer("/hits/hits/0/_source")
+            .and_then(|src| src.get(field))
+            .and_then(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                Value::Number(n) => n.as_i64().map(xerj_common::schema::epoch_ms_to_iso8601_utc),
+                _ => None,
+            }))
     }
 }
 
@@ -945,14 +991,28 @@ impl SyncOperationBackend for EsSyncBackend<'_> {
         // path's phase so a reader of either route sees the same vocabulary.
         self.pr
             .phase("finalize-catalog", desired.plan.datasets.len() as u64, 0);
-        for index in desired
+        // #1183: the refreshes used to run one index per request, serially —
+        // 1,479 round-trips on the xerj-search corpus, each taking seconds
+        // against a node whose memory breaker was draining between them, so
+        // the phase read as `stalled` for the better part of an hour before
+        // the read-back behind it even started. The refresh path takes a
+        // comma-list (the server resolves it through the same selector as a
+        // wildcard), so one request per window of indexes, with one progress
+        // tick per index so the phase denominator keeps its meaning.
+        let indexes: Vec<&str> = desired
             .plan
             .datasets
             .iter()
             .map(|dataset| dataset.index.as_str())
             .collect::<std::collections::BTreeSet<_>>()
-        {
-            self.es.refresh(index)?;
+            .into_iter()
+            .collect();
+        const REFRESH_WINDOW: usize = 50;
+        for batch in indexes.chunks(REFRESH_WINDOW) {
+            self.es.refresh(&batch.join(","))?;
+            for _ in batch {
+                self.pr.item_done(0);
+            }
         }
         self.es.refresh(crate::catalog::CATALOG_INDEX)?;
         let prior_run_id =
