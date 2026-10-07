@@ -5049,6 +5049,148 @@ mod merge_publication_transaction_tests {
         }
     }
 
+    async fn wait_for_search_parked(index: &Index) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !index.test_search_capture_parked.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("search did not park at its capture");
+    }
+
+    /// #1212, merge flavor. A scan parks the instant its capture bracket
+    /// validates; a merge then publishes (snapshot rcu + version-map
+    /// repoint at the merged segment) inside the parked scan's window. The
+    /// frozen snapshot still holds both input segments, but the LIVE
+    /// version entries now name the merged segment — the exact tear the
+    /// pre-fix liveness check (`ver.segment_id != seg_id` against the live
+    /// map) resolved by dropping every hit from the merged-away segments:
+    /// 200 OK, no `timed_out`, and a page short or empty. The capture-scoped
+    /// verdict keeps those hits (PostCapture) and the page comes back whole.
+    #[tokio::test]
+    async fn a_scan_parked_across_a_merge_publication_keeps_its_captured_hits() {
+        let dir = TempDir::new().unwrap();
+        let (_engine, index) = fixture(&dir).await;
+        // The parked scan's captured world: exactly these two segments.
+        let captured_ids: std::collections::HashSet<_> = index
+            .store
+            .snapshot()
+            .segments
+            .iter()
+            .map(|meta| meta.id.clone())
+            .collect();
+        // A real-field match query, not match_all: the stored-doc scan's
+        // capture-scoped liveness check (the site this test pins) is on the
+        // scored walk, which match_all's counting shortcut bypasses.
+        let request = xerj_query::parse_request(&serde_json::json!({
+            "query": {"match": {"value": "old"}},
+            "size": 10,
+            "track_total_hits": true
+        }))
+        .unwrap();
+        index
+            .test_pause_search_after_capture
+            .store(true, Ordering::Release);
+        let search_index = Arc::clone(&index);
+        let search = tokio::spawn(async move { search_index.search(&request).await });
+        wait_for_search_parked(&index).await;
+
+        // Publish a merge into the parked scan's window.
+        let merged =
+            tokio::time::timeout(std::time::Duration::from_secs(10), index.run_merge_once())
+                .await
+                .expect("merge blocked on the parked scan's read lease");
+        assert_eq!(merged.unwrap(), 1);
+        for id in ["a", "b"] {
+            let residency = index.store.version_map.get(id).unwrap().segment_id.clone();
+            assert!(
+                !captured_ids.contains(residency.as_ref()),
+                "merge did not repoint {id}: still {residency:?}"
+            );
+        }
+
+        index
+            .test_pause_search_after_capture
+            .store(false, Ordering::Release);
+        let result = search.await.unwrap().unwrap();
+        let mut ids: Vec<_> = result.hits.iter().map(|hit| hit.id.clone()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(result.total.value, 2);
+    }
+
+    /// #1212, flush flavor. Same park, but the intruding publication is a
+    /// flush: the live entry repoints off `__memtable__` onto a segment the
+    /// capture never held (this index had no segments at all at capture).
+    /// Pre-fix, the memtable ghost filter's equality check read that as
+    /// "superseded" and silently dropped the captured memtable's copy —
+    /// the 0-hit term query from the live incident. The ghost arm needs
+    /// `ghost_events() > 0`, so the fixture overwrites one id before
+    /// searching.
+    #[tokio::test]
+    async fn a_scan_parked_across_a_flush_publication_keeps_its_captured_memtable_hits() {
+        let dir = TempDir::new().unwrap();
+        let (_engine, index) = hand_driven_index(&dir, "flush-tear", Schema::empty());
+        // Two writes of one id: the second arms the ghost window
+        // (`ghost_events() > 0`), and the captured memtable holds exactly
+        // one copy of "a" — the latest.
+        index
+            .index_document(Some("a".into()), serde_json::json!({"value": "alpha one"}))
+            .await
+            .unwrap();
+        index
+            .index_document(Some("a".into()), serde_json::json!({"value": "alpha two"}))
+            .await
+            .unwrap();
+        assert!(index.store.version_map.ghost_events() > 0);
+        let request = xerj_query::parse_request(&serde_json::json!({
+            "query": {"match": {"value": "alpha"}},
+            "size": 10,
+            "track_total_hits": true
+        }))
+        .unwrap();
+
+        index
+            .test_pause_search_after_capture
+            .store(true, Ordering::Release);
+        let search_index = Arc::clone(&index);
+        let search = tokio::spawn(async move { search_index.search(&request).await });
+        wait_for_search_parked(&index).await;
+
+        // Publish a flush into the parked scan's window.
+        tokio::time::timeout(std::time::Duration::from_secs(10), index.flush())
+            .await
+            .expect("flush blocked on the parked scan")
+            .unwrap();
+        assert_ne!(
+            index
+                .store
+                .version_map
+                .get("a")
+                .unwrap()
+                .segment_id
+                .as_ref(),
+            xerj_storage::version_map::IN_MEMORY_SEGMENT_ID,
+            "flush did not repoint the live entry off the memtable"
+        );
+
+        index
+            .test_pause_search_after_capture
+            .store(false, Ordering::Release);
+        let result = search.await.unwrap().unwrap();
+        assert_eq!(
+            result
+                .hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"],
+            "the captured memtable's copy must survive a post-capture flush"
+        );
+        assert_eq!(result.total.value, 1);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn cancellation_inside_guarded_repoint_fails_closed_and_recovery_restores_inputs() {
         let dir = TempDir::new().unwrap();
@@ -8241,6 +8383,14 @@ pub struct Index {
     test_pause_merge_before_apply: Arc<AtomicBool>,
     #[cfg(test)]
     test_merge_repoint_ready: Arc<AtomicBool>,
+    /// #1212 — park the next search the instant its capture bracket
+    /// validates (`test_pause_search_after_capture`), announcing via
+    /// `test_search_capture_parked` so a test can publish a merge or flush
+    /// into the exact window the capture-scope fix exists to make harmless.
+    #[cfg(test)]
+    test_pause_search_after_capture: Arc<AtomicBool>,
+    #[cfg(test)]
+    test_search_capture_parked: Arc<AtomicBool>,
     doc_count: Arc<AtomicU64>,
     /// Counter for `update` operations that detected no change to the
     /// existing source — surfaced via `indices.stats` as
@@ -9101,6 +9251,10 @@ impl Index {
             test_pause_merge_before_apply: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             test_merge_repoint_ready: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            test_pause_search_after_capture: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            test_search_capture_parked: Arc::new(AtomicBool::new(false)),
             doc_count: Arc::new(AtomicU64::new(0)),
             noop_update_count: Arc::new(AtomicU64::new(0)),
             request_cache_seen: Arc::new(RwLock::new(RequestCacheSeen::new(65_536))),
@@ -9575,6 +9729,10 @@ impl Index {
             test_pause_merge_before_apply: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             test_merge_repoint_ready: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            test_pause_search_after_capture: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            test_search_capture_parked: Arc::new(AtomicBool::new(false)),
             doc_count: Arc::new(AtomicU64::new(total_doc_count)),
             noop_update_count: Arc::new(AtomicU64::new(0)),
             request_cache_seen: Arc::new(RwLock::new(RequestCacheSeen::new(65_536))),
@@ -21196,6 +21354,29 @@ impl Index {
                 return Err(collection_capture_crossed());
             }
         }
+        // #1212 — the captured world's segment ids, scoping every LIVE
+        // version-map read the walk performs below. The scan's segments are
+        // frozen in `snap`; a version entry naming anything else describes a
+        // publication after this capture and must be ignored (see
+        // [`CapturedEntryVerdict`]). O(segments) once per search — the walk
+        // that consumes it is O(matching docs).
+        let captured_segment_ids: std::collections::HashSet<&str> =
+            snap.segments.iter().map(|meta| meta.id.as_str()).collect();
+        // #1212 regression hook: park the scan the instant its capture
+        // bracket validates, so a test can publish a merge/flush into the
+        // window this fix exists to make harmless.
+        #[cfg(test)]
+        {
+            if self.test_pause_search_after_capture.load(Ordering::Acquire) {
+                self.test_search_capture_parked
+                    .store(true, Ordering::Release);
+                while self.test_pause_search_after_capture.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+                self.test_search_capture_parked
+                    .store(false, Ordering::Release);
+            }
+        }
 
         let dbg_mem_arm: &'static str = match &mem_snapshot {
             MemSnapshot::Empty => "empty",
@@ -21214,14 +21395,16 @@ impl Index {
                 // work (and `uncollected` possibly non-zero) on the
                 // ghost-free path; with ghosts the snapshot was taken
                 // uncapped, so `uncollected == 0` and the filter sees every
-                // hit.
+                // hit.  #1212: the verdict is capture-scoped — an entry
+                // repointed onto a segment this capture never held describes
+                // a flush that published AFTER the capture, which cannot
+                // retire the captured memtable's copy.
                 let ghost_filter = self.store.version_map.ghost_events() > 0;
                 for (doc_id, score) in hits {
                     if ghost_filter {
                         if let Some(ver) = self.store.version_map.get(&doc_id) {
-                            if ver.deleted
-                                || ver.segment_id.as_ref()
-                                    != xerj_storage::version_map::IN_MEMORY_SEGMENT_ID
+                            if captured_verdict_for_memtable_hit(&ver, &captured_segment_ids)
+                                == CapturedEntryVerdict::Invisible
                             {
                                 continue;
                             }
@@ -22257,16 +22440,23 @@ impl Index {
                                         // Same liveness/staleness check the normal
                                         // walk uses: skip tombstoned or superseded
                                         // copies (live version in a newer segment).
+                                        // #1212: capture-scoped — see the main
+                                        // walk's copy for the PostCapture arm.
                                         let (mut hit_seq_no, mut hit_version) = (None, None);
                                         if let Some(ver) = self.store.version_map.get(&id) {
-                                            if ver.deleted
-                                                || ver.segment_id.as_ref() != seg_id.as_str()
-                                            {
-                                                continue;
+                                            match captured_verdict_for_segment_hit(
+                                                &ver,
+                                                seg_id.as_str(),
+                                                &captured_segment_ids,
+                                            ) {
+                                                CapturedEntryVerdict::Invisible => continue,
+                                                CapturedEntryVerdict::Live => {
+                                                    let (s, v) = self.hit_seq_version(&id, &ver);
+                                                    hit_seq_no = s;
+                                                    hit_version = v;
+                                                }
+                                                CapturedEntryVerdict::PostCapture => {}
                                             }
-                                            let (s, v) = self.hit_seq_version(&id, &ver);
-                                            hit_seq_no = s;
-                                            hit_version = v;
                                         }
                                         if seen_ids.contains(&id) {
                                             continue;
@@ -22746,14 +22936,37 @@ impl Index {
                                                 // overwritten ids while
                                                 // `GET /_doc` returned gen-1
                                                 // (b7 DEFECT 1c).
-                                                if ver.deleted
-                                                    || ver.segment_id.as_ref() != seg_id.as_str()
-                                                {
-                                                    continue;
+                                                //
+                                                // #1212: the check is
+                                                // CAPTURE-SCOPED. A merge or
+                                                // flush that published after
+                                                // this capture repoints the
+                                                // live entry at a segment the
+                                                // frozen snapshot never held;
+                                                // the old equality check then
+                                                // dropped every hit from the
+                                                // merged-away segments and
+                                                // the page came back short or
+                                                // empty with `timed_out`
+                                                // absent. PostCapture keeps
+                                                // the hit (the captured
+                                                // world's live copy) and
+                                                // declines to report the
+                                                // later world's seq/version.
+                                                match captured_verdict_for_segment_hit(
+                                                    &ver,
+                                                    seg_id.as_str(),
+                                                    &captured_segment_ids,
+                                                ) {
+                                                    CapturedEntryVerdict::Invisible => continue,
+                                                    CapturedEntryVerdict::Live => {
+                                                        let (s, v) =
+                                                            self.hit_seq_version(&id, &ver);
+                                                        hit_seq_no = s;
+                                                        hit_version = v;
+                                                    }
+                                                    CapturedEntryVerdict::PostCapture => {}
                                                 }
-                                                let (s, v) = self.hit_seq_version(&id, &ver);
-                                                hit_seq_no = s;
-                                                hit_version = v;
                                             }
                                             // Dedup against memtable/earlier
                                             // segments WITHOUT touching
@@ -32096,6 +32309,202 @@ fn is_collection_capture_retry(e: &EngineError) -> bool {
         e,
         EngineError::Fts(err) if err.downcast_ref::<CollectionCaptureCrossedPublication>().is_some()
     )
+}
+
+/// #1212 — the verdict of one LIVE version-map entry read during a scan whose
+/// segment snapshot and memtable capture were frozen at a capture instant.
+///
+/// #1013 deliberately relaxed search consistency to "the capture bracket
+/// needs only a writer-free instant": after the bracket validates, the scan
+/// runs against immutable captured state while writers keep publishing. But
+/// the per-hit liveness checks read the LIVE version map mid-scan, and a
+/// merge that publishes after the capture repoints every surviving entry at
+/// its output segment — a name the frozen snapshot never held. The old
+/// equality check (`ver.segment_id == hit_segment`) then failed for every
+/// hit from the merged-away segments and silently dropped them: short or
+/// empty pages with `timed_out` absent, self-healing on the next capture.
+/// Observed live as the read-back losing 49,568 of 58,568 catalog documents
+/// mid-walk (issue #1212).
+///
+/// The fix is the invariant #1013's comment already claims for the snapshot:
+/// a scan may only apply version entries that describe the world it
+/// captured. An entry naming a segment outside the captured set belongs to a
+/// later world and is invisible to this capture — in both directions: it
+/// cannot supersede the hit, and its `seq_no`/`version` are not the hit's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapturedEntryVerdict {
+    /// The entry describes the captured world and this hit is its live copy.
+    Live,
+    /// The entry describes the captured world and this hit is a tombstone or
+    /// a superseded copy — the scan must drop it.
+    Invisible,
+    /// The entry names a publication after the capture (a merge output or a
+    /// flush segment the captured snapshot never held). The hit stands; the
+    /// entry's seq/version belong to that later world and must not be
+    /// reported on the hit.
+    PostCapture,
+}
+
+/// Does `ver` describe the captured world at all? `__memtable__` residency
+/// does (buffered writes/deletes are part of the capture via the memtable
+/// snapshot); a real segment does iff the captured snapshot held it.
+fn entry_describes_capture(
+    ver: &xerj_storage::version_map::VersionEntry,
+    captured_segment_ids: &std::collections::HashSet<&str>,
+) -> bool {
+    let residency = ver.segment_id.as_ref();
+    residency == xerj_storage::version_map::IN_MEMORY_SEGMENT_ID
+        || captured_segment_ids.contains(residency)
+}
+
+/// A hit scanned out of captured segment `hit_segment`.
+fn captured_verdict_for_segment_hit(
+    ver: &xerj_storage::version_map::VersionEntry,
+    hit_segment: &str,
+    captured_segment_ids: &std::collections::HashSet<&str>,
+) -> CapturedEntryVerdict {
+    if !entry_describes_capture(ver, captured_segment_ids) {
+        return CapturedEntryVerdict::PostCapture;
+    }
+    if ver.deleted || ver.segment_id.as_ref() != hit_segment {
+        return CapturedEntryVerdict::Invisible;
+    }
+    CapturedEntryVerdict::Live
+}
+
+/// A hit the memtable capture produced (the doc was memtable-resident at
+/// capture).
+fn captured_verdict_for_memtable_hit(
+    ver: &xerj_storage::version_map::VersionEntry,
+    captured_segment_ids: &std::collections::HashSet<&str>,
+) -> CapturedEntryVerdict {
+    if !entry_describes_capture(ver, captured_segment_ids) {
+        return CapturedEntryVerdict::PostCapture;
+    }
+    if ver.deleted || ver.segment_id.as_ref() != xerj_storage::version_map::IN_MEMORY_SEGMENT_ID {
+        return CapturedEntryVerdict::Invisible;
+    }
+    CapturedEntryVerdict::Live
+}
+
+/// The #1212 decision table, pinned without a server: every cell the two
+/// verdict functions can produce, and the one property the fix exists for —
+/// an entry naming a segment the capture never held is PostCapture, never
+/// Invisible, whichever walk asks.
+#[cfg(test)]
+mod captured_entry_verdict_table {
+    use super::*;
+
+    fn entry(segment: &str, deleted: bool) -> xerj_storage::version_map::VersionEntry {
+        xerj_storage::version_map::VersionEntry {
+            seq_no: 7,
+            segment_id: segment.into(),
+            deleted,
+            version: 3,
+        }
+    }
+
+    fn capture<'a>(segments: &[&'a str]) -> std::collections::HashSet<&'a str> {
+        segments.iter().copied().collect()
+    }
+
+    #[test]
+    fn residency_decides_whether_an_entry_describes_the_capture_at_all() {
+        let captured = capture(&["seg-1", "seg-2"]);
+        // The memtable is always part of the capture (buffered writes came
+        // in through the memtable snapshot).
+        assert!(entry_describes_capture(
+            &entry(xerj_storage::version_map::IN_MEMORY_SEGMENT_ID, false),
+            &captured
+        ));
+        assert!(entry_describes_capture(&entry("seg-1", false), &captured));
+        assert!(entry_describes_capture(&entry("seg-2", true), &captured));
+        // A merged output or flush segment the capture never held.
+        assert!(!entry_describes_capture(
+            &entry("seg-merged", false),
+            &captured
+        ));
+        assert!(!entry_describes_capture(
+            &entry("seg-merged", false),
+            &std::collections::HashSet::new()
+        ));
+    }
+
+    #[test]
+    fn a_segment_hit_is_live_only_against_its_own_captured_segment() {
+        let captured = capture(&["seg-1", "seg-2"]);
+        assert_eq!(
+            captured_verdict_for_segment_hit(&entry("seg-1", false), "seg-1", &captured),
+            CapturedEntryVerdict::Live
+        );
+        // Tombstoned within the captured world.
+        assert_eq!(
+            captured_verdict_for_segment_hit(&entry("seg-1", true), "seg-1", &captured),
+            CapturedEntryVerdict::Invisible
+        );
+        // Superseded by a copy in another CAPTURED segment — the scan must
+        // still drop this one.
+        assert_eq!(
+            captured_verdict_for_segment_hit(&entry("seg-2", false), "seg-1", &captured),
+            CapturedEntryVerdict::Invisible
+        );
+        // #1212: a merge that published after the capture repointed the live
+        // entry at its output segment. Pre-fix this read returned Invisible
+        // for every hit out of the merged-away segments and the page came
+        // back short or empty.
+        assert_eq!(
+            captured_verdict_for_segment_hit(&entry("seg-merged", false), "seg-1", &captured),
+            CapturedEntryVerdict::PostCapture
+        );
+        // A tombstone written by the later world cannot retire the captured
+        // copy either — the delete is not yet visible to this capture.
+        assert_eq!(
+            captured_verdict_for_segment_hit(&entry("seg-merged", true), "seg-1", &captured),
+            CapturedEntryVerdict::PostCapture
+        );
+    }
+
+    #[test]
+    fn a_memtable_hit_survives_a_post_capture_flush_and_drops_captured_supersessions() {
+        let captured = capture(&["seg-1"]);
+        assert_eq!(
+            captured_verdict_for_memtable_hit(
+                &entry(xerj_storage::version_map::IN_MEMORY_SEGMENT_ID, false),
+                &captured
+            ),
+            CapturedEntryVerdict::Live
+        );
+        // Deleted while still memtable-resident — a captured tombstone.
+        assert_eq!(
+            captured_verdict_for_memtable_hit(
+                &entry(xerj_storage::version_map::IN_MEMORY_SEGMENT_ID, true),
+                &captured
+            ),
+            CapturedEntryVerdict::Invisible
+        );
+        // Repointed onto a segment the capture DID hold: superseded within
+        // the captured world, drop the captured memtable copy.
+        assert_eq!(
+            captured_verdict_for_memtable_hit(&entry("seg-1", false), &captured),
+            CapturedEntryVerdict::Invisible
+        );
+        // #1212 flush flavor: the entry now names the flush segment, which
+        // the capture never held. Pre-fix this was the equality check's
+        // `!= __memtable__` arm — Invisible — and the captured memtable's
+        // copy vanished from the page.
+        assert_eq!(
+            captured_verdict_for_memtable_hit(&entry("seg-flush", false), &captured),
+            CapturedEntryVerdict::PostCapture
+        );
+        // ...including when the index had no segments at all at capture.
+        assert_eq!(
+            captured_verdict_for_memtable_hit(
+                &entry("seg-flush", false),
+                &std::collections::HashSet::new()
+            ),
+            CapturedEntryVerdict::PostCapture
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
