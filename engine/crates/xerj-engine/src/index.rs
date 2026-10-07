@@ -5311,13 +5311,15 @@ mod merge_publication_transaction_tests {
             .test_pause_knn_after_capture
             .store(true, Ordering::Release);
         let search_index = Arc::clone(&index);
-        let search =
-            tokio::spawn(async move { search_index.search(&knn_exact_request(2)).await });
+        let search = tokio::spawn(async move { search_index.search(&knn_exact_request(2)).await });
         wait_for_knn_parked(&index).await;
 
         // A post-capture write: "d1" is updated while the scan is parked.
         index
-            .index_document(Some("d1".into()), serde_json::json!({ "body": "gamma three" }))
+            .index_document(
+                Some("d1".into()),
+                serde_json::json!({ "body": "gamma three" }),
+            )
             .await
             .unwrap();
         let ver = index.store.version_map.get("d1").unwrap();
@@ -5354,8 +5356,7 @@ mod merge_publication_transaction_tests {
             .test_pause_knn_after_capture
             .store(true, Ordering::Release);
         let search_index = Arc::clone(&index);
-        let search =
-            tokio::spawn(async move { search_index.search(&knn_exact_request(2)).await });
+        let search = tokio::spawn(async move { search_index.search(&knn_exact_request(2)).await });
         wait_for_knn_parked(&index).await;
 
         let merged =
@@ -15549,8 +15550,7 @@ impl Index {
         }
         if let Some(ver) = self.store.version_map.get(id) {
             let verdict = if !ver.deleted
-                && ver.segment_id.as_ref()
-                    == xerj_storage::version_map::IN_MEMORY_SEGMENT_ID
+                && ver.segment_id.as_ref() == xerj_storage::version_map::IN_MEMORY_SEGMENT_ID
             {
                 CapturedEntryVerdict::PostCapture
             } else {
@@ -15947,8 +15947,7 @@ impl Index {
                 while self.test_pause_knn_after_capture.load(Ordering::Acquire) {
                     tokio::task::yield_now().await;
                 }
-                self.test_knn_capture_parked
-                    .store(false, Ordering::Release);
+                self.test_knn_capture_parked.store(false, Ordering::Release);
             }
         }
         // #1220 — the captured world's segment ids, scoping every LIVE
