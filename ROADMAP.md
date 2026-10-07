@@ -181,7 +181,7 @@ and the console review's), the #1062 wrong-and-confident detection gate, the
 `xerj-decide-v1` Hugging Face publication (operator credentials), and the GA
 bar itself — *The road to v1.0.0 GA* below.
 
-**Open defects.** Eleven, all live on the tracker at rc.86 cut time — the
+**Open defects.** Ten, all live on the tracker — the
 shortlist the release-notes gate checks. From the rc.80 gate runs:
 [#1091](https://github.com/xerj-org/xerj/issues/1091) (hybrid first stage
 13–26 s/query on the 57,638-doc FiQA index) and
@@ -189,12 +189,7 @@ shortlist the release-notes gate checks. From the rc.80 gate runs:
 flywheel write-back freezes once the history index has BM25 support).
 From the rc.80 console knowledge-surface review:
 [#1100](https://github.com/xerj-org/xerj/issues/1100) (second-brain
-belief-time frame rendered on non-note corpora). From the corpus-hub G7
-work: [#1147](https://github.com/xerj-org/xerj/issues/1147) (corpus-index
-ingest throughput caps corpus builds at ~10⁵ records/node-day, measured —
-the osv-ecosystems corpus is deferred on exactly this number; the
-wire-side coalescing half is in flight as PR
-[#1195](https://github.com/xerj-org/xerj/pull/1195)). From the rc.81/82
+belief-time frame rendered on non-note corpora). From the rc.81/82
 windows: [#1158](https://github.com/xerj-org/xerj/issues/1158) (the
 build-time half — the query-time half shipped in rc.86) and
 [#1122](https://github.com/xerj-org/xerj/issues/1122) (reopened
@@ -210,7 +205,10 @@ wrong-and-confident detection gate, unmeasured),
 [#1110](https://github.com/xerj-org/xerj/issues/1110) (the
 generalization proof: second-domain pack + fresh-machine replay) and
 [#1183](https://github.com/xerj-org/xerj/issues/1183) (corpus index
-finalize-catalog deadlocking all 297 threads on a fresh build).
+finalize-catalog reported as an all-thread deadlock: diagnosed as a bounded
+but silent client retry envelope — the silence is fixed; the server-side
+stall under memory pressure stays open, tracked with the #1122
+memory-ceiling class).
 **Closed inside the rc.86 window and recorded in the CHANGELOG, not
 carried here:** #1109, #1189, #1190, #1186, #1146 and #1092 (PRs
 [#1194](https://github.com/xerj-org/xerj/pull/1194),
@@ -218,6 +216,11 @@ carried here:** #1109, #1189, #1190, #1186, #1146 and #1092 (PRs
 [#1188](https://github.com/xerj-org/xerj/pull/1188),
 [#1177](https://github.com/xerj-org/xerj/pull/1177) and
 [#1184](https://github.com/xerj-org/xerj/pull/1184)). **Closed inside
+the rc.87 window so far:** #1147 (corpus-index ingest throughput — the
+per-file bulk round-trip ceiling, measured at ~10⁵ records/node-day;
+fixed by PR [#1195](https://github.com/xerj-org/xerj/pull/1195), merged
+2026-10-06 just past the rc.86 tag; its CHANGELOG entry lands with the
+rc.87 notes). **Closed inside
 the rc.83 window and recorded in the CHANGELOG, not
 carried here:** #1136 (stale index generations surviving `--fresh` swaps —
 a state file with `index_prefix=null` queried all of them; fixed by PR
