@@ -383,6 +383,22 @@ const BULK_MAX_ACTIONS: usize = 10_000;
 /// passes this is repeating itself and the count on `xerj-done` is the record.
 const SPLIT_ANNOUNCE_CAP: u64 = 16;
 
+/// Page timeout every [`Es::search_page`] request carries when its caller set
+/// no `timeout` of its own (#1212). The engine's default — a 30 s cooperative
+/// deadline on any body without one — answers a slow node with HTTP 200,
+/// partial hits and `timed_out: true`, which a page walker cannot tell from
+/// the last page. 120 s sits above the slowest sorted page measured on a
+/// breaker-drained node (40 s); the bounded retry in `search_page` covers
+/// anything slower.
+pub const SEARCH_PAGE_TIMEOUT: &str = "120s";
+
+/// How many times [`Es::search_page`] re-asks the SAME page when the node
+/// keeps answering it partial. Six attempts at a 120 s page timeout is a
+/// 12-minute ceiling per page — enough to ride out a merge or a breaker
+/// drain, short enough to fail a genuinely wedged node within a run's
+/// patience (the bulk patience is 600 s, `THROTTLE_PATIENCE`).
+const PARTIAL_PAGE_ATTEMPTS: usize = 6;
+
 /// What this run has learned about how large a `_bulk` request the server
 /// takes, shared by every clone of a client like [`BulkAdmission`].
 struct RequestSizeLedger {
@@ -1827,6 +1843,71 @@ impl Es {
         Ok(Some(v))
     }
 
+    /// One page of a paged walk, complete or not at all.
+    ///
+    /// The engine applies a 30 s cooperative deadline to any search whose
+    /// body carries no `timeout`, and answers a missed deadline with HTTP
+    /// 200, PARTIAL hits and `timed_out: true` — legal on the wire, and
+    /// lethal to a walker: a page that comes back short looks exactly like
+    /// the last page. That truncated the xerj-search catalog read-back at
+    /// 56,441 of 58,568 documents (#1212; the index held all 58,568 the
+    /// whole time). This helper sends the body with an explicit page
+    /// timeout (added only when the caller set none — 120 s covers the
+    /// slowest sorted page measured on a breaker-drained node, 40 s) and
+    /// re-asks the SAME page when the node answers `timed_out`, bounded by
+    /// [`PARTIAL_PAGE_ATTEMPTS`]. A timed-out page costs the node its whole
+    /// page budget, so consecutive attempts are naturally spaced; there is
+    /// no extra backoff to add. Exhaustion is a loud error naming the
+    /// index: rerunning the same command resumes, and every walker above
+    /// this layer is idempotent per page.
+    pub fn search_page(&self, index: &str, body: &Value) -> Result<Value> {
+        Ok(self
+            .search_page_inner(index, body, false)?
+            .expect("strict search page never returns None"))
+    }
+
+    /// [`Es::search_page`] for walkers over an index that may legitimately
+    /// not exist: a 404 is `Ok(None)`, every other non-success is an error,
+    /// and a `timed_out` page is retried exactly like `search_page`'s.
+    pub fn search_page_present(&self, index: &str, body: &Value) -> Result<Option<Value>> {
+        self.search_page_inner(index, body, true)
+    }
+
+    fn search_page_inner(
+        &self,
+        index: &str,
+        body: &Value,
+        allow_missing: bool,
+    ) -> Result<Option<Value>> {
+        let mut body = body.clone();
+        body.as_object_mut()
+            .context("search page body must be a JSON object")?
+            .entry("timeout")
+            .or_insert_with(|| Value::String(SEARCH_PAGE_TIMEOUT.to_owned()));
+        for attempt in 1..=PARTIAL_PAGE_ATTEMPTS {
+            let (status, response) = self.search_raw(index, &body)?;
+            if allow_missing && status == reqwest::StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            if !status.is_success() {
+                return Err(anyhow!("search /{index} HTTP {status}: {response}"));
+            }
+            if response.get("timed_out") != Some(&Value::Bool(true)) {
+                return Ok(Some(response));
+            }
+            if attempt == PARTIAL_PAGE_ATTEMPTS {
+                anyhow::bail!(
+                    "search /{index} answered this page partial (timed_out) on \
+                     {PARTIAL_PAGE_ATTEMPTS} consecutive attempts at timeout \
+                     {SEARCH_PAGE_TIMEOUT}: the node cannot complete one page of \
+                     the walk. Nothing from this page was acted on — reduce load \
+                     on the node and rerun the same command, which resumes"
+                );
+            }
+        }
+        unreachable!("the attempt loop returns on its final iteration")
+    }
+
     pub fn count(&self, index: &str) -> Result<u64> {
         // `_count` first: it is the endpoint this call always meant, and a
         // node audits it as `count.post` — a size:0 search here lands in the
@@ -2016,6 +2097,136 @@ mod tests {
         assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
         assert!(closed_rx.recv_timeout(Duration::from_secs(4)).unwrap());
         server.join().unwrap();
+    }
+
+    /// The fake page server for the `search_page` tests: answers each request
+    /// with the next body in `answers`, recording every request it saw.
+    fn page_server(answers: Vec<&'static [u8]>) -> (std::net::SocketAddr, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for answer in answers {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_request(&mut stream);
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&request).into_owned());
+                respond_json(&mut stream, answer);
+            }
+        });
+        (address, seen)
+    }
+
+    /// #1212: the engine legally answers a missed search deadline with HTTP
+    /// 200, partial hits and `timed_out: true`. A page walker that took that
+    /// answer at face value read one partial page as the end of the catalog
+    /// (56,441 of 58,568 documents on the xerj-search rebuild). `search_page`
+    /// must retry the SAME request until the node answers a complete page,
+    /// and must put an explicit page timeout on the wire so the engine's 30 s
+    /// default deadline is not what decides.
+    #[test]
+    fn search_page_retries_a_partial_answer_and_returns_the_complete_page() {
+        let (address, seen) = page_server(vec![
+            br#"{"timed_out":true,"hits":{"hits":[]}}"#,
+            br#"{"timed_out":true,"hits":{"hits":[]}}"#,
+            br#"{"timed_out":false,"hits":{"total":{"value":1,"relation":"eq"},"hits":[{"_id":"a","_source":{},"sort":["a"]}]}}"#,
+        ]);
+        let es = Es::new(&format!("http://{address}"), None).unwrap();
+        let page = es
+            .search_page(
+                "autoindex-catalog",
+                &serde_json::json!({"size": 1000, "sort": [{"_id": "asc"}]}),
+            )
+            .unwrap();
+        assert_eq!(
+            page.pointer("/hits/hits")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.len(),
+            3,
+            "two partial answers, one retry each: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .all(|request| request.contains("\"timeout\":\"120s\"")),
+            "every attempt must carry the explicit page timeout: {seen:?}"
+        );
+    }
+
+    /// #1212: a node that cannot complete one page at all must end the walk
+    /// in a named error, never in a short page the caller would read as
+    /// end-of-data — after exactly the bounded attempt count.
+    #[test]
+    fn search_page_fails_loudly_when_every_attempt_answers_partial() {
+        let answers: Vec<&'static [u8]> = (0..super::PARTIAL_PAGE_ATTEMPTS)
+            .map(|_| br#"{"timed_out":true,"hits":{"hits":[]}}"# as &'static [u8])
+            .collect();
+        let (address, seen) = page_server(answers);
+        let es = Es::new(&format!("http://{address}"), None).unwrap();
+        let error = es
+            .search_page("autoindex-catalog", &serde_json::json!({"size": 1000}))
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("partial"), "{message}");
+        assert!(message.contains("autoindex-catalog"), "{message}");
+        assert_eq!(seen.lock().unwrap().len(), super::PARTIAL_PAGE_ATTEMPTS);
+    }
+
+    /// #1212: a caller's own `timeout` is honoured, not overridden — the page
+    /// budget belongs to the walk that knows how slow its node is.
+    #[test]
+    fn search_page_keeps_a_caller_supplied_timeout() {
+        let (address, seen) = page_server(vec![br#"{"timed_out":false,"hits":{"hits":[]}}"#]);
+        let es = Es::new(&format!("http://{address}"), None).unwrap();
+        es.search_page(
+            "autoindex-catalog",
+            &serde_json::json!({"size": 1000, "timeout": "5s"}),
+        )
+        .unwrap();
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen[0].contains("\"timeout\":\"5s\"") && !seen[0].contains("120s"),
+            "caller timeout must survive: {seen:?}"
+        );
+    }
+
+    /// #1212: the present variant keeps `search_present`'s contract — a 404
+    /// is an answer (`Ok(None)`), and it is not retried as if it were a
+    /// partial page.
+    #[test]
+    fn search_page_present_treats_a_missing_index_as_an_answer() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            recorded
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&request).into_owned());
+            respond_status(
+                &mut stream,
+                "404 Not Found",
+                br#"{"error":"index_missing"}"#,
+            );
+        });
+        let es = Es::new(&format!("http://{address}"), None).unwrap();
+        assert!(es
+            .search_page_present("autoindex-catalog", &serde_json::json!({"size": 1000}))
+            .unwrap()
+            .is_none());
+        assert_eq!(seen.lock().unwrap().len(), 1);
     }
 
     fn read_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
