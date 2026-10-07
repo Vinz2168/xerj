@@ -2,16 +2,23 @@
 
 This roadmap tracks capabilities that are **planned but not yet fully implemented**, so the project's public claims stay honest about what ships today versus what is coming. Status is verified against the actual code and by real API requests to the release binary, not aspirational.
 
-Last reviewed: 2026-10-07 (against `v1.0.0-rc.87` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.87 release-cut roll: the open-defects shortlist was
-re-verified against the live tracker at cut time — **nine open**
-(#1091 and #1094 from the rc.80 gate runs; #1100 from the console
-review; #1122, reopened 2026-10-05 when the reference node died at its
-memory ceiling with no panic line; #1170, the leader-wiring class filed
-from the rc.83 3-node ring tests; #1173's throughput half; and three
-from the corpus-program work — #1108 the detections gate, #1110 the
-generalization proof, and #1183, now diagnosed as a bounded-but-silent
-client retry envelope whose client half is fixed and whose server-side
-stall stays open).
+Last reviewed: 2026-10-07 (against `v1.0.0-rc.88` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.88 release-cut roll:
+the open-defects shortlist was re-verified against the live tracker at
+cut time — **nine open**, unchanged from the rc.87 cut (#1091 and #1094
+from the rc.80 gate runs; #1100 from the console review; #1122,
+reopened 2026-10-05 when the reference node died at its memory ceiling
+with no panic line, fresh load-driven evidence posted 2026-10-07; #1170,
+the leader-wiring class filed from the rc.83 3-node ring tests; #1173's
+throughput half; and three from the corpus-program work — #1108 the
+detections gate, #1110 the generalization proof, and #1183, whose
+read-back half is fixed in this release by PR
+[#1207](https://github.com/xerj-org/xerj/pull/1207) and which stays open
+for the end-to-end xerj-search rebuild proof). Two rc.88-window issues
+closed verified on the release binary before the cut: #1201 and #1202
+(the `_cat` output parameters and real segment rows, PR
+[#1208](https://github.com/xerj-org/xerj/pull/1208)), and the #1198
+code-analyzer shipped (PR
+[#1205](https://github.com/xerj-org/xerj/pull/1205)).
 **Two closed inside the rc.87 window and recorded in the CHANGELOG, not
 carried here:** #1147 (the build-throughput class, PR
 [#1195](https://github.com/xerj-org/xerj/pull/1195), merged just past
