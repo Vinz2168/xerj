@@ -2,16 +2,24 @@
 
 This roadmap tracks capabilities that are **planned but not yet fully implemented**, so the project's public claims stay honest about what ships today versus what is coming. Status is verified against the actual code and by real API requests to the release binary, not aspirational.
 
-Last reviewed: 2026-10-06 (against `v1.0.0-rc.86` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.86 release-cut roll: the open-defects shortlist was
-re-verified against the live tracker at cut time — **eleven open**
+Last reviewed: 2026-10-07 (against `v1.0.0-rc.87` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.87 release-cut roll: the open-defects shortlist was
+re-verified against the live tracker at cut time — **nine open**
 (#1091 and #1094 from the rc.80 gate runs; #1100 from the console
-review; #1147, the build-throughput class; #1158's build-time half;
-#1122, reopened 2026-10-05 when the reference node died at its memory
-ceiling with no panic line; #1170, the leader-wiring class filed from
-the rc.83 3-node ring tests; #1173's throughput half; and three filed
-from the corpus-program work since rc.85 — #1108 the detections gate,
-#1110 the generalization proof, #1183 the finalize-catalog deadlock).
-**Six closed inside the rc.86 window and recorded in the CHANGELOG, not
+review; #1122, reopened 2026-10-05 when the reference node died at its
+memory ceiling with no panic line; #1170, the leader-wiring class filed
+from the rc.83 3-node ring tests; #1173's throughput half; and three
+from the corpus-program work — #1108 the detections gate, #1110 the
+generalization proof, and #1183, now diagnosed as a bounded-but-silent
+client retry envelope whose client half is fixed and whose server-side
+stall stays open).
+**Two closed inside the rc.87 window and recorded in the CHANGELOG, not
+carried here:** #1147 (the build-throughput class, PR
+[#1195](https://github.com/xerj-org/xerj/pull/1195), merged just past
+the rc.86 tag) and #1158 (both halves at last: the query-time half in
+rc.86 by PR [#1185](https://github.com/xerj-org/xerj/pull/1185), the
+build-time half by PR [#1200](https://github.com/xerj-org/xerj/pull/1200)).
+The rc.86 cut's record stands as written: eleven open at that cut. **Six
+closed inside the rc.86 window and recorded in the CHANGELOG, not
 carried here:** #1109 (server-derived audit `actor` — PR
 [#1194](https://github.com/xerj-org/xerj/pull/1194)), #1189 and #1190
 (embed-mode proxy fail-closed and the unwired `batch_size` — PR
@@ -72,7 +80,24 @@ The release-by-release record of how all of this landed is [CHANGELOG.md](./CHAN
 
 ## Next release — [v1.0.0](https://github.com/xerj-org/xerj/milestone/2)
 
-The GA window. **rc.86 was cut on 2026-10-06** — the
+The GA window. **rc.87 was cut on 2026-10-07** — the corpus-index trust
+window: phase-B bulk bodies are coalesced across files, removing the
+per-file round-trip ceiling on corpus ingest (#1147, PR
+[#1195](https://github.com/xerj-org/xerj/pull/1195), A/B'd on two corpus
+shapes with no regression, merged just past the rc.86 tag);
+`xerj corpus index` proves the store answers a search before it says
+"searchable", and an unsearchable build is retired instead of switched
+in (#1183's item 2, PR
+[#1197](https://github.com/xerj-org/xerj/pull/1197)); a retrying client
+request announces itself instead of reading as a deadlock (#1183 item
+1's client half, PR
+[#1199](https://github.com/xerj-org/xerj/pull/1199)); and a JSON record
+with no prose gains a synthesized `text` passage, with a plan-time
+warning for any dataset that maps no text-searchable field at all
+(#1158's build-time half, PR
+[#1200](https://github.com/xerj-org/xerj/pull/1200) — closing the issue,
+its query-time half having shipped in rc.86). **rc.86 was cut on
+2026-10-06** — the
 audit-and-config honesty window: every audit entry now carries a
 server-derived `actor` class (`user`/`machine`) that no client input can
 influence (#1109, PR [#1194](https://github.com/xerj-org/xerj/pull/1194)
@@ -181,7 +206,7 @@ and the console review's), the #1062 wrong-and-confident detection gate, the
 `xerj-decide-v1` Hugging Face publication (operator credentials), and the GA
 bar itself — *The road to v1.0.0 GA* below.
 
-**Open defects.** Ten, all live on the tracker — the
+**Open defects.** Nine, all live on the tracker — the
 shortlist the release-notes gate checks. From the rc.80 gate runs:
 [#1091](https://github.com/xerj-org/xerj/issues/1091) (hybrid first stage
 13–26 s/query on the 57,638-doc FiQA index) and
@@ -190,9 +215,7 @@ flywheel write-back freezes once the history index has BM25 support).
 From the rc.80 console knowledge-surface review:
 [#1100](https://github.com/xerj-org/xerj/issues/1100) (second-brain
 belief-time frame rendered on non-note corpora). From the rc.81/82
-windows: [#1158](https://github.com/xerj-org/xerj/issues/1158) (the
-build-time half — the query-time half shipped in rc.86) and
-[#1122](https://github.com/xerj-org/xerj/issues/1122) (reopened
+windows: [#1122](https://github.com/xerj-org/xerj/issues/1122) (reopened
 2026-10-05 when the reference node died at its memory ceiling with no
 panic line). From the cluster-mode testing:
 [#1170](https://github.com/xerj-org/xerj/issues/1170) (the Raft ring is
@@ -216,11 +239,12 @@ carried here:** #1109, #1189, #1190, #1186, #1146 and #1092 (PRs
 [#1188](https://github.com/xerj-org/xerj/pull/1188),
 [#1177](https://github.com/xerj-org/xerj/pull/1177) and
 [#1184](https://github.com/xerj-org/xerj/pull/1184)). **Closed inside
-the rc.87 window so far:** #1147 (corpus-index ingest throughput — the
-per-file bulk round-trip ceiling, measured at ~10⁵ records/node-day;
-fixed by PR [#1195](https://github.com/xerj-org/xerj/pull/1195), merged
-2026-10-06 just past the rc.86 tag; its CHANGELOG entry lands with the
-rc.87 notes). **Closed inside
+the rc.87 window and recorded in the CHANGELOG, not carried here:**
+#1147 (PR [#1195](https://github.com/xerj-org/xerj/pull/1195), merged
+2026-10-06 just past the rc.86 tag) and #1158 (both halves — the
+query-time half by PR [#1185](https://github.com/xerj-org/xerj/pull/1185)
+in rc.86, the build-time half by PR
+[#1200](https://github.com/xerj-org/xerj/pull/1200)). **Closed inside
 the rc.83 window and recorded in the CHANGELOG, not
 carried here:** #1136 (stale index generations surviving `--fresh` swaps —
 a state file with `index_prefix=null` queried all of them; fixed by PR

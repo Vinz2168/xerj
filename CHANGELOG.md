@@ -7,10 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.87] - 2026-10-07
+
+### Performance
+
+- **Phase-B bulk bodies are coalesced across files** (issue [#1147](https://github.com/xerj-org/xerj/issues/1147), PR [#1195](https://github.com/xerj-org/xerj/pull/1195), merged just past the rc.86 tag) — the per-file round-trip ceiling on corpus ingest, measured at ~10⁵ records/node-day on the ghsa-scale mirror class. Each file's records used to ship as their own `_bulk` body, so ingest throughput on a mirror of many single-record files was bounded by per-file round trips, not document volume. The shared bulk pipe now coalesces bodies across files: extraction and sending overlap, up to 8 bodies ride the wire at once (matching the server governor's `max_concurrent_bulks`), a worker about to park ships what is buffered once half the live workers are parked, the all-parked flush stays as the nothing-more-is-coming drain, and submit parks under backpressure when every wire slot is busy. Per-file ordering is preserved (a file's own cut chunks are sent synchronously by its worker). A/B'd on two corpus shapes with no regression — rustsec (1,965 files / 6,829 records): whole run 10.1 s → 9.7 s with phase B at parity; pysec (7,718 mostly-one-record files): 17.4 s → 16.9 s — and the structural win (one send per flush trigger, not one per file) shows at #1147's scale, which the standing corpus rebuild re-measures.
+
 ### Fixed
 
 - **`xerj corpus index` now proves the store answers a search before it says "searchable"** (issue
-  [#1183](https://github.com/xerj-org/xerj/issues/1183)) — a resume over an index left with a
+  [#1183](https://github.com/xerj-org/xerj/issues/1183), PR
+  [#1197](https://github.com/xerj-org/xerj/pull/1197)) — a resume over an index left with a
   dangling segment by a killed finalize printed `corpus 'xerj-search' searchable: 642 records`
   and exited 0 while the store answered every `_search` — and the salvage path's own
   `delete_by_query` — with `store_exception: Segment … not found`. `_count` is metadata-only and
@@ -29,7 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   queries. The finalize-catalog deadlock that produces the dangling segment (item 1 of #1183)
   remains open, tracked in the same issue.
 - **A request retrying after a transport error or a 5xx now says so on stderr** (part of issue
-  [#1183](https://github.com/xerj-org/xerj/issues/1183)) — the autoindex client's retry envelope
+  [#1183](https://github.com/xerj-org/xerj/issues/1183), PR
+  [#1199](https://github.com/xerj-org/xerj/pull/1199)) — the autoindex client's retry envelope
   is bounded (six attempts at a 300 s request timeout each, ≈31 min worst case) but was
   completely silent on everything except HTTP 429, which is how the #1183 incident read as a
   deadlock: a finalize-catalog request against a memory-pressured node spent eight minutes inside
@@ -42,7 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--quiet` stay silent. The server-side stall root cause (the reference node running at its
   memory breaker during large rebuilds) remains open under #1183 and the #1122 memory-ceiling
   class.
-- **A JSON record with no prose now carries a synthesized `text` passage, and a dataset that maps no text-searchable field says so at plan time** (the build-time half of issue [#1158](https://github.com/xerj-org/xerj/issues/1158); the query-time half — falling back to an index's own text-typed fields — shipped in rc.86). Raw-JSON corpora indexed as typed records (ids, enums, numbers, dates) were invisible to `xerj code` passage search: 36,263 GHSA advisories indexed to 193k records that answered `No passage matches` while the same index returned 10,000+ hits over its typed fields. Now a record whose flattened fields carry no prose-like string (≥ 24 chars and ≥ 4 tokens — below that a string is an id, an enum or a date, and maps `keyword`) gains a `text` passage rendered from its own fields (`key: value` lines, values capped at 256 chars, the passage at 4,096, scalar arrays joined so identifiers stay matchable); a record that already carries prose is left alone — the query side already searches it, and a rendered key/value soup would only outrank the real prose — and a record that owns a field named `text` keeps it untouched. Separately, any dataset whose sampled mapping contains no text-searchable field (a csv of enums, a keyword-only XML set) now warns at plan time: `dataset 'x' maps no text-searchable field — 'xerj code' passage search will find nothing in it (sampled fields: …)`, through the progress surface so `--quiet` stays silent. Scoped to the JSON family (whole-file and JSONL) — the measured class is raw-JSON mirrors; the same helper can ride the csv/yaml/xml data sites when a real corpus needs it. Existing state dirs re-provision their JSON datasets once to gain the field; every already-built corpus keeps working, and the 100 hub corpora are unaffected (their graded snapshots map standard fields).
+- **A JSON record with no prose now carries a synthesized `text` passage, and a dataset that maps no text-searchable field says so at plan time** (the build-time half of issue [#1158](https://github.com/xerj-org/xerj/issues/1158), PR [#1200](https://github.com/xerj-org/xerj/pull/1200); the query-time half — falling back to an index's own text-typed fields — shipped in rc.86 as PR [#1185](https://github.com/xerj-org/xerj/pull/1185)). Raw-JSON corpora indexed as typed records (ids, enums, numbers, dates) were invisible to `xerj code` passage search: 36,263 GHSA advisories indexed to 193k records that answered `No passage matches` while the same index returned 10,000+ hits over its typed fields. Now a record whose flattened fields carry no prose-like string (≥ 24 chars and ≥ 4 tokens — below that a string is an id, an enum or a date, and maps `keyword`) gains a `text` passage rendered from its own fields (`key: value` lines, values capped at 256 chars, the passage at 4,096, scalar arrays joined so identifiers stay matchable); a record that already carries prose is left alone — the query side already searches it, and a rendered key/value soup would only outrank the real prose — and a record that owns a field named `text` keeps it untouched. Separately, any dataset whose sampled mapping contains no text-searchable field (a csv of enums, a keyword-only XML set) now warns at plan time: `dataset 'x' maps no text-searchable field — 'xerj code' passage search will find nothing in it (sampled fields: …)`, through the progress surface so `--quiet` stays silent. Scoped to the JSON family (whole-file and JSONL) — the measured class is raw-JSON mirrors; the same helper can ride the csv/yaml/xml data sites when a real corpus needs it. Existing state dirs re-provision their JSON datasets once to gain the field; every already-built corpus keeps working, and the 100 hub corpora are unaffected (their graded snapshots map standard fields).
 
 
 ## [1.0.0-rc.86] - 2026-10-06
