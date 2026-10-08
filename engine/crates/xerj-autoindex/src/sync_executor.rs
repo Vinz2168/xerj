@@ -807,7 +807,7 @@ impl<'a> EsSyncBackend<'a> {
     /// on the cve-records node) and has usually taken updates (dataset
     /// documents are rewritten by every finalize-catalog), so its version map
     /// carries delete events — and the engine's columnar agg fast path
-    /// refuses exactly that, falling back to the brute agg corpus that
+    /// refuses exactly that (#1260), falling back to the brute agg corpus that
     /// deep-clones the whole index against `max_query_memory_mb` (measured
     /// 786.7 MB vs the 512 MB default on that catalog → 429, the #1183
     /// breaker shape). A `_source`-restricted fetch of the matched set has no
@@ -1452,8 +1452,8 @@ impl SyncOperationBackend for EsSyncBackend<'_> {
         // live crawl node (2026-10-08): the record windows answer in
         // 6–63 ms per 1,024 digests while the index is append-only (the
         // engine's columnar agg fast path), the semantic windows pay the
-        // brute path — the fast path does not yet columnarize `exists` —
-        // at ~16 s per window on a 53k-doc index, and the catalog leg
+        // brute path — the fast path does not yet columnarize `exists`
+        // (#1260) — at ~16 s per window on a 53k-doc index, and the catalog leg
         // cannot aggregate at all: its version map carries delete events
         // (dataset documents are rewritten by every finalize-catalog),
         // which the fast path refuses, and the brute agg corpus trips the
