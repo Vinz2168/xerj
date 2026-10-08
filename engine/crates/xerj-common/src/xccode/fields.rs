@@ -71,8 +71,16 @@ pub fn resolve_fields(mapping: Option<&Value>) -> Vec<String> {
     // above never grows a field an index may not map (the MULTIMATCH_DEFECT
     // silent-zero). Found via the zalando G7 1/5: all 25 renamed `.txt`
     // chapters were invisible to `xerj code` while README.md matched.
+    //
+    // #1238: `text` joins BELOW 1.0, the same recall-leg posture as
+    // `defs_expanded^0.5`. Measured on the live exploit group (5,644
+    // indices, query "MCPJam inspector 23744", 36 needle PoC repos): at
+    // full weight one plain-text sibling-CVE demo index outscored every
+    // code-family hit and took the whole top-10; at ^0.5 the family stays
+    // searchable (same 39 total hits) while the needle docs keep their
+    // code-family scores.
     if present.contains("text") {
-        out.push("text".to_string());
+        out.push("text^0.5".to_string());
     }
     if out.is_empty() {
         // #1158: a raw-JSON corpus (ghsa-db's advisory mirrors, OSV) maps
@@ -208,12 +216,13 @@ mod tests {
     /// #1139: the `.txt` family's content field is `text` — it joins the
     /// multi_match list ONLY when an index actually maps it, so the
     /// unreadable-mapping fallback list above stays exactly FIELDS.
+    /// #1238: it joins at ^0.5 (recall leg), never at full weight.
     #[test]
     fn text_family_content_joins_only_when_mapped() {
         let with_text = mapping(&[("i", &["body", "text"], false)]);
         assert_eq!(
             resolve_fields(Some(&with_text)),
-            vec!["body".to_string(), "text".to_string()]
+            vec!["body".to_string(), "text^0.5".to_string()]
         );
         // No FIELDS member AND no text-typed field -> the ["body"] floor
         // still holds (keyword placeholders — text-typed ones are #1158's

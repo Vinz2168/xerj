@@ -37,7 +37,7 @@ pub mod pathgate;
 pub mod render;
 pub mod state;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde_json::Value;
@@ -411,15 +411,24 @@ pub fn run_code_query(
     };
 
     // 5. #1137: cut the overfetched window back to the page, capping records
-    //    per source file, and patch the diversified page into the response so
-    //    `--json` consumers see the SAME list the prose renderer does (the
-    //    G7 grader is one). A page that shrank says so in the note.
-    let (hits, dropped) = diversify(hits, params.k);
-    if dropped > 0 {
-        let cap = format!(
-            "top-k diversified: ≤{MAX_PER_FILE} records per source file \
-             ({dropped} same-file neighbours skipped)"
-        );
+    //    per source file (#1137) and per source index (#1238), and patch the
+    //    diversified page into the response so `--json` consumers see the
+    //    SAME list the prose renderer does (the G7 grader is one). A page
+    //    that shrank says so in the note, naming only the caps that fired.
+    let (hits, file_dropped, index_dropped) = diversify(hits, params.k);
+    if file_dropped > 0 || index_dropped > 0 {
+        let mut caps = Vec::new();
+        if file_dropped > 0 {
+            caps.push(format!(
+                "≤{MAX_PER_FILE} records per source file ({file_dropped} same-file neighbours)"
+            ));
+        }
+        if index_dropped > 0 {
+            caps.push(format!(
+                "≤{MAX_PER_INDEX} per source index ({index_dropped} same-index neighbours)"
+            ));
+        }
+        let cap = format!("top-k diversified: {}", caps.join(", "));
         note = Some(match note.take() {
             Some(n) => format!("{n}; {cap}"),
             None => cap,
@@ -498,41 +507,87 @@ pub(crate) fn hit_list(resp: &Value) -> Vec<Value> {
 /// Reference coding wants five FILES more than five passages of one.
 pub(crate) const MAX_PER_FILE: usize = 2;
 
+/// Top-k diversity cap (#1238): at most this many records per `_index` (per
+/// source REPO in a corpus group) once the fan-out is wide enough to fill the
+/// page without any one index. Measured on the live exploit group (query
+/// "MCPJam inspector 23744", 36 needle PoC repos across 5,644 indices): one
+/// sibling-CVE demo repo took 6 of the top 10 slots — every file a DIFFERENT
+/// file, so the #1137 per-file cap could not see the wall — and the client's
+/// first page held 1 needle record where the per-index cap holds 5.
+pub(crate) const MAX_PER_INDEX: usize = 1;
+
 /// Fetch depth that gives the cap candidates to draw on: 10×k, bounded so a
 /// k=50 page does not become a 500-hit fetch, and never below k itself.
 pub(crate) fn diversity_fetch(k: usize) -> usize {
     k.saturating_mul(10).min(200).max(k)
 }
 
-/// Cap records per `_source.ax_file` at [`MAX_PER_FILE`], truncate to `want`,
-/// preserving rank order. Returns the page and how many same-file neighbours
-/// the cap skipped while filling it. A hit with no `ax_file` is never grouped
-/// (missing provenance must not cost a slot).
-pub(crate) fn diversify(hits: Vec<Value>, want: usize) -> (Vec<Value>, usize) {
+/// Cap records per `_source.ax_file` at [`MAX_PER_FILE`], and — when the hit
+/// set spans at least `want` distinct indices — per `_index` at
+/// [`MAX_PER_INDEX`], truncate to `want`, preserving rank order. Returns the
+/// page plus how many neighbours EACH cap skipped while filling it (a cap
+/// that never engaged reports 0, so the reader-facing note names only the
+/// caps that fired). A hit with no `ax_file` (or no `_index`) is never
+/// grouped on that key: missing provenance must not cost a slot.
+///
+/// The distinct-index capacity guard keeps homogeneous corpora exactly as
+/// they are: a corpus whose whole fan-out is a handful of shard indices
+/// (the blogposts pack is 4) has fewer indices than slots, the per-index
+/// cap would only shrink the page, and so it never engages.
+pub(crate) fn diversify(hits: Vec<Value>, want: usize) -> (Vec<Value>, usize, usize) {
     // Keys are owned: a borrowed &str would pin every hit it came from and
     // forbid the move into `out` below.
+    let distinct_indices = hits
+        .iter()
+        .filter_map(|h| h.pointer("/_index").and_then(Value::as_str))
+        .collect::<HashSet<&str>>()
+        .len();
+    let cap_index = distinct_indices >= want;
     let mut per_file: HashMap<String, usize> = HashMap::new();
+    let mut per_index: HashMap<String, usize> = HashMap::new();
     let mut out = Vec::with_capacity(want.min(hits.len()));
-    let mut dropped = 0usize;
+    let mut file_dropped = 0usize;
+    let mut index_dropped = 0usize;
     for h in hits {
-        let key = h
+        // Peek before consuming: a hit one cap skips must not burn the other
+        // cap's slot.
+        let file = h
             .pointer("/_source/ax_file")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        if let Some(f) = key {
-            let n = per_file.entry(f).or_insert(0);
-            if *n >= MAX_PER_FILE {
-                dropped += 1;
-                continue;
+        let index = h
+            .pointer("/_index")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let file_full = file
+            .as_ref()
+            .is_some_and(|f| per_file.get(f).is_some_and(|n| *n >= MAX_PER_FILE));
+        let index_full = cap_index
+            && index
+                .as_ref()
+                .is_some_and(|i| per_index.get(i).is_some_and(|n| *n >= MAX_PER_INDEX));
+        if file_full || index_full {
+            if file_full {
+                file_dropped += 1;
+            } else {
+                index_dropped += 1;
             }
-            *n += 1;
+            continue;
+        }
+        if let Some(f) = file {
+            *per_file.entry(f).or_insert(0) += 1;
+        }
+        if cap_index {
+            if let Some(i) = index {
+                *per_index.entry(i).or_insert(0) += 1;
+            }
         }
         out.push(h);
         if out.len() == want {
             break;
         }
     }
-    (out, dropped)
+    (out, file_dropped, index_dropped)
 }
 
 /// The measured BM25 body: flat `multi_match` over mapping-resolved fields
@@ -1250,7 +1305,7 @@ mod tests {
         hits.push(mk("security", 9));
         hits.push(mk("http-headers", 10));
 
-        let (page, dropped) = diversify(hits, 5);
+        let (page, file_dropped, index_dropped) = diversify(hits, 5);
         let files: Vec<&str> = page
             .iter()
             .map(|h| {
@@ -1270,8 +1325,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            dropped, 6,
+            file_dropped, 6,
             "8 compatibility hits -> 2 kept, 6 skipped, rank order kept"
+        );
+        assert_eq!(
+            index_dropped, 0,
+            "no _index on these hits: cap never engages"
         );
     }
 
@@ -1287,9 +1346,10 @@ mod tests {
                 })
             })
             .collect();
-        let (page, dropped) = diversify(hits, 5);
+        let (page, file_dropped, index_dropped) = diversify(hits, 5);
         assert_eq!(page.len(), 2);
-        assert_eq!(dropped, 8);
+        assert_eq!(file_dropped, 8);
+        assert_eq!(index_dropped, 0);
     }
 
     /// Missing provenance is not a reason to drop a hit: hits without
@@ -1299,9 +1359,10 @@ mod tests {
         let hits: Vec<Value> = (0..4)
             .map(|i| serde_json::json!({ "_score": 4.0 - i as f64, "_source": { "body": "b" } }))
             .collect();
-        let (page, dropped) = diversify(hits, 5);
+        let (page, file_dropped, index_dropped) = diversify(hits, 5);
         assert_eq!(page.len(), 4, "no ax_file -> no cap applies");
-        assert_eq!(dropped, 0);
+        assert_eq!(file_dropped, 0);
+        assert_eq!(index_dropped, 0);
     }
 
     /// 10x k, capped at 200, never below k.
@@ -1310,5 +1371,109 @@ mod tests {
         assert_eq!(diversity_fetch(5), 50);
         assert_eq!(diversity_fetch(50), 200);
         assert_eq!(diversity_fetch(1), 10);
+    }
+
+    /// #1238: one REPO (one `_index` in a corpus group) may not fill the page
+    /// when the fan-out has enough indices to fill it without any one of
+    /// them — the per-index wall the per-FILE cap cannot see, because every
+    /// hit is a different file. Measured shape: the sibling-CVE demo repo
+    /// took 6 of the top 10 slots on the exploit group while 36 needle
+    /// repos waited below.
+    #[test]
+    fn one_repo_may_not_fill_the_page_when_the_fanout_is_wide() {
+        let mk = |index: &str, i: usize| {
+            serde_json::json!({
+                "_index": index,
+                "_score": 10.0 - i as f64,
+                "_source": { "ax_file": format!("{index}/file{i}.py"),
+                             "ax_path": format!("{index}/file{i}.py"),
+                             "body": format!("passage {i} of {index}") }
+            })
+        };
+        // 6 wall hits from the demo repo, then one hit from each of 5
+        // distinct repos — distinct indices (6) >= want (5), so the cap
+        // engages and the page is one-per-repo.
+        let mut hits: Vec<Value> = (0..6).map(|i| mk("demo-repo", i)).collect();
+        for repo in ["needle-a", "needle-b", "needle-c", "needle-d", "needle-e"] {
+            hits.push(mk(repo, 6));
+        }
+        let (page, file_dropped, index_dropped) = diversify(hits, 5);
+        let indexes: Vec<&str> = page
+            .iter()
+            .map(|h| h.pointer("/_index").and_then(Value::as_str).unwrap())
+            .collect();
+        assert_eq!(
+            indexes,
+            vec!["demo-repo", "needle-a", "needle-b", "needle-c", "needle-d"],
+            "rank order kept, one slot per repo"
+        );
+        assert_eq!(index_dropped, 5, "6 demo-repo hits -> 1 kept, 5 skipped");
+        assert_eq!(file_dropped, 0, "every hit is a different file");
+    }
+
+    /// The capacity guard: a fan-out with FEWER indices than slots must keep
+    /// the pre-#1238 behaviour — the per-index cap would only shrink the
+    /// page (a homogeneous corpus's handful of shard indices is not a wall).
+    #[test]
+    fn a_narrow_fanout_keeps_the_per_file_cap_only() {
+        let hit = |index: &str, file: &str, i: usize| {
+            serde_json::json!({
+                "_index": index,
+                "_score": 10.0 - i as f64,
+                "_source": { "ax_file": file, "ax_path": file,
+                             "body": format!("chunk {i}") }
+            })
+        };
+        // 2 distinct indices < want 5: the per-FILE cap still applies
+        // (third `file0` neighbour dropped), the per-index cap must not.
+        let hits = vec![
+            hit("xc-shard-000", "file0.md", 0),
+            hit("xc-shard-000", "file0.md", 1),
+            hit("xc-shard-000", "file0.md", 2),
+            hit("xc-shard-000", "file1.md", 3),
+            hit("xc-shard-001", "other0.md", 4),
+            hit("xc-shard-001", "other1.md", 5),
+        ];
+        let (page, file_dropped, index_dropped) = diversify(hits, 5);
+        assert_eq!(page.len(), 5, "5 fill from 2 indices without the index cap");
+        assert_eq!(
+            file_dropped, 1,
+            "only the third same-file neighbour is capped"
+        );
+        assert_eq!(index_dropped, 0, "2 indices < 5 slots: the guard holds");
+    }
+
+    /// A hit skipped by the per-index cap must not burn its file's slot: the
+    /// per-file counters count EMITTED records only.
+    #[test]
+    fn an_index_capped_hit_does_not_consume_its_file_slot() {
+        let mk = |index: &str, file: &str, i: usize| {
+            serde_json::json!({
+                "_index": index,
+                "_score": 10.0 - i as f64,
+                "_source": { "ax_file": file, "ax_path": file,
+                             "body": format!("passage {i}") }
+            })
+        };
+        // repo-a slot already spent; this hit is a NEW file in repo-a, so
+        // only the index cap skips it — and fileX's slot must stay untouched
+        // for the later hit from repo-b/fileX.
+        let hits = vec![
+            mk("repo-a", "file1", 0),
+            mk("repo-a", "fileX", 1),
+            mk("repo-b", "fileX", 2),
+        ];
+        let (page, file_dropped, index_dropped) = diversify(hits, 2);
+        assert_eq!(index_dropped, 1, "the repo-a/fileX hit is index-capped");
+        assert_eq!(file_dropped, 0);
+        let files: Vec<&str> = page
+            .iter()
+            .map(|h| {
+                h.pointer("/_source/ax_file")
+                    .and_then(Value::as_str)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(files, vec!["file1", "fileX"], "fileX's slot was not burned");
     }
 }
