@@ -243,10 +243,7 @@ fn own_recall_legs(obj: &serde_json::Map<String, Value>, min_union_indices: usiz
         // An index that maps none of the standard content fields carries
         // its content ONLY in own fields — everything it maps joins the
         // family route.
-        if !own_text
-            .iter()
-            .any(|f| STANDARD.contains(&f.as_str()))
-        {
+        if !own_text.iter().any(|f| STANDARD.contains(&f.as_str())) {
             for f in &own_text {
                 family.insert((*f).clone());
             }
@@ -687,7 +684,10 @@ mod tests {
         // Coverage order: body(4), z_field(2), then a01.. by name; cap 24
         // cuts a23/a24/a25 and keeps z_field despite its name.
         let got = resolve_fields(Some(&Value::Object(obj)));
-        assert!(got.contains(&"z_field^0.5".to_string()), "2-index field kept");
+        assert!(
+            got.contains(&"z_field^0.5".to_string()),
+            "2-index field kept"
+        );
         assert!(!got.contains(&"a23^0.5".to_string()), "26th leg cut");
         assert!(got.contains(&"a01^0.5".to_string()) && got.contains(&"a22^0.5".to_string()));
         assert_eq!(got.first().unwrap(), "body");
