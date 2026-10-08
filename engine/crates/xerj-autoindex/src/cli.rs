@@ -487,8 +487,9 @@ pub fn help_text_with(feedback: bool) -> String {
                --no-graph path:      walk, hash, scan, prepare (install mappings),\n\
                  snapshot (seal + extract, bytes), index (sealed bulk bytes, the\n\
                  in-flight file named), finalize-catalog, finalize-refresh (one\n\
-                 refresh per dataset), finalize-verify (one read-back per\n\
-                 file). A resumed run starts at `replay` and its `index` phase\n\
+                 refresh per dataset), finalize-verify (read-backs batched\n\
+                 into per-index digest windows, one search per window). A\n\
+                 resumed run starts at `replay` and its `index` phase\n\
                  counts only the operations still to apply.\n\
          \n\
          ESTIMATE + DECISION GATE:\n\

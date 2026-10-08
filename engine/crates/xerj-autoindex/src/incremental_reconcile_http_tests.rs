@@ -801,6 +801,16 @@ fn search_http(path: &str, body: &[u8], state: &Arc<Mutex<HttpState>>) -> Value 
                                     values.iter().any(|value| doc.get(field) == Some(value))
                                 })
                             })
+                        // The batched finalize-verify (#1183's count lane)
+                        // scopes its semantic windows with an `exists` on the
+                        // semantic field inside this same `bool.filter`; the
+                        // engine evaluates it there, so the fake must too or
+                        // every window counts rows the real server excludes.
+                        && filter
+                            .get("exists")
+                            .and_then(|exists| exists.get("field"))
+                            .and_then(Value::as_str)
+                            .is_none_or(|field| doc.get(field).is_some())
                 })
                 && exists.map(|field| doc.get(field).is_some()).unwrap_or(true)
                 && must_not_exists
@@ -860,12 +870,49 @@ fn search_http(path: &str, body: &[u8], state: &Arc<Mutex<HttpState>>) -> Value 
         .take(size)
         .map(|((_, id), source)| json!({"_id": id, "_source": source}))
         .collect::<Vec<_>>();
+    // #1183's batched finalize-verify reads per-digest counts as a `terms`
+    // aggregation over the matched set — the engine's terms `doc_count` is
+    // exact — so the fake counts the same way instead of answering every
+    // request with an empty aggregations body. Only the `terms` sub-agg is
+    // evaluated: it is the only shape the read-back asks for.
+    let aggregations = query
+        .get("aggs")
+        .or_else(|| query.get("aggregations"))
+        .and_then(Value::as_object)
+        .map(|aggs| {
+            let mut body = serde_json::Map::new();
+            for (name, spec) in aggs {
+                let Some(field) = spec
+                    .get("terms")
+                    .and_then(|terms| terms.get("field"))
+                    .and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                let mut counts: std::collections::BTreeMap<&str, u64> =
+                    std::collections::BTreeMap::new();
+                for (_, doc) in &matching {
+                    if let Some(key) = doc.get(field).and_then(Value::as_str) {
+                        *counts.entry(key).or_insert(0) += 1;
+                    }
+                }
+                body.insert(
+                    name.clone(),
+                    json!({"buckets": counts
+                        .into_iter()
+                        .map(|(key, doc_count)| json!({"key": key, "doc_count": doc_count}))
+                        .collect::<Vec<_>>()}),
+                );
+            }
+            Value::Object(body)
+        })
+        .unwrap_or_else(|| json!({}));
     json!({
         "hits": {
             "total": {"value": total, "relation": "eq"},
             "hits": hits
         },
-        "aggregations": {}
+        "aggregations": aggregations
     })
 }
 
@@ -1317,18 +1364,24 @@ fn no_semantic_generation_does_not_require_embedding_identity_endpoint() {
     assert_eq!(endpoint.data_docs().len(), 1);
 }
 
-/// #1183: the finalize read-back must not carry `aggs`. A `min`/`max` agg on
-/// the dataset's time field has no columnar fast path under the sharded
-/// memtable, so a real server deep-clones every matching document into owned
-/// Values ("aggregation corpus materialisation", ~2KB a doc against
-/// `max_query_memory_mb`) — on the xerj-search rebuild one ~570k-record
-/// dataset estimated 1.1GB against the 512MB default, the server answered
-/// 429 circuit_breaking_exception, and the client retried for its full 600s
-/// budget before aborting: the multi-hour "finalize-catalog deadlock". The
-/// count now runs without aggs; the time bounds come from size-1 searches
-/// sorted on the time field, which sort from doc values and clone nothing.
+/// #1183: the finalize read-back must not carry a corpus-materialising agg.
+/// A `min`/`max` agg on the dataset's time field has no columnar fast path
+/// under the sharded memtable, so a real server deep-clones every matching
+/// document into owned Values ("aggregation corpus materialisation", ~2KB a
+/// doc against `max_query_memory_mb`) — on the xerj-search rebuild one
+/// ~570k-record dataset estimated 1.1GB against the 512MB default, the
+/// server answered 429 circuit_breaking_exception, and the client retried
+/// for its full 600s budget before aborting: the multi-hour
+/// "finalize-catalog deadlock". The dataset read-back's count runs without
+/// aggs and its time bounds come from size-1 searches sorted on the time
+/// field, which sort from doc values and clone nothing. The batched
+/// generation-wide verify (`sync_executor::validate`) is the one agg the
+/// run issues — an exact `terms` count on a keyword digest field, and only
+/// behind its outer `terms`-on-digest window filter, which prunes the walk
+/// before any agg sees a document. What this guards against is the
+/// materialising family coming back in any read-back.
 #[test]
-fn dataset_read_back_is_agg_free_and_bounds_time_by_sort() {
+fn dataset_read_back_bounds_time_by_sort_and_no_materialising_agg() {
     let _guard = HTTP_E2E_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let _replay_guard = sync_executor::REPLAY_FAILPOINT_TEST_LOCK
         .lock()
@@ -1346,14 +1399,30 @@ fn dataset_read_back_is_agg_free_and_bounds_time_by_sort() {
     let (code, _) = run_index_report(config).unwrap();
     assert_eq!(code, 0);
 
-    // 1. No search this run issued carries an aggregation — the read-back's
-    //    count included.
+    // 1. No search this run issued carries a corpus-materialising
+    //    aggregation. The only agg allowed anywhere is the batched
+    //    finalize-verify's exact `terms` count — and that one only paired
+    //    with the outer `terms`-on-digest window filter that prunes the walk.
     let bodies = endpoint.search_bodies();
     assert!(!bodies.is_empty());
     for body in &bodies {
+        let Some(aggs) = body
+            .get("aggs")
+            .or_else(|| body.get("aggregations"))
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        for (name, spec) in aggs {
+            assert!(
+                spec.get("terms").is_some(),
+                "#1183: a search carries the corpus-materialising agg {name}: {body}"
+            );
+        }
         assert!(
-            body.get("aggs").is_none() && body.get("aggregations").is_none(),
-            "#1183: a search carried aggs: {body}"
+            body.pointer("/query/terms").is_some()
+                || body.pointer("/query/bool/filter/0/terms").is_some(),
+            "a terms agg rides a search with no digest-window filter: {body}"
         );
     }
 

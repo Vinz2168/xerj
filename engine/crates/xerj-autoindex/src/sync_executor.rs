@@ -733,72 +733,160 @@ impl<'a> EsSyncBackend<'a> {
         )
     }
 
-    fn exact_group_count(&self, group: &ManifestGroup, plan: &Plan) -> Result<u64> {
-        let mut total = 0u64;
-        for index in group_indices(group, plan)? {
+    /// Digests carried per read-back window in the batched finalize-verify.
+    /// One window is one `terms` filter plus one `terms` aggregation, so a
+    /// corpus with 400k changed groups asks ~400 round trips instead of
+    /// ~1.2 M serial searches (#1183's count lane). Window size trades server
+    /// work per request against round-trip count; the aggregation must be
+    /// allowed as many buckets as the window can hold distinct values, which
+    /// `windowed_value_counts` always requests.
+    const VERIFY_WINDOW: usize = 1024;
+
+    /// Exact live-row count per value of a keyword content-digest field
+    /// (`ax_file` on data indices, `file_key` on the catalog), read windowed:
+    /// one `terms` filter + one `terms` aggregation per [`Self::VERIFY_WINDOW`]
+    /// values. The engine's terms `doc_count` is exact — no probabilistic
+    /// sketch sits in the metric path — so each bucket is the number a
+    /// per-value `term` search returned as `hits.total`. A value with no live
+    /// row appears in no bucket and keeps the 0 it was seeded with.
+    ///
+    /// Filter context, `terms` first: the engine's columnar filter executor
+    /// checks leaves in order, so the digest set narrows the walk before an
+    /// `exists` leaf parses any stored source. In scoring context (`must`)
+    /// this shape source-scanned every row — 9.6 s per call on a 91k-doc
+    /// segment in the serial era (#1183).
+    ///
+    /// `extra_filters` are appended verbatim to the window query's
+    /// `bool.filter`: the semantic leg's `exists`, the catalog leg's
+    /// `run_id` term.
+    fn windowed_value_counts(
+        &self,
+        index: &str,
+        field: &str,
+        values: &[String],
+        extra_filters: &[Value],
+    ) -> Result<HashMap<String, u64>> {
+        let mut counts: HashMap<String, u64> =
+            values.iter().map(|value| (value.clone(), 0u64)).collect();
+        for window in values.chunks(Self::VERIFY_WINDOW) {
+            let mut filter = Vec::with_capacity(1 + extra_filters.len());
+            filter.push(serde_json::json!({"terms": {field: window}}));
+            filter.extend(extra_filters.iter().cloned());
             let response = self.es.search(
-                &index,
+                index,
                 &serde_json::json!({
                     "size": 0,
-                    "track_total_hits": true,
-                    "query": {"term": {"ax_file": &group.content_id}}
+                    "query": {"bool": {"filter": filter}},
+                    // As many buckets as the window can hold distinct values,
+                    // so no digest's count is silently dropped by a bucket cap.
+                    "aggs": {"values": {"terms": {"field": field, "size": window.len()}}}
                 }),
             )?;
-            total = total
-                .checked_add(
-                    response
-                        .pointer("/hits/total/value")
-                        .and_then(Value::as_u64)
-                        .context("exact validation response has no total hit count")?,
-                )
-                .context("exact validation count overflow")?;
+            for bucket in response
+                .pointer("/aggregations/values/buckets")
+                .and_then(Value::as_array)
+                .context("batched validation response has no terms aggregation")?
+            {
+                let key = bucket
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .context("batched validation bucket has no key")?;
+                let doc_count = bucket
+                    .get("doc_count")
+                    .and_then(Value::as_u64)
+                    .context("batched validation bucket has no doc_count")?;
+                counts.insert(key.to_owned(), doc_count);
+            }
         }
-        Ok(total)
+        Ok(counts)
     }
 
-    fn exact_semantic_count(&self, group: &ManifestGroup, plan: &Plan) -> Result<u64> {
-        let by_slug: HashMap<&str, &crate::state::PlanDataset> = plan
-            .datasets
-            .iter()
-            .map(|dataset| (dataset.slug.as_str(), dataset))
-            .collect();
-        let mut total = 0u64;
-        for slug in &group.dataset_slugs {
-            let dataset = by_slug
-                .get(slug.as_str())
-                .copied()
-                .with_context(|| format!("group references absent dataset {slug}"))?;
-            let Some(field) = &dataset.semantic_field else {
-                continue;
-            };
-            let response = self.es.search(
-                &dataset.index,
-                &serde_json::json!({
-                    "size": 0,
-                    "track_total_hits": true,
-                    // Filter context, term first: the engine's columnar
-                    // filter executor checks leaves in order, so the
-                    // ax_file term narrows the walk before the `exists`
-                    // leaf parses any stored source. In scoring context
-                    // (`must`) this query source-scanned every row —
-                    // 9.6s per call on a 91k-doc segment, one call per
-                    // changed group at finalize (#1183).
-                    "query": {"bool": {"filter": [
-                        {"term": {"ax_file": &group.content_id}},
-                        {"exists": {"field": field}}
-                    ]}}
-                }),
-            )?;
-            total = total
-                .checked_add(
-                    response
-                        .pointer("/hits/total/value")
-                        .and_then(Value::as_u64)
-                        .context("semantic validation response has no total hit count")?,
-                )
-                .context("semantic validation count overflow")?;
+    /// The catalog leg of the batched finalize-verify: per-digest counts read
+    /// by FETCHING the matched documents, never by aggregation. The catalog
+    /// is one global index that holds every corpus's file documents (402,814
+    /// on the cve-records node) and has usually taken updates (dataset
+    /// documents are rewritten by every finalize-catalog), so its version map
+    /// carries delete events — and the engine's columnar agg fast path
+    /// refuses exactly that (#1260), falling back to the brute agg corpus that
+    /// deep-clones the whole index against `max_query_memory_mb` (measured
+    /// 786.7 MB vs the 512 MB default on that catalog → 429, the #1183
+    /// breaker shape). A `_source`-restricted fetch of the matched set has no
+    /// such gate: 31 ms cold / 14 ms warm for a 1,024-digest window against
+    /// that same catalog. Each digest expects `1 + aliases.len()` documents,
+    /// so a window's matched set is small; pages advance by `from` until the
+    /// exact `total` is collected, a total that moves mid-window fails loud,
+    /// and the per-window sum of the counts must equal the query's own total
+    /// — the same number the serial per-group count trusted.
+    fn windowed_catalog_counts(
+        &self,
+        values: &[String],
+        run_id: &str,
+    ) -> Result<HashMap<String, u64>> {
+        const PAGE: usize = 8192;
+        const MAX_PAGES: usize = 64;
+        let mut counts: HashMap<String, u64> =
+            values.iter().map(|value| (value.clone(), 0u64)).collect();
+        for window in values.chunks(Self::VERIFY_WINDOW) {
+            let mut from = 0usize;
+            let mut window_total: Option<u64> = None;
+            let mut pages = 0usize;
+            loop {
+                anyhow::ensure!(
+                    pages < MAX_PAGES,
+                    "catalog read-back window needed more than {MAX_PAGES} pages"
+                );
+                pages += 1;
+                let response = self.es.search(
+                    crate::catalog::CATALOG_INDEX,
+                    &serde_json::json!({
+                        "size": PAGE,
+                        "from": from,
+                        "track_total_hits": true,
+                        "_source": ["file_key"],
+                        "query": {"bool": {"filter": [
+                            {"terms": {"file_key": window}},
+                            {"term": {"run_id": run_id}}
+                        ]}}
+                    }),
+                )?;
+                let page_total = response
+                    .pointer("/hits/total/value")
+                    .and_then(Value::as_u64)
+                    .context("catalog read-back response has no total hit count")?;
+                if let Some(seen) = window_total {
+                    anyhow::ensure!(
+                        seen == page_total,
+                        "catalog read-back total moved from {seen} to {page_total} mid-window"
+                    );
+                }
+                window_total = Some(page_total);
+                let hits = response
+                    .pointer("/hits/hits")
+                    .and_then(Value::as_array)
+                    .context("catalog read-back response has no hits array")?;
+                if hits.is_empty() {
+                    break;
+                }
+                for hit in hits {
+                    if let Some(key) = hit.pointer("/_source/file_key").and_then(Value::as_str) {
+                        if let Some(count) = counts.get_mut(key) {
+                            *count += 1;
+                        }
+                    }
+                }
+                from += hits.len();
+                if from as u64 >= page_total {
+                    break;
+                }
+            }
+            let counted: u64 = window.iter().filter_map(|value| counts.get(value)).sum();
+            anyhow::ensure!(
+                counted == window_total.unwrap_or(0),
+                "catalog read-back counted {counted} of {} matched documents in a window",
+                window_total.unwrap_or(0)
+            );
         }
-        Ok(total)
+        Ok(counts)
     }
 
     /// How many times [`Self::catalog_generation`] may be re-walked when the
@@ -1354,11 +1442,26 @@ impl SyncOperationBackend for EsSyncBackend<'_> {
             let _refreshing = self.pr.file(crate::catalog::CATALOG_INDEX, 0);
             self.es.refresh(crate::catalog::CATALOG_INDEX)?;
         }
-        // The generation-wide barrier reads changed groups back — three
-        // queries per file, serially — so on a large corpus it is minutes of
-        // work. It reports as its own phase with the changed-group count as
-        // its denominator instead of hiding behind whatever phase came before
-        // it.
+        // The generation-wide barrier reads changed groups back. Every
+        // question it asks has the same shape — "how many rows in this index
+        // carry one of these content digests" — so it is asked windowed
+        // instead of the three serial searches per file this barrier used to
+        // issue. That serial shape is #1183's count lane: measured 2.2
+        // groups/s on cve-records (402,695 changed groups, ~50 h projected)
+        // against an index phase that itself takes hours. Measured on the
+        // live crawl node (2026-10-08): the record windows answer in
+        // 6–63 ms per 1,024 digests while the index is append-only (the
+        // engine's columnar agg fast path), the semantic windows pay the
+        // brute path — the fast path does not yet columnarize `exists`
+        // (#1260) — at ~16 s per window on a 53k-doc index, and the catalog leg
+        // cannot aggregate at all: its version map carries delete events
+        // (dataset documents are rewritten by every finalize-catalog),
+        // which the fast path refuses, and the brute agg corpus trips the
+        // query-memory breaker (786.7 MB vs 512 MB → 429). The catalog
+        // therefore fetch-counts its small matched sets instead
+        // (`windowed_catalog_counts`, 14–31 ms a window). The phase counts
+        // read-back windows and ticks as each one resolves, so the line
+        // never sits at `0/N` for the length of the walk (#931's rule).
         //
         // #971: a group wholly equal to its committed self is skipped. That
         // equality is exactly the condition under which `plan_operations`
@@ -1376,66 +1479,162 @@ impl SyncOperationBackend for EsSyncBackend<'_> {
             .iter()
             .filter(|group| base_group_by_id.get(group.group_id.as_str()).copied() != Some(*group))
             .collect();
-        self.pr
-            .phase("finalize-verify", changed_groups.len() as u64, 0);
-        for group in changed_groups {
-            let _verifying = self.pr.file(&group.canonical.rel, 0);
-            anyhow::ensure!(
-                self.exact_group_count(group, &desired.plan)? == group.expected_records,
-                "live record count disagrees with desired group {}",
-                group.group_id
-            );
-            let semantic = self.exact_semantic_count(group, &desired.plan)?;
-            anyhow::ensure!(
-                semantic == group.expected_passages && semantic == group.expected_vectors,
-                "live semantic count disagrees with desired group {}",
-                group.group_id
-            );
-            // Scoped to this generation's `run_id`, the same way the run-summary
-            // read-back is (`lib.rs`). `file_key` is derived from CONTENT alone
-            // (`content::full_digest`) and the catalog is one global index that no
-            // `--prefix` namespaces, so an unscoped count also sees the
-            // canonical and alias documents that ANOTHER corpus on this node
-            // published for byte-identical content — two Apache-2.0 checkouts
-            // sharing a LICENSE is enough. Those documents are that run's, not
-            // this one's: counting them aborted a generation whose own
-            // publication was exactly right (#360). What this barrier is for is
-            // "this generation published one canonical document and its aliases",
-            // and that is what it now asks. For the same #971 reason as the
-            // record counts above, only changed groups ask — a kept group's
-            // canonical/alias documents intentionally keep the run_id of the
-            // generation that last wrote them.
-            let catalog = self.es.search(
-                crate::catalog::CATALOG_INDEX,
-                &serde_json::json!({
-                    "size": 0,
-                    "track_total_hits": true,
-                    "query": {"bool": {"filter": [
-                        {"term": {"file_key": &group.content_id}},
-                        {"term": {"run_id": &snapshot.tx_id}}
-                    ]}}
-                }),
-            )?;
-            anyhow::ensure!(
-                catalog.pointer("/hits/total/value").and_then(Value::as_u64)
-                    == Some(1 + group.aliases.len() as u64),
-                "catalog canonical/alias count disagrees with desired group {}",
-                group.group_id
-            );
-        }
         let desired_ids: std::collections::HashSet<&str> = desired
             .groups
             .iter()
             .map(|group| group.content_id.as_str())
             .collect();
-        for old in &base.groups {
-            if !desired_ids.contains(old.content_id.as_str()) {
-                anyhow::ensure!(
-                    self.exact_group_count(old, &base.plan)? == 0,
-                    "replaced or deleted content {} remains live",
-                    old.content_id
-                );
+        let deleted_groups: Vec<&ManifestGroup> = base
+            .groups
+            .iter()
+            .filter(|old| !desired_ids.contains(old.content_id.as_str()))
+            .collect();
+
+        // What each leg needs, gathered before anything is asked so the phase
+        // opens with an honest denominator. Record counts are keyed by index:
+        // a changed group asks in every index its datasets touch, a deleted
+        // group asks for zero in every index the BASE plan touched — a renamed
+        // dataset yields two entries, exactly the two names that must be read.
+        // Duplicate digests inside one index's list are harmless: the count map
+        // is keyed by digest and each group sums its own lookups.
+        let mut record_wanted: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for group in &changed_groups {
+            for index in group_indices(group, &desired.plan)? {
+                record_wanted
+                    .entry(index)
+                    .or_default()
+                    .push(group.content_id.clone());
             }
+        }
+        for old in &deleted_groups {
+            for index in group_indices(old, &base.plan)? {
+                record_wanted
+                    .entry(index)
+                    .or_default()
+                    .push(old.content_id.clone());
+            }
+        }
+        // Semantic counts are keyed by (index, semantic field): a changed
+        // group asks once per dataset that carries one.
+        let by_slug: HashMap<&str, &crate::state::PlanDataset> = desired
+            .plan
+            .datasets
+            .iter()
+            .map(|dataset| (dataset.slug.as_str(), dataset))
+            .collect();
+        let mut semantic_wanted: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+        for group in &changed_groups {
+            for slug in &group.dataset_slugs {
+                let dataset = by_slug
+                    .get(slug.as_str())
+                    .copied()
+                    .with_context(|| format!("group references absent dataset {slug}"))?;
+                if let Some(field) = &dataset.semantic_field {
+                    semantic_wanted
+                        .entry((dataset.index.clone(), field.clone()))
+                        .or_default()
+                        .push(group.content_id.clone());
+                }
+            }
+        }
+        let windows = |values: usize| values.div_ceil(Self::VERIFY_WINDOW) as u64;
+        let mut readbacks = 0u64;
+        for values in record_wanted.values() {
+            readbacks += windows(values.len());
+        }
+        for values in semantic_wanted.values() {
+            readbacks += windows(values.len());
+        }
+        let catalog_wanted: Vec<String> = changed_groups
+            .iter()
+            .map(|group| group.content_id.clone())
+            .collect();
+        if !catalog_wanted.is_empty() {
+            readbacks += windows(catalog_wanted.len());
+        }
+        self.pr.phase("finalize-verify", readbacks, 0);
+
+        let mut record_counts: HashMap<String, HashMap<String, u64>> = HashMap::new();
+        for (index, values) in &record_wanted {
+            let _reading = self.pr.file(index, 0);
+            let counts = self.windowed_value_counts(index, "ax_file", values, &[])?;
+            record_counts.insert(index.clone(), counts);
+        }
+        let mut semantic_counts: HashMap<(String, String), HashMap<String, u64>> = HashMap::new();
+        for ((index, field), values) in &semantic_wanted {
+            let _reading = self.pr.file(index, 0);
+            let exists = serde_json::json!({"exists": {"field": field}});
+            let counts = self.windowed_value_counts(index, "ax_file", values, &[exists])?;
+            semantic_counts.insert((index.clone(), field.clone()), counts);
+        }
+        // Scoped to this generation's `run_id`, the same way the run-summary
+        // read-back is (`lib.rs`). `file_key` is derived from CONTENT alone
+        // (`content::full_digest`) and the catalog is one global index that no
+        // `--prefix` namespaces, so an unscoped count also sees the
+        // canonical and alias documents that ANOTHER corpus on this node
+        // published for byte-identical content — two Apache-2.0 checkouts
+        // sharing a LICENSE is enough. Those documents are that run's, not
+        // this one's: counting them aborted a generation whose own
+        // publication was exactly right (#360). What this barrier is for is
+        // "this generation published one canonical document and its aliases",
+        // and that is what it now asks. For the same #971 reason as the
+        // record counts above, only changed groups ask — a kept group's
+        // canonical/alias documents intentionally keep the run_id of the
+        // generation that last wrote them.
+        let catalog_counts = if catalog_wanted.is_empty() {
+            HashMap::new()
+        } else {
+            let _reading = self.pr.file(crate::catalog::CATALOG_INDEX, 0);
+            self.windowed_catalog_counts(&catalog_wanted, &snapshot.tx_id)?
+        };
+
+        // The checks are in-memory lookups in the same per-group order the
+        // serial walk used, so the first disagreement still names the same
+        // group it always did. A key missing from a map here is a bookkeeping
+        // bug in the gathering above, not a count of zero — the catalog check
+        // makes it fail loud either way.
+        for group in changed_groups {
+            let mut records = 0u64;
+            for index in group_indices(group, &desired.plan)? {
+                records += record_counts[&index][&group.content_id];
+            }
+            anyhow::ensure!(
+                records == group.expected_records,
+                "live record count disagrees with desired group {}",
+                group.group_id
+            );
+            let mut semantic = 0u64;
+            for slug in &group.dataset_slugs {
+                let dataset = by_slug
+                    .get(slug.as_str())
+                    .copied()
+                    .with_context(|| format!("group references absent dataset {slug}"))?;
+                if let Some(field) = &dataset.semantic_field {
+                    semantic +=
+                        semantic_counts[&(dataset.index.clone(), field.clone())][&group.content_id];
+                }
+            }
+            anyhow::ensure!(
+                semantic == group.expected_passages && semantic == group.expected_vectors,
+                "live semantic count disagrees with desired group {}",
+                group.group_id
+            );
+            anyhow::ensure!(
+                catalog_counts[&group.content_id] == 1 + group.aliases.len() as u64,
+                "catalog canonical/alias count disagrees with desired group {}",
+                group.group_id
+            );
+        }
+        for old in &deleted_groups {
+            let mut live = 0u64;
+            for index in group_indices(old, &base.plan)? {
+                live += record_counts[&index][&old.content_id];
+            }
+            anyhow::ensure!(
+                live == 0,
+                "replaced or deleted content {} remains live",
+                old.content_id
+            );
         }
         Ok(())
     }
