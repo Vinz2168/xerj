@@ -82,6 +82,18 @@ pub fn resolve_fields(mapping: Option<&Value>) -> Vec<String> {
     if present.contains("text") {
         out.push("text^0.5".to_string());
     }
+    // #1244 coverage gate: an own field joins the ^0.5 union only when at
+    // least a quarter of the indices in the mapping union map it. Measured
+    // on the two live corpora that motivated this, the coverage spectrum
+    // has an empty middle: cve-records keeps its schema prose at 37-96%
+    // (containers_cna_descriptions 95.8%, timeline 37.3% of 118 indices),
+    // while exploit-pocs-2026 — where every own field is README frontmatter
+    // junk from some vendored file — tops out at 1.0% (`description`) once
+    // the standard fields are accounted for. Before the gate, the sorted
+    // 24-cap kept literal `$comment` and cut `Summary` there: 2,143 own
+    // text fields, all noise. `div_ceil` so a 5-index union demands 2.
+    let min_union_indices = obj.len().div_ceil(4);
+    let own_gated = own_text_fields(obj, min_union_indices);
     if out.is_empty() {
         // #1158: a raw-JSON corpus (ghsa-db's advisory mirrors, OSV) maps
         // NONE of the standard content fields — every record carries its
@@ -93,25 +105,53 @@ pub fn resolve_fields(mapping: Option<&Value>) -> Vec<String> {
         // Fall back to the corpus's OWN text-typed fields (never `ax_*`
         // provenance) — still mapping-gated, so every field sent is one
         // at least one index really maps.
-        let own = own_text_fields(obj);
-        if own.is_empty() {
+        //
+        // The floor takes ANY own text field, coverage gate OFF: the only
+        // alternative is `["body"]`, a field no index maps. A sparse
+        // raw-JSON corpus whose shards each map different prose fields is
+        // better served by its 10%-coverage fields than by a guaranteed-
+        // wrong `body`.
+        let own_any = own_text_fields(obj, 1);
+        if own_any.is_empty() {
             vec!["body".to_string()]
         } else {
-            own
+            own_any
         }
     } else {
+        // #1244: the corpus's own text-typed fields join as ^0.5 recall
+        // legs even when standard fields ARE mapped. Found by the
+        // pre-registered g7-cve-records-2026-10-08 suite (0/7): the
+        // records' prose lived in `containers_cna_descriptions` (rank 1
+        // at 18.76 queried directly), but the wildcard sent only
+        // `text^0.5` — the synthesized `text` was mapped by ONE shard
+        // and EMPTY in every record with schema-named prose, and its
+        // presence kept this branch from ever consulting the own-field
+        // list. The union is safe against score ballooning because the
+        // BM25 body rides `multi_match`'s default `best_fields`, which
+        // this engine executes as dis_max (max, not sum — see the
+        // `BestFields` arm in `query_node_to_fts`): a ^0.5 leg can only
+        // win when it genuinely outranks the content fields at half
+        // weight, the same posture `text^0.5` got from #1238.
+        for f in own_gated {
+            if !out.iter().any(|o| o.split('^').next() == Some(f.as_str())) {
+                out.push(format!("{f}^0.5"));
+            }
+        }
         out
     }
 }
 
-/// The corpus's own searchable content fields, for the no-standard-field
-/// floor above: every property mapped `text` (or `semantic_text`) by any
-/// index under the prefix, `ax_*` provenance excluded, names sorted, capped
-/// so a wide schema cannot balloon the multi_match.
-fn own_text_fields(obj: &serde_json::Map<String, Value>) -> Vec<String> {
+/// The corpus's own searchable content fields: every property mapped `text`
+/// (or `semantic_text`) by at least `min_indices` of the indices in the
+/// union, `ax_*` provenance excluded, names sorted, capped so a wide schema
+/// cannot balloon the multi_match. Callers pick the gate: the #1158 floor
+/// passes `1` (any mapping index — the alternative is a guaranteed-wrong
+/// `body`), the #1244 union passes a quarter of the union (see the coverage
+/// note in [`resolve_fields`]).
+fn own_text_fields(obj: &serde_json::Map<String, Value>, min_indices: usize) -> Vec<String> {
     const AX: &str = "ax_";
     const MAX_OWN_FIELDS: usize = 24;
-    let mut own = std::collections::BTreeSet::new();
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for m in obj.values() {
         let Some(props) = m.pointer("/mappings/properties").and_then(Value::as_object) else {
             continue;
@@ -122,11 +162,16 @@ fn own_text_fields(obj: &serde_json::Map<String, Value>) -> Vec<String> {
                 .and_then(Value::as_str)
                 .is_some_and(|t| t == "text" || t == "semantic_text");
             if searchable && !key.starts_with(AX) {
-                own.insert(key.clone());
+                *counts.entry(key.clone()).or_insert(0) += 1;
             }
         }
     }
-    own.into_iter().take(MAX_OWN_FIELDS).collect()
+    counts
+        .into_iter()
+        .filter(|(_, n)| *n >= min_indices)
+        .map(|(k, _)| k)
+        .take(MAX_OWN_FIELDS)
+        .collect()
 }
 
 /// Indices under the prefix whose `field` (default `body`) is mapped as
@@ -294,11 +339,18 @@ mod tests {
         );
     }
 
-    /// A mixed corpus where SOME index maps `body` keeps today's behaviour
-    /// exactly — the own-fields fallback fires only on the no-standard-
-    /// field floor, never as an extra leg beside `body`.
+    /// A mixed corpus where SOME index maps `body` — #1244 reversed the
+    /// old pin (this test used to assert `["body"]` alone, "the fallback
+    /// fires only on the no-standard-field floor"): the pre-registered
+    /// g7-cve-records-2026-10-08 suite measured that rule losing the whole
+    /// corpus (0/7), because one shard's synthesized — and empty-in-real-
+    /// records — `text` made the field list non-empty and the own-field
+    /// legs never joined. Now the sibling's `summary` rides beside `body`
+    /// as a ^0.5 recall leg (best_fields = dis_max, so it can only win by
+    /// genuinely outranking the content field at half weight), and `body`
+    /// keeps its full weight and its position.
     #[test]
-    fn a_corpus_with_body_mapped_never_grows_own_fields() {
+    fn own_text_fields_join_as_recall_legs_beside_body() {
         let m = mapping(&[("xc-mixed-000", &["body"], false)]);
         let mut obj = m.as_object().unwrap().clone();
         obj.insert(
@@ -310,8 +362,104 @@ mod tests {
         );
         assert_eq!(
             resolve_fields(Some(&Value::Object(obj))),
-            vec!["body".to_string()],
-            "body present: no summary leg, no floor rewrite"
+            vec!["body".to_string(), "summary^0.5".to_string()],
+            "body keeps full weight; summary joins as the ^0.5 recall leg"
+        );
+    }
+
+    /// The #1244 shape exactly: a wildcard where ONE shard maps the
+    /// synthesized `text` (empty in every prose-carrying record) and the
+    /// rest keep their prose in schema-named text fields. Before the fix
+    /// this resolved to `["text^0.5"]` and the corpus answered noise —
+    /// the g7-cve-records 0/7. The own fields must join even though
+    /// `text` made the list non-empty, and `text^0.5` itself must not be
+    /// duplicated when it is also an own text field.
+    #[test]
+    fn the_cve_records_shape_joins_prose_fields_beside_synthesized_text() {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "xc-cve-records-0".to_string(),
+            json!({ "mappings": { "properties": {
+                "cveMetadata_cveId": { "type": "keyword" },
+                "containers_cna_descriptions": { "type": "text" },
+                "containers_cna_title": { "type": "text" }
+            } } }),
+        );
+        obj.insert(
+            "xc-cve-records-1".to_string(),
+            json!({ "mappings": { "properties": {
+                "cveMetadata_cveId": { "type": "keyword" },
+                "text": { "type": "text" }
+            } } }),
+        );
+        assert_eq!(
+            resolve_fields(Some(&Value::Object(obj))),
+            vec![
+                "text^0.5".to_string(),
+                "containers_cna_descriptions^0.5".to_string(),
+                "containers_cna_title^0.5".to_string(),
+            ],
+            "own prose fields join beside the synthesized text; text^0.5 not duplicated"
+        );
+    }
+
+    /// The #1244 coverage gate on the UNION path, measured on the live
+    /// corpora: schema prose repeats across shards (cve-records 37-96%),
+    /// README frontmatter junk does not (exploit-pocs-2026: 2,143 own text
+    /// fields, all <=1% once the standard fields are accounted for — the
+    /// alphabetical 24-cap kept a literal `$comment` and cut `Summary`).
+    /// Five indices, quarter gate demands 2: `summary` at 2/5 joins,
+    /// `$comment` at 1/5 stays out. The FLOOR (no standard field mapped
+    /// anywhere) is exempt — its only alternative is a guaranteed-wrong
+    /// `body`, so even a 1/5 field beats it there.
+    #[test]
+    fn union_legs_need_quarter_coverage_but_the_floor_takes_any() {
+        let mut obj = serde_json::Map::new();
+        for i in 0..5 {
+            let mut props = serde_json::Map::new();
+            props.insert("body".to_string(), json!({ "type": "text" }));
+            if i < 2 {
+                props.insert("summary".to_string(), json!({ "type": "text" }));
+            }
+            if i == 0 {
+                props.insert("$comment".to_string(), json!({ "type": "text" }));
+            }
+            obj.insert(
+                format!("xc-frontmatter-{i:03}"),
+                json!({ "mappings": { "properties": props } }),
+            );
+        }
+        assert_eq!(
+            resolve_fields(Some(&Value::Object(obj))),
+            vec!["body".to_string(), "summary^0.5".to_string()],
+            "summary (2/5) joins as the recall leg; $comment (1/5) fails the quarter gate"
+        );
+
+        // Same five indices with `body` nowhere: the floor fires and takes
+        // BOTH own fields, coverage be damned — `["body"]` would be a field
+        // no index maps.
+        let mut bare = serde_json::Map::new();
+        for i in 0..5 {
+            let mut props = serde_json::Map::new();
+            if i < 2 {
+                props.insert("summary".to_string(), json!({ "type": "text" }));
+            }
+            if i == 0 {
+                props.insert("$comment".to_string(), json!({ "type": "text" }));
+            }
+            if !props.is_empty() {
+                bare.insert(
+                    format!("xc-bare-{i:03}"),
+                    json!({ "mappings": { "properties": props } }),
+                );
+            }
+        }
+        let mut got = resolve_fields(Some(&Value::Object(bare)));
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["$comment".to_string(), "summary".to_string()],
+            "the #1158 floor is exempt from the coverage gate"
         );
     }
 }
