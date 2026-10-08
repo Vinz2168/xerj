@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.92] - 2026-10-08
+
 ### Fixed
 
 - **A corpus whose records carry prose in schema-named fields was invisible to

@@ -2,23 +2,33 @@
 
 This roadmap tracks capabilities that are **planned but not yet fully implemented**, so the project's public claims stay honest about what ships today versus what is coming. Status is verified against the actual code and by real API requests to the release binary, not aspirational.
 
-Last reviewed: 2026-10-08 (against `v1.0.0-rc.91` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.91 release-cut roll:
+Last reviewed: 2026-10-08 (against `v1.0.0-rc.92` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.92 release-cut roll:
 the open-defects shortlist was re-verified against the live tracker at
-cut time — **ten open**, the same ten as the rc.90 cut (#1094, #1100,
-#1122, #1170, #1173, #1108, #1110, #1183, #1212, #1226). One closed
-verified inside the window: #1238 (the `xerj code` page-diversification
-defect the exploit-hub A/B eval caught live, PR
-[#1241](https://github.com/xerj-org/xerj/pull/1241)). #1183 gained its
-measured mechanism on 2026-10-08 (the comment table on the issue): the
-finalize-verify crawl is a per-fresh-value brute scan — exact repeats
-hit the query cache at 0.02 s, every uncached `ax_file` query pays
-1.2 s bare / ~14 s term+exists on the 572,992-doc index — with the
-count-context `SourceExists` exclusion and the single-tombstone
-count fast-path gate as the two engines; rc.91's
-[#1234](https://github.com/xerj-org/xerj/pull/1234) fixed the scored
-lane and the count lane is the remaining half, fix branch queued. The
-issue keeps its completion condition: a full xerj-search rebuild
-passing finalize with verified numbers.
+cut time — **twelve open**, the ten carried from rc.91 (#1094, #1100,
+#1122, #1170, #1173, #1108, #1110, #1183, #1212, #1226) plus two filed
+inside the window. #1250 (multi-index ingest oscillating on the memory
+breaker) had its attribution corrected the same day it was filed: the
+rejecting breaker is the boot-time tiered process cap (95% watermark),
+not the live-settable `max_query_memory_mb`, and the mitigation is the
+`XERJ_MAX_PROCESS_MEMORY_MB` restart; the same cap was then measured
+driving an *idle* flush loop — two parked A/B nodes wrote 644 GB and
+858 GB to disk in seven hours with no client traffic. #1254: autoindex
+silently drops a file that lands in no dataset and no junk list —
+otel-proto's 11 `.proto` files, whose corpus graded FAIL 1/5 on the
+missing family. #1244 **stays open** with both mechanism fixes merged
+inside the window ([#1246](https://github.com/xerj-org/xerj/pull/1246),
+[#1251](https://github.com/xerj-org/xerj/pull/1251)): its completion
+condition is the pre-registered G7 suites passing on rebuilt corpora,
+and both rebuilds (cve-records, vuln-fix-commits) were in flight at cut
+time. The rc.91 cut's record stands as written: ten open at that cut,
+one closed verified inside the window (#1238, PR
+[#1241](https://github.com/xerj-org/xerj/pull/1241)). #1183 keeps its
+measured mechanism (the 2026-10-08 comment table: finalize-verify pays
+1.2 s bare / ~14 s term+exists per uncached `ax_file` value on the
+572,992-doc index; the scored lane was fixed by rc.91's
+[#1234](https://github.com/xerj-org/xerj/pull/1234), the count lane is
+the remaining half) and its completion condition: a full xerj-search
+rebuild passing finalize with verified numbers.
 **Two closed inside the rc.87 window and recorded in the CHANGELOG, not
 carried here:** #1147 (the build-throughput class, PR
 [#1195](https://github.com/xerj-org/xerj/pull/1195), merged just past
@@ -213,8 +223,20 @@ and the console review's), the #1062 wrong-and-confident detection gate, the
 `xerj-decide-v1` Hugging Face publication (operator credentials), and the GA
 bar itself — *The road to v1.0.0 GA* below.
 
-**Open defects.** Ten, all live on the tracker — the
-shortlist the release-notes gate checks. From the rc.80 gate runs:
+**Open defects.** Twelve, all live on the tracker — the
+shortlist the release-notes gate checks. From the rc.92 window:
+[#1250](https://github.com/xerj-org/xerj/issues/1250) (multi-index
+ingest oscillates on the parent RSS breaker; root cause re-attributed
+same-day to the boot-time tiered process cap, mitigation the
+`XERJ_MAX_PROCESS_MEMORY_MB` restart, and the same cap drives an idle
+flush loop measured at 644/858 GB of writes) and
+[#1254](https://github.com/xerj-org/xerj/issues/1254) (autoindex drops
+a file that lands in no dataset and no junk list — otel-proto's 11
+`.proto` files silently unindexed).
+[#1244](https://github.com/xerj-org/xerj/issues/1244) (the `xerj code`
+own-field recall legs and the multi-family family-route gate both
+merged in rc.92; the issue stays open until the pre-registered G7
+suites pass on the rebuilt corpora). From the rc.80 gate runs:
 [#1094](https://github.com/xerj-org/xerj/issues/1094) (decision
 flywheel write-back freezes once the history index has BM25 support).
 From the rc.80 console knowledge-surface review:
