@@ -88,9 +88,7 @@ pub fn query_text_weight(root: &Path, corpus: &str) -> Option<Result<f64, String
     let w = hints.text_weight?;
     match w {
         w if (0.25..=4.0).contains(&w) => Some(Ok(w)),
-        w => Some(Err(format!(
-            "query.text_weight {w} is outside 0.25..=4.0"
-        ))),
+        w => Some(Err(format!("query.text_weight {w} is outside 0.25..=4.0"))),
     }
 }
 
@@ -480,12 +478,19 @@ mod tests {
         };
         write_corpus_manifest_kind(&path, "otel-proto", None, "t", &repos, Some(&hints));
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.ends_with("],\"query\":{\"text_weight\":1}}\n"), "{text}");
+        assert!(
+            text.ends_with("],\"query\":{\"text_weight\":1}}\n"),
+            "{text}"
+        );
         let m = read_corpus_manifest(&path).unwrap();
         assert_eq!(m.query, Some(json!({"text_weight": 1})));
         // A corpus with a block but no usable weight is still a valid
         // manifest — the hint is simply absent.
-        std::fs::write(&path, "{\"corpus\":\"otel-proto\",\"repos\":[],\"query\":{}}").unwrap();
+        std::fs::write(
+            &path,
+            "{\"corpus\":\"otel-proto\",\"repos\":[],\"query\":{}}",
+        )
+        .unwrap();
         assert_eq!(read_corpus_manifest(&path).unwrap().query, Some(json!({})));
     }
 
@@ -497,7 +502,11 @@ mod tests {
         let path = corpus_dir.join("corpus.json");
         let repo_line = "{\"repo\":\"r\",\"url\":\"u\"}";
         // absent block -> None (every historical manifest)
-        std::fs::write(&path, format!("{{\"corpus\":\"c\",\"repos\":[{repo_line}]}}")).unwrap();
+        std::fs::write(
+            &path,
+            format!("{{\"corpus\":\"c\",\"repos\":[{repo_line}]}}"),
+        )
+        .unwrap();
         assert_eq!(query_text_weight(&dir, "otel-proto"), None);
         // declared in bounds -> Ok
         std::fs::write(

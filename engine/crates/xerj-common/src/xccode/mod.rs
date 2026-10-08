@@ -259,9 +259,7 @@ pub fn run_code_query(
                 *slot = format!("text^{w}");
             }
         }
-        Some(Err(msg)) => warnings.push(format!(
-            "corpus.json {msg}; using the default text^0.5"
-        )),
+        Some(Err(msg)) => warnings.push(format!("corpus.json {msg}; using the default text^0.5")),
         None => {}
     }
 
