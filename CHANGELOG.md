@@ -26,7 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Measured spectrum the gate sits on has an empty middle: schema prose repeats
   across shards (cve-records 37-96% of 118 indices) while README-frontmatter
   junk does not (exploit-pocs-2026: 2,143 own text fields, all ≤1% — the old
-  alphabetical 24-cap kept a literal `$comment` and cut `Summary`).
+  alphabetical 24-cap kept a literal `$comment` and cut `Summary`). The
+  mechanism fix is complete; #1244 itself stays open until the
+  pre-registered G7 suites pass on the rebuilt corpora — the cve-records
+  and vuln-fix-commits rebuilds were in flight at release time.
 
 - **A multi-family corpus still lost its minority family to that same gate**
   (issue [#1244](https://github.com/xerj-org/xerj/issues/1244), PR
@@ -44,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   half fails its own majority rule. Regression-checked on exploit-pocs-2026
   (pinned query "MCPJam inspector 23744": needle README still rank 1, POC.py
   rank 3), whose 689 own-only indices (12% of the corpus) are newly reachable.
+  #1244 stays open for the same completion condition as above: the suite
+  reruns on the rebuilt corpora close it, not this code.
+
+<!-- notes-exempt: #1252 (changelog-only carry of the rc.92 entries; no code,
+     cites the window PRs #1246 and #1251 itself) -->
 
 ## [1.0.0-rc.91] - 2026-10-08
 
