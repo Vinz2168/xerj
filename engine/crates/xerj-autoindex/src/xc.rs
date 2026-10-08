@@ -464,12 +464,12 @@ fn run_corpus_add(args: &[String]) -> i32 {
     // The manifest is read BEFORE the name is finalised: with `--from` and
     // no explicit <name>/--as, the manifest's own 'corpus' field supplies
     // it. Everything downstream (dest, carry, entries) needs the resolved
-    // name, so resolution lives here and nowhere else.
-    let (name, rows, pin_query): (
-        String,
-        Vec<(String, String, String, String)>,
-        Option<manifest::QueryHints>,
-    ) = if let Some(path) = &from {
+    // name, so resolution lives here and nowhere else. The pin's query
+    // hints (#1254) ride beside the tuple rather than inside it — a
+    // three-slot tuple tripped clippy's type_complexity on the pinned
+    // CI toolchain.
+    let mut pin_query: Option<manifest::QueryHints> = None;
+    let (name, rows): (String, Vec<(String, String, String, String)>) = if let Some(path) = &from {
         let hub = match manifest::read_hub_manifest(Path::new(path)) {
             Ok(h) => h,
             Err(e) => {
@@ -485,13 +485,13 @@ fn run_corpus_add(args: &[String]) -> i32 {
             }
         };
         println!("rebuilding corpus '{resolved}' from {path}");
+        pin_query = hub.query;
         (
             resolved,
             hub.rows
                 .into_iter()
                 .map(|r| (r.repo, r.url, r.sha, r.declared_licence))
                 .collect(),
-            hub.query,
         )
     } else {
         let Some(resolved) = explicit_name else {
@@ -512,7 +512,6 @@ fn run_corpus_add(args: &[String]) -> i32 {
                     (repo, u.clone(), String::new(), String::new())
                 })
                 .collect(),
-            None,
         )
     };
     if let Err(e) = xccode::pathgate::valid_corpus_name(&name) {
