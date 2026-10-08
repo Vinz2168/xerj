@@ -49,6 +49,49 @@ pub struct CorpusManifest {
     pub cloned_at: Option<String>,
     #[serde(default)]
     pub repos: Vec<ManifestRepo>,
+    /// Author-declared query hints (#1254), kept RAW: a malformed hint block
+    /// must not make the whole manifest unparseable — that would silently
+    /// blank the licence map, a far worse failure than an ignored hint.
+    /// Validation happens in [`query_text_weight`] / [`read_hub_manifest`].
+    #[serde(default)]
+    pub query: Option<Value>,
+}
+
+/// `corpus.json`'s optional `"query"` block (#1254). The corpus AUTHOR knows
+/// what the plain-text family carries in THEIR corpus — the primary content
+/// (otel-proto: every `.proto` definition is a txt-lines record) or mirror
+/// noise beside code-family `body` records (the #1238 exploit group, where
+/// `text^1.0` was measured flooding the top-10 with sibling-CVE demos). That
+/// discriminator is not visible at query time: mixed datasets and mixed index
+/// mappings look the same from the client either way. So it is declared, once,
+/// here, and the query path honours it or ignores it loudly.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq)]
+pub struct QueryHints {
+    /// Weight for the `text` recall leg (`text^0.5` by default). Honest
+    /// bounds are enforced by the reader, not trusted from the file.
+    #[serde(default)]
+    pub text_weight: Option<f64>,
+}
+
+/// The corpus's declared text-leg weight. `None` = nothing declared (every
+/// historical manifest — the 0.5 default applies), `Some(Ok(w))` = declared,
+/// `Some(Err(msg))` = declared but unusable (the caller warns and uses the
+/// default rather than silently guessing what was meant).
+pub fn query_text_weight(root: &Path, corpus: &str) -> Option<Result<f64, String>> {
+    let path = root.join("corpora").join(corpus).join("corpus.json");
+    let m = read_corpus_manifest(&path).ok()?;
+    let raw = m.query?;
+    let hints: QueryHints = match serde_json::from_value(raw) {
+        Ok(h) => h,
+        Err(e) => return Some(Err(format!("query block is malformed: {e}"))),
+    };
+    let w = hints.text_weight?;
+    match w {
+        w if (0.25..=4.0).contains(&w) => Some(Ok(w)),
+        w => Some(Err(format!(
+            "query.text_weight {w} is outside 0.25..=4.0"
+        ))),
+    }
 }
 
 /// Read a corpus manifest. Missing file is `Err` with the path named — the
@@ -108,23 +151,34 @@ fn entry_json(repo: &ManifestRepo) -> String {
 /// Atomic (tmp + rename): a half-written manifest describes a checkout that
 /// does not exist, and `xerj corpus list` reads these.
 pub fn write_corpus_manifest(path: &Path, corpus: &str, cloned_at: &str, repos: &[ManifestRepo]) {
-    write_corpus_manifest_kind(path, corpus, None, cloned_at, repos)
+    write_corpus_manifest_kind(path, corpus, None, cloned_at, repos, None)
 }
 
-/// [`write_corpus_manifest`] with an optional `kind`. `None` emits byte-for-byte
-/// what the pinned format has always been — a git corpus's manifest must not
-/// churn because a second kind of corpus now exists. `Some("harvested")`
-/// inserts `"kind":"harvested"` directly after `"corpus"`; only packs' corpora
-/// carry it, and `add` refuses to mix the two kinds under one name.
+/// [`write_corpus_manifest`] with an optional `kind` and query-hint block.
+/// `None` for either emits byte-for-byte what the pinned format has always
+/// been — a git corpus's manifest must not churn because a second kind of
+/// corpus now exists. `Some("harvested")` inserts `"kind":"harvested"`
+/// directly after `"corpus"`; only packs' corpora carry it, and `add` refuses
+/// to mix the two kinds under one name. A `query` block (#1254) is appended
+/// after `repos` verbatim — the corpus author's declaration must survive a
+/// re-clone from a hub pin that carries it.
 pub fn write_corpus_manifest_kind(
     path: &Path,
     corpus: &str,
     kind: Option<&str>,
     cloned_at: &str,
     repos: &[ManifestRepo],
+    query: Option<&QueryHints>,
 ) {
     let kind_json = match kind {
         Some(k) => format!(",\"kind\":{}", Value::String(k.to_string())),
+        None => String::new(),
+    };
+    let query_json = match query {
+        Some(q) => match q.text_weight {
+            Some(w) => format!(",\"query\":{{\"text_weight\":{w}}}"),
+            None => String::new(),
+        },
         None => String::new(),
     };
     let mut body = format!(
@@ -139,7 +193,7 @@ pub fn write_corpus_manifest_kind(
         body.push_str("  ");
         body.push_str(&entry_json(r));
     }
-    body.push_str("\n]}\n");
+    body.push_str(&format!("\n]{query_json}}}\n"));
     let tmp = path.with_extension("json.tmp");
     if std::fs::write(&tmp, body).is_ok() {
         let _ = std::fs::rename(&tmp, path);
@@ -163,6 +217,8 @@ pub struct HubRow {
 pub struct HubManifest {
     pub corpus: String,
     pub rows: Vec<HubRow>,
+    /// The pin's `query` block (#1254), carried into the cloned corpus.json.
+    pub query: Option<QueryHints>,
 }
 
 /// Parse and VALIDATE a hub manifest (`--from`). Untrusted input rules from
@@ -185,6 +241,17 @@ pub fn read_hub_manifest(path: &Path) -> Result<HubManifest, String> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    // The pin's optional query-hint block (#1254): carried verbatim into the
+    // cloned corpus's corpus.json so the author's declaration survives a
+    // re-clone. Malformed is refused here, in the validator, rather than
+    // half-applied at query time.
+    let query = match v.get("query") {
+        None => None,
+        Some(q) => Some(
+            serde_json::from_value::<QueryHints>(q.clone())
+                .map_err(|e| format!("{}: bad 'query' block: {e}", path.display()))?,
+        ),
+    };
     if !corpus.is_empty() {
         pathgate::valid_corpus_name(&corpus).map_err(|e| format!("{}: {e}", path.display()))?;
     }
@@ -212,7 +279,11 @@ pub fn read_hub_manifest(path: &Path) -> Result<HubManifest, String> {
                 .to_string(),
         });
     }
-    Ok(HubManifest { corpus, rows: out })
+    Ok(HubManifest {
+        corpus,
+        rows: out,
+        query,
+    })
 }
 
 #[cfg(test)]
@@ -266,7 +337,7 @@ mod tests {
             bytes: Some(512),
             review: None,
         }];
-        write_corpus_manifest_kind(&path, "rust-vulns", Some("harvested"), "t", &repos);
+        write_corpus_manifest_kind(&path, "rust-vulns", Some("harvested"), "t", &repos, None);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
             text.starts_with("{\"corpus\":\"rust-vulns\",\"kind\":\"harvested\",\"cloned_at\":"),
@@ -382,6 +453,122 @@ mod tests {
             "no hub manifests found under {}",
             hub.display()
         );
+    }
+
+    #[test]
+    fn query_hints_round_trip_and_default_stays_pinned() {
+        let dir = tmp();
+        let path = dir.join("corpus.json");
+        let repos = vec![ManifestRepo {
+            repo: "opentelemetry-proto".into(),
+            url: "https://github.com/open-telemetry/opentelemetry-proto".into(),
+            licence: "Apache-2.0".into(),
+            sha: "b3f7558".into(),
+            files: None,
+            bytes: None,
+            review: None,
+        }];
+        // No hints: byte-for-byte the historical pinned format (the
+        // round-trip test above pins the exact bytes; here the absence).
+        write_corpus_manifest(&path, "otel-proto", "t", &repos);
+        let plain = std::fs::read_to_string(&path).unwrap();
+        assert!(plain.ends_with("]}\n") && !plain.contains("query"));
+        assert_eq!(read_corpus_manifest(&path).unwrap().query, None);
+        // With hints: appended after repos, parses back, survives a rewrite.
+        let hints = QueryHints {
+            text_weight: Some(1.0),
+        };
+        write_corpus_manifest_kind(&path, "otel-proto", None, "t", &repos, Some(&hints));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.ends_with("],\"query\":{\"text_weight\":1}}\n"), "{text}");
+        let m = read_corpus_manifest(&path).unwrap();
+        assert_eq!(m.query, Some(json!({"text_weight": 1})));
+        // A corpus with a block but no usable weight is still a valid
+        // manifest — the hint is simply absent.
+        std::fs::write(&path, "{\"corpus\":\"otel-proto\",\"repos\":[],\"query\":{}}").unwrap();
+        assert_eq!(read_corpus_manifest(&path).unwrap().query, Some(json!({})));
+    }
+
+    #[test]
+    fn query_text_weight_bounds_and_error_shapes() {
+        let dir = tmp();
+        let corpus_dir = dir.join("corpora").join("otel-proto");
+        std::fs::create_dir_all(&corpus_dir).unwrap();
+        let path = corpus_dir.join("corpus.json");
+        let repo_line = "{\"repo\":\"r\",\"url\":\"u\"}";
+        // absent block -> None (every historical manifest)
+        std::fs::write(&path, format!("{{\"corpus\":\"c\",\"repos\":[{repo_line}]}}")).unwrap();
+        assert_eq!(query_text_weight(&dir, "otel-proto"), None);
+        // declared in bounds -> Ok
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"corpus\":\"c\",\"repos\":[{repo_line}],\"query\":{{\"text_weight\":1.0}}}}"
+            ),
+        )
+        .unwrap();
+        assert_eq!(query_text_weight(&dir, "otel-proto"), Some(Ok(1.0)));
+        // declared out of bounds -> Err naming the value (warned, ignored)
+        for bad in [0.1f64, 9.0] {
+            std::fs::write(
+                &path,
+                format!(
+                    "{{\"corpus\":\"c\",\"repos\":[{repo_line}],\"query\":{{\"text_weight\":{bad}}}}}"
+                ),
+            )
+            .unwrap();
+            match query_text_weight(&dir, "otel-proto") {
+                Some(Err(msg)) => assert!(msg.contains(&bad.to_string()), "{msg}"),
+                other => panic!("expected Err for {bad}, got {other:?}"),
+            }
+        }
+        // declared non-numeric -> Err (never silently coerced)
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"corpus\":\"c\",\"repos\":[{repo_line}],\"query\":{{\"text_weight\":\"high\"}}}}"
+            ),
+        )
+        .unwrap();
+        assert!(query_text_weight(&dir, "otel-proto").is_some_and(|r| r.is_err()));
+        // missing corpus -> None (licence-map tolerance: absent, not fatal)
+        assert_eq!(query_text_weight(&dir, "no-such"), None);
+    }
+
+    #[test]
+    fn hub_pin_query_block_is_carried_and_malformed_is_refused() {
+        let dir = tmp();
+        let pin = dir.join("otel-proto.json");
+        std::fs::write(
+            &pin,
+            "{\"corpus\":\"otel-proto\",\"repos\":[{\"repo\":\"opentelemetry-proto\",\"url\":\
+             \"https://github.com/open-telemetry/opentelemetry-proto\",\"sha\":\
+             \"b3f7558a0123456789abcdef0123456789abcdef\"}],\"query\":{\"text_weight\":1.0}}",
+        )
+        .unwrap();
+        let hub = read_hub_manifest(&pin).unwrap();
+        assert_eq!(
+            hub.query,
+            Some(QueryHints {
+                text_weight: Some(1.0)
+            })
+        );
+        // no block -> None
+        std::fs::write(
+            &pin,
+            "{\"corpus\":\"otel-proto\",\"repos\":[{\"repo\":\"r\",\"url\":\"u\",\"sha\":\"b3f7558a0123456789abcdef0123456789abcdef\"}]}",
+        )
+        .unwrap();
+        assert_eq!(read_hub_manifest(&pin).unwrap().query, None);
+        // malformed -> refused by the validator, not half-applied later
+        std::fs::write(
+            &pin,
+            "{\"corpus\":\"otel-proto\",\"repos\":[{\"repo\":\"r\",\"url\":\"u\",\"sha\":\"b3f7558a0123456789abcdef0123456789abcdef\"}],\
+             \"query\":{\"text_weight\":true}}",
+        )
+        .unwrap();
+        let err = read_hub_manifest(&pin).unwrap_err();
+        assert!(err.contains("query"), "{err}");
     }
 
     fn find_repo_root() -> std::path::PathBuf {

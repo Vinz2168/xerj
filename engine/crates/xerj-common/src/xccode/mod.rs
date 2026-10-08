@@ -237,7 +237,33 @@ pub fn run_code_query(
     //    full field list; hybrid degrades to BM25-only).
     let pattern = format!("{prefix}*");
     let mapping = http.get_mapping(&format!("/{pattern}/_mapping")).ok();
-    let fields = fields::resolve_fields(mapping.as_ref());
+    let mut fields = fields::resolve_fields(mapping.as_ref());
+    // #1254: a corpus may DECLARE the weight of its `text` recall leg. The
+    // 0.5 default is the #1238 calibration, measured on the live exploit
+    // group where `text` carries sibling-CVE mirror demos that must not
+    // outrank code-family `body` hits — but a corpus whose PRIMARY content
+    // rides the plain-text family is invisible at 0.5. Measured on the
+    // rebuilt otel-proto corpus (every `.proto` definition is a txt-lines
+    // record): all four proto-needled G7 queries missed with the needle at
+    // rank 19-39, and all four returned rank 1 at weight 1.0 with the index
+    // byte-identical — only the weight moved. The discriminator between the
+    // two corpus shapes is invisible at query time (mixed datasets, mixed
+    // index mappings look identical from the client), so it is author
+    // knowledge: declared once in the corpus's own corpus.json
+    // (`query.text_weight`), read here, honoured within honest bounds, and
+    // a bad declaration warns and falls back to the default instead of
+    // silently guessing.
+    match manifest::query_text_weight(root, &corpus) {
+        Some(Ok(w)) => {
+            if let Some(slot) = fields.iter_mut().find(|f| f.starts_with("text^")) {
+                *slot = format!("text^{w}");
+            }
+        }
+        Some(Err(msg)) => warnings.push(format!(
+            "corpus.json {msg}; using the default text^0.5"
+        )),
+        None => {}
+    }
 
     let mut note: Option<String> = None;
     let mut rrf_scores = false;
