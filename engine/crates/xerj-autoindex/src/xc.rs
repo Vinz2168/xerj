@@ -464,7 +464,11 @@ fn run_corpus_add(args: &[String]) -> i32 {
     // The manifest is read BEFORE the name is finalised: with `--from` and
     // no explicit <name>/--as, the manifest's own 'corpus' field supplies
     // it. Everything downstream (dest, carry, entries) needs the resolved
-    // name, so resolution lives here and nowhere else.
+    // name, so resolution lives here and nowhere else. The pin's query
+    // hints (#1254) ride beside the tuple rather than inside it — a
+    // three-slot tuple tripped clippy's type_complexity on the pinned
+    // CI toolchain.
+    let mut pin_query: Option<manifest::QueryHints> = None;
     let (name, rows): (String, Vec<(String, String, String, String)>) = if let Some(path) = &from {
         let hub = match manifest::read_hub_manifest(Path::new(path)) {
             Ok(h) => h,
@@ -481,6 +485,7 @@ fn run_corpus_add(args: &[String]) -> i32 {
             }
         };
         println!("rebuilding corpus '{resolved}' from {path}");
+        pin_query = hub.query;
         (
             resolved,
             hub.rows
@@ -623,10 +628,21 @@ fn run_corpus_add(args: &[String]) -> i32 {
         return 1;
     }
 
-    // Regenerated FROM DISK, never copied through from the input.
+    // Regenerated FROM DISK, never copied through from the input — except
+    // the pin's query hints (#1254), which are author DECLARATION, not
+    // derived state: they travel from the hub pin into the corpus.json the
+    // clone writes, so a re-clone cannot silently drop the corpus's
+    // retrieval posture.
     let cloned_at = chrono_now_stamp();
     let manifest_path = dest.join("corpus.json");
-    manifest::write_corpus_manifest(&manifest_path, &name, &cloned_at, &entries);
+    manifest::write_corpus_manifest_kind(
+        &manifest_path,
+        &name,
+        None,
+        &cloned_at,
+        &entries,
+        pin_query.as_ref(),
+    );
     println!();
     println!(
         "corpus '{name}': {} repos at {}",
@@ -949,6 +965,7 @@ fn add_pack_materialize(
         Some("harvested"),
         &chrono_now_stamp(),
         &entries,
+        None,
     );
     Ok(())
 }
@@ -3278,6 +3295,7 @@ precedence = ["a", "b"]
                 bytes: None,
                 review: None,
             }],
+            None,
         );
         let _h = code_home(home.path());
         let rc = run_corpus_add(&[
