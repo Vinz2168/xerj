@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A corpus whose records carry prose in schema-named fields was invisible to
+  `xerj code`** (issue
+  [#1244](https://github.com/xerj-org/xerj/issues/1244), PR
+  [#1246](https://github.com/xerj-org/xerj/pull/1246)) — the pre-registered
+  g7-cve-records-2026-10-08 suite measured 0/7 because `resolve_fields` sent
+  only the synthesized `text^0.5`: one shard mapped `text` and its presence
+  kept the own-field fallback from ever firing, while the records' actual prose
+  lived in fields like `containers_cna_descriptions` (rank 1 at 18.76 queried
+  directly). Own text fields now join the `multi_match` as `^0.5` recall legs
+  beside the standard fields — safe because `best_fields` executes as dis_max,
+  so a leg can only win by genuinely outranking the content fields at half
+  weight — gated to fields mapped by at least a quarter of the union's indices.
+  Measured spectrum the gate sits on has an empty middle: schema prose repeats
+  across shards (cve-records 37-96% of 118 indices) while README-frontmatter
+  junk does not (exploit-pocs-2026: 2,143 own text fields, all ≤1% — the old
+  alphabetical 24-cap kept a literal `$comment` and cut `Summary`).
+
+- **A multi-family corpus still lost its minority family to that same gate**
+  (issue [#1244](https://github.com/xerj-org/xerj/issues/1244), PR
+  [#1251](https://github.com/xerj-org/xerj/pull/1251)) — vuln-fix-commits is
+  project-kb repo source (body/defs/title) beside 29,240 fix-commit payloads
+  whose prose lives in `message`, mapped by 4 of 26 union indices against a
+  gate demanding 7: the corpus answered every query from its tooling files
+  while every payload was unsearchable (the needle was rank 1 at 36.35 queried
+  on `message` directly, zero payload hits through the client). A field now
+  joins when it passes the quarter gate OR any index that maps none of the
+  standard content fields maps it, and the 24-leg cap ranks by mapping coverage
+  instead of name. Exact-signature family grouping was measured and rejected:
+  the mapper types only fields present in a shard's documents, so one family
+  splits into `message,patch,text` and `files,message,text` shards and each
+  half fails its own majority rule. Regression-checked on exploit-pocs-2026
+  (pinned query "MCPJam inspector 23744": needle README still rank 1, POC.py
+  rank 3), whose 689 own-only indices (12% of the corpus) are newly reachable.
+
 ## [1.0.0-rc.91] - 2026-10-08
 
 ### Added
