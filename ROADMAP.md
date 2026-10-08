@@ -13,13 +13,19 @@ not the live-settable `max_query_memory_mb`, and the mitigation is the
 `XERJ_MAX_PROCESS_MEMORY_MB` restart; the same cap was then measured
 driving an *idle* flush loop — two parked A/B nodes wrote 644 GB and
 858 GB to disk in seven hours with no client traffic. #1254
-(re-attributed same-day, like #1250): definition-format files fall to
-txt-lines line-chunking — all 11 otel-proto `.proto` files ARE indexed
-(79 chunk records), but each competes as a ~2KB fragment against
-whole-document prose, so the suite's needle ranked 19th and the corpus
-graded FAIL 1/5; the original "silently unindexed" claim was retracted
-(its probe wildcarded `ax_file`, which stores content digests, not
-filenames). #1244 **stays open** with both mechanism fixes merged
+(re-attributed twice in one day, each time by measurement): the original
+"silently unindexed" claim was retracted first (its probe wildcarded
+`ax_file`, which stores content digests, not filenames — `ax_path`
+shows all 79 `.proto` records present), then the txt-lines
+chunk-splitting mechanism was retracted too (a simulated whole-document
+route ranked the needle 25th, worse than the real chunks' 19th — length
+dilution beats mass concentration). The single effective variable is the
+`text^0.5` recall-leg weight, the #1238 calibration, which discounts
+exactly the family a text-primary corpus lives on; the corpus-declared
+`query.text_weight` fix ([#1258](https://github.com/xerj-org/xerj/pull/1258))
+moved all four G7 needles to rank 1 on the unchanged index and the
+suite re-graded 5/5. The issue **stays open** for the minor
+`code_files=0` labeling gap in the index terminal line. #1244 **stays open** with both mechanism fixes merged
 inside the window ([#1246](https://github.com/xerj-org/xerj/pull/1246),
 [#1251](https://github.com/xerj-org/xerj/pull/1251)): its completion
 condition is the pre-registered G7 suites passing on rebuilt corpora,
@@ -234,12 +240,16 @@ ingest oscillates on the parent RSS breaker; root cause re-attributed
 same-day to the boot-time tiered process cap, mitigation the
 `XERJ_MAX_PROCESS_MEMORY_MB` restart, and the same cap drives an idle
 flush loop measured at 644/858 GB of writes) and
-[#1254](https://github.com/xerj-org/xerj/issues/1254) (definition
-formats fall to txt-lines line-chunking, so otel-proto's 11 `.proto`
-files — indexed, 79 chunk records — compete as ~2KB fragments against
-whole-document prose; the needle ranked 19th and the corpus graded
-FAIL 1/5; the original silent-unindexing claim was retracted the same
-day).
+[#1254](https://github.com/xerj-org/xerj/issues/1254) (the `text^0.5`
+recall-leg weight — the #1238 calibration — makes a text-PRIMARY corpus
+invisible: otel-proto's `.proto` definitions ARE indexed, 79 records,
+but four G7 needles ranked 19/absent/39/23 behind prose; two earlier
+mechanisms, absence and chunk-splitting, were each retracted by
+measurement. The corpus-declared `query.text_weight` fix
+([#1258](https://github.com/xerj-org/xerj/pull/1258)) moved all four
+needles to rank 1 on unchanged index bytes and the suite re-graded 5/5;
+the issue stays open for the `code_files=0` terminal-line labeling
+gap).
 [#1244](https://github.com/xerj-org/xerj/issues/1244) (the `xerj code`
 own-field recall legs and the multi-family family-route gate both
 merged in rc.92; the issue stays open until the pre-registered G7

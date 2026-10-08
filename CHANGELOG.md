@@ -50,6 +50,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   #1244 stays open for the same completion condition as above: the suite
   reruns on the rebuilt corpora close it, not this code.
 
+- **A corpus whose primary content rides the plain-text family was invisible
+  to `xerj code`** (issue
+  [#1254](https://github.com/xerj-org/xerj/issues/1254), PR
+  [#1258](https://github.com/xerj-org/xerj/pull/1258)) — the `text^0.5`
+  recall-leg weight is the #1238 calibration for corpora where the text
+  family carries mirror noise beside code-family `body` records, but
+  otel-proto's primary content IS the text family (every `.proto` definition
+  is a txt-lines record), so the discount hid the corpus's point: the
+  pre-registered G7 suite's four proto needles ranked 19/absent/39/23 behind
+  semantic-conventions prose. Two earlier mechanisms were measured and
+  disproven first — absence (a filename wildcard on `ax_file`, which holds
+  content digests; the correct `ax_path` probe shows all 79 records) and
+  txt-lines chunk-splitting (a simulated whole-document route ranked the
+  needle 25th, worse than the real chunks' 19th: length dilution beats mass
+  concentration). A corpus may now declare `query.text_weight` in its
+  `corpus.json` (bounds 0.25..=4.0 enforced; outside them the client warns
+  and keeps the 0.5 default), hub pins carry the block through
+  `corpus add --from`, and the query path applies it to the `text^` slot.
+  Measured on the unchanged index bytes: all four needles 19/absent/39/23 →
+  rank 1, the suite re-grades 5/5 against a ≥3/5 bar, and the no-hint path
+  is byte-identical old vs new binary (diffed on cisa and
+  exploit-pocs-2026). #1254 stays open only for the minor
+  `code_files=0` labeling gap in the index terminal line.
+
 <!-- notes-exempt: #1252 (changelog-only carry of the rc.92 entries; no code,
      cites the window PRs #1246 and #1251 itself) -->
 
