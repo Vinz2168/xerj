@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.93] - 2026-10-08
+
+### Fixed
+
+- **The autoindex finalize-verify probe fell off the columnar fast path**
+  (issue [#1260](https://github.com/xerj-org/xerj/issues/1260), PR
+  [#1262](https://github.com/xerj-org/xerj/pull/1262)) — two walls sat between
+  the verify query shape (`bool.filter [terms …, exists <field>]`) and the fast
+  path: `exists` had no arm in the predicate compiler, and the deletes bail
+  keyed on the MONOTONIC `ghost_events` counter, so an index that had ever
+  seen an overwrite — the catalog is rewritten by every finalize-catalog —
+  never re-qualified, even after merges compacted every ghost away. `exists`
+  now compiles to a columnar predicate and admission is per-segment via the
+  ghost-position bitmap: empty bitmaps proceed (live == physical), dirty ones
+  still bail. Measured on the live 402,814-doc autoindex-catalog crawl node:
+  the per-digest probe ran 3.4 s on the pre-fix server and 2.7 ms warm on the
+  fixed one (~1,250×; the first post-restart probe pays an 8.8 s cold page-in,
+  verified to be one-time by a warm repeat). New integration file
+  `fast_aggs_exists_and_deletes.rs`: six tests pinning fast-path/brute
+  agreement across present / JSON-null / absent / empty-string exists shapes,
+  the meta-field bail, the unmerged-ghost bail, merged-history re-qualify,
+  and object-valued memtable docs. The served/bailed assertions read the
+  process-global `FAST_PATH_AGGS_SERVED` counter as a before/after delta, and
+  CI run 37816544794 caught the six tests racing on it — the file now
+  serializes behind one tokio Mutex (the engine half was never implicated:
+  serialized, the meta-field query bails exactly as required).
+
+- **`pack publish` could not survive a same-day rebuild under immutable
+  releases** (PR [#1268](https://github.com/xerj-org/xerj/pull/1268)) — the
+  re-run path deleted today's PUBLISHED pack release and recreated the same
+  tag, but a burned tag can never name another release (run 37826006767 hit
+  the exact 36358399114 error pair and left the day without a published
+  rust-vulns pack; repaired by hand under `-r2`). Both pack jobs now pick the
+  first unused tag (date, then `-r2`, `-r3`, … by release + git-ref probe),
+  retag past an immutable-release refusal instead of failing, and never
+  delete a published release for a rebuild. The retention step also finally
+  works: `gh release list --json` was an unsupported flag, so it had silently
+  matched zero releases since M6 — it now sorts by `created_at` via the API
+  (a `-r2` suffix breaks lexicographic tag order) and includes abandoned
+  drafts.
+
+### Performance
+
+- **The finalize-verify barrier read back one changed group at a time — three
+  serial searches per file** (PR
+  [#1259](https://github.com/xerj-org/xerj/pull/1259), the #1183 count lane)
+  — cve-records projected ~50 h and vuln-fix-commits ~120 h of verify tail
+  against index phases measured in hours. Verify now batches per (index ×
+  1,024 content digests): record windows (terms filter + exact terms
+  aggregation) run 63 ms cold / 6 ms warm on the columnar fast path, the
+  catalog leg `_source`-restricted paged fetch-count runs 31 ms cold / 14 ms
+  warm, delete-aware, with mid-window total changes and count/total
+  mismatches failing loud. ~1.2 M serial searches collapse to ~800 windows
+  for cve-records. Failure messages and the first-disagreement group are
+  unchanged; the progress denominator is now windows, so the line never sits
+  at `0/N` for a walk's duration. `cargo test -p xerj-autoindex --lib`:
+  1299 passed, 0 failed. First live proof: the vuln-fix-commits rebuild
+  completed on this client — 328,891 records, 97 batched windows verified.
+
+### Added
+
+- **`agent-session-trajectories`, the first external-contributor corpus pack**
+  (PRs [#1263](https://github.com/xerj-org/xerj/pull/1263),
+  [#1265](https://github.com/xerj-org/xerj/pull/1265); recipe and stats on
+  corpus-hub in #1255 and #1264) — 70 sanitized multi-session agent
+  trajectories from chunxiaoxx / Nautilus (demand anchored to #1138, wishlist
+  slot #1210), CC-BY-4.0, 70 envelopes → 70 records with failure turns kept
+  verbatim. The pack ships with its own ed25519 keypair: `.pub` committed at
+  `tools/packs/keys/agent-session-trajectories.pub`, the seed as the
+  `PACK_SIGNING_SEED_AST` Actions secret, and a dedicated job in the
+  scheduled `pack publish` workflow — build, sign, consumer-path verify
+  against the committed key, dated immutable release. First release
+  `pack-agent-session-trajectories-2026-10-08` published and consumer-
+  verified from the public release URL (70 records, signature checked against
+  the `raw.githubusercontent.com` key).
+- **`vuln-fix-commits` live on the hub with graded evidence** (corpus-hub PR
+  #1266) — project-kb fix commits: 328,891 records, 97 batched verify windows
+  passed, and the pre-registered G7 suite blind-graded 4/5 PASS (three
+  rank-1 needle hits, one rank-3, one miss where the 2020-era sleuthkit
+  `yaffsfs_istat` payload lost to newer buffer-overflow payloads on generic
+  terms). Graded evidence committed at
+  `tools/xerj-code/hub/backlog/g7-vuln-fix-commits-2026-10-08-graded.json`.
+  The hub stands at 103 manifests / 105 live rows.
+
 ## [1.0.0-rc.92] - 2026-10-08
 
 ### Fixed
