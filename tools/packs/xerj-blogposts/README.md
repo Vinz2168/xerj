@@ -8,10 +8,10 @@ can retrieve how the last ones were argued instead of guessing at the voice.
 One record per published post at `landing/blog/*.html` (excluding the index):
 `id`, `title`, `description`, `published`, `url`, and the readable prose of
 the post body, plus derived `cve_ids` / `release_ids` fields for posts that
-cite them. 7 records at first build (2026-10-08), pinned to
-`fce97e180e558df407af8d453bd52d5a7968b091` of this repository; the exploit-hub
-post lands the same day with its record, 8 records total, and the hub manifest's
-pin moves with it.
+cite them. 8 records at the 2026-10-08 rebuild (the exploit-hub post,
+PR #1240), pinned to `a9ad4fc0117db67bb0086a66eaa8dad8398afdb1` of this
+repository; 7 at the first build, pinned to
+`fce97e180e558df407af8d453bd52d5a7968b091`.
 
 ## Rebuild
 

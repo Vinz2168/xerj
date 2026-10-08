@@ -2,24 +2,23 @@
 
 This roadmap tracks capabilities that are **planned but not yet fully implemented**, so the project's public claims stay honest about what ships today versus what is coming. Status is verified against the actual code and by real API requests to the release binary, not aspirational.
 
-Last reviewed: 2026-10-07 (against `v1.0.0-rc.90` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.90 release-cut roll:
+Last reviewed: 2026-10-08 (against `v1.0.0-rc.91` and `main`). Statuses trace to issues, merged PRs, the CHANGELOG, and the conformance suite; items carried forward from the 2026-07-12 review without fresh live verification are marked as such. This review line is machine-checked: `docs_capability_lists` fails the build if a release is cut without re-reviewing this file (issue #298 — closed as abandoned 2026-09-29; the machine check, not the issue, enforces the cadence now). This pass is the rc.91 release-cut roll:
 the open-defects shortlist was re-verified against the live tracker at
-cut time — **ten open** (#1094, #1100, #1122, #1170, #1173, #1108,
-#1110, #1183, #1212, #1226). Three closed verified inside the window:
-#1220 (the kNN exact scan's capture bracket and capture-scoped
-admission, PR
-[#1223](https://github.com/xerj-org/xerj/pull/1223)), #1222 (a
-no-match by-query run no longer flushes, PR
-[#1227](https://github.com/xerj-org/xerj/pull/1227)) and #1091 (the
-FiQA hybrid-latency tracker, closed by the
-[#1219](https://github.com/xerj-org/xerj/pull/1219) field report on
-the session that produced the rc.89 fix — semantic p50 3,865→261 ms,
-hybrid 5,772→289 ms, answers bit-identical; the neural-embedder
-re-measure stays recorded here rather than as a silent open
-condition). One tracker added: #1226, the flush-under-concurrent-load
-cost that the #1227 diagnosis reframed. #1212 keeps its rc.89
-wording — the standing rebuild must complete against the released fix
-before it closes.
+cut time — **ten open**, the same ten as the rc.90 cut (#1094, #1100,
+#1122, #1170, #1173, #1108, #1110, #1183, #1212, #1226). One closed
+verified inside the window: #1238 (the `xerj code` page-diversification
+defect the exploit-hub A/B eval caught live, PR
+[#1241](https://github.com/xerj-org/xerj/pull/1241)). #1183 gained its
+measured mechanism on 2026-10-08 (the comment table on the issue): the
+finalize-verify crawl is a per-fresh-value brute scan — exact repeats
+hit the query cache at 0.02 s, every uncached `ax_file` query pays
+1.2 s bare / ~14 s term+exists on the 572,992-doc index — with the
+count-context `SourceExists` exclusion and the single-tombstone
+count fast-path gate as the two engines; rc.91's
+[#1234](https://github.com/xerj-org/xerj/pull/1234) fixed the scored
+lane and the count lane is the remaining half, fix branch queued. The
+issue keeps its completion condition: a full xerj-search rebuild
+passing finalize with verified numbers.
 **Two closed inside the rc.87 window and recorded in the CHANGELOG, not
 carried here:** #1147 (the build-throughput class, PR
 [#1195](https://github.com/xerj-org/xerj/pull/1195), merged just past
@@ -255,6 +254,12 @@ load — mostly reframed by #1227: those latencies were the unconditional
 no-match flush that #1225 and #1227 removed the callers of; what stays
 open is the flush itself under concurrent bulk load, measured 14–16 s on
 the corpus-builder node).
+**Closed inside the rc.91 window and recorded in the CHANGELOG, not
+carried here:** #1238 (one sibling repo could fill a whole `xerj code`
+page — every hit a different file, so the #1137 per-file cap could not
+see the wall — and the plain-text extraction family could outscore
+code-family hits; the per-index cap and the `text^0.5` recall leg, PR
+[#1241](https://github.com/xerj-org/xerj/pull/1241)).
 **Closed inside the rc.90 window and recorded in the CHANGELOG, not
 carried here:** #1220 (the kNN exact scan's capture bracket and
 capture-scoped admission, PR
