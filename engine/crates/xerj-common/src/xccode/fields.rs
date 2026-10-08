@@ -92,8 +92,26 @@ pub fn resolve_fields(mapping: Option<&Value>) -> Vec<String> {
     // the standard fields are accounted for. Before the gate, the sorted
     // 24-cap kept literal `$comment` and cut `Summary` there: 2,143 own
     // text fields, all noise. `div_ceil` so a 5-index union demands 2.
+    //
+    // The union route alone assumes the corpus is ONE family. A multi-
+    // family corpus breaks it: vuln-fix-commits (measured 2026-10-08) is
+    // project-kb repo source (body/defs/title) PLUS a minority of payload
+    // indices whose prose lives in `message` — 4 of 26 union indices,
+    // under the quarter gate's 7, so the corpus answered from its tooling
+    // files while every payload was unsearchable (the needle is rank 1 at
+    // 36.35 queried on `message` directly). Those payload indices share
+    // their mapping signature exactly, so the family route below admits
+    // fields by signature-majority instead of union-majority: the family
+    // that actually carries the field is the one that votes on it.
     let min_union_indices = obj.len().div_ceil(4);
-    let own_gated = own_text_fields(obj, min_union_indices);
+    let mut own_legs = own_text_fields(obj, min_union_indices);
+    for f in own_family_fields(obj) {
+        if !own_legs.contains(&f) {
+            own_legs.push(f);
+        }
+    }
+    own_legs.sort();
+    let own_gated: Vec<String> = own_legs.into_iter().take(MAX_OWN_FIELDS).collect();
     if out.is_empty() {
         // #1158: a raw-JSON corpus (ghsa-db's advisory mirrors, OSV) maps
         // NONE of the standard content fields — every record carries its
@@ -111,7 +129,8 @@ pub fn resolve_fields(mapping: Option<&Value>) -> Vec<String> {
         // raw-JSON corpus whose shards each map different prose fields is
         // better served by its 10%-coverage fields than by a guaranteed-
         // wrong `body`.
-        let own_any = own_text_fields(obj, 1);
+        let mut own_any = own_text_fields(obj, 1);
+        own_any.truncate(MAX_OWN_FIELDS);
         if own_any.is_empty() {
             vec!["body".to_string()]
         } else {
@@ -141,16 +160,21 @@ pub fn resolve_fields(mapping: Option<&Value>) -> Vec<String> {
     }
 }
 
+/// Cap on how many own fields may join the `multi_match` as `^0.5` recall
+/// legs (see [`own_text_fields`]). Measured against the exploit-pocs-2026
+/// corpus that motivated the gate: 2,143 own text fields would otherwise
+/// ride the query.
+const MAX_OWN_FIELDS: usize = 24;
+
 /// The corpus's own searchable content fields: every property mapped `text`
 /// (or `semantic_text`) by at least `min_indices` of the indices in the
-/// union, `ax_*` provenance excluded, names sorted, capped so a wide schema
-/// cannot balloon the multi_match. Callers pick the gate: the #1158 floor
-/// passes `1` (any mapping index — the alternative is a guaranteed-wrong
-/// `body`), the #1244 union passes a quarter of the union (see the coverage
-/// note in [`resolve_fields`]).
+/// union, `ax_*` provenance excluded, names sorted, uncapped (callers cap —
+/// see [`MAX_OWN_FIELDS`]). Callers pick the gate: the #1158 floor passes
+/// `1` (any mapping index — the alternative is a guaranteed-wrong `body`),
+/// the #1244 union passes a quarter of the union (see the coverage note in
+/// [`resolve_fields`]).
 fn own_text_fields(obj: &serde_json::Map<String, Value>, min_indices: usize) -> Vec<String> {
     const AX: &str = "ax_";
-    const MAX_OWN_FIELDS: usize = 24;
     let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for m in obj.values() {
         let Some(props) = m.pointer("/mappings/properties").and_then(Value::as_object) else {
@@ -170,8 +194,61 @@ fn own_text_fields(obj: &serde_json::Map<String, Value>, min_indices: usize) -> 
         .into_iter()
         .filter(|(_, n)| *n >= min_indices)
         .map(|(k, _)| k)
-        .take(MAX_OWN_FIELDS)
         .collect()
+}
+
+/// The #1244 family route: fields admitted by mapping-signature majority
+/// among the indices that map NONE of the standard content fields.
+///
+/// A multi-family corpus (measured: vuln-fix-commits — repo source beside
+/// payload JSON) keeps a minority family's prose under the union-quarter
+/// gate forever: `message` sits in 4 of 26 union indices. But those 4
+/// indices share their text-field signature exactly, so the family votes
+/// on its own schema: every field of a signature carried by at least two
+/// no-standard indices joins the `^0.5` union (signature membership IS
+/// 100% coverage of the family, so no second fraction is needed).
+///
+/// Two deliberate exclusions keep this from reopening the junk hole the
+/// quarter gate closed: an index mapping ANY standard field (`body` and
+/// kin) is not part of any family here — README frontmatter junk lives in
+/// exactly those indices — and a signature needs a witness (`>= 2`
+/// indices), so a single odd raw-JSON file inside a code corpus stays
+/// noise. The union route above still serves single-family corpora.
+fn own_family_fields(obj: &serde_json::Map<String, Value>) -> Vec<String> {
+    const STANDARD: [&str; 4] = ["body", "defs", "title", "defs_expanded"];
+    const AX: &str = "ax_";
+    const MIN_FAMILY: usize = 2;
+    let mut families: std::collections::BTreeMap<Vec<String>, usize> =
+        std::collections::BTreeMap::new();
+    for m in obj.values() {
+        let Some(props) = m.pointer("/mappings/properties").and_then(Value::as_object) else {
+            continue;
+        };
+        let mut signature: Vec<String> = props
+            .iter()
+            .filter(|(key, spec)| {
+                !key.starts_with(AX)
+                    && spec
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| t == "text" || t == "semantic_text")
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        signature.sort();
+        if signature.is_empty() || signature.iter().any(|f| STANDARD.contains(&f.as_str())) {
+            continue;
+        }
+        *families.entry(signature).or_insert(0) += 1;
+    }
+    let mut out: Vec<String> = families
+        .into_iter()
+        .filter(|(_, n)| *n >= MIN_FAMILY)
+        .flat_map(|(sig, _)| sig)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Indices under the prefix whose `field` (default `body`) is mapped as
@@ -460,6 +537,99 @@ mod tests {
             got,
             vec!["$comment".to_string(), "summary".to_string()],
             "the #1158 floor is exempt from the coverage gate"
+        );
+    }
+
+    /// The #1244 family route, measured on vuln-fix-commits: repo-source
+    /// indices (body/defs/title) beside a MINORITY of payload indices whose
+    /// prose lives in `message` — 4 of 26 live indices, under the union
+    /// quarter gate, so the corpus answered from its tooling files while
+    /// every payload was unsearchable. The payload indices share their
+    /// mapping signature, so `message` joins by family majority. `text`
+    /// (synthesized, empty in payload records) was already on the list via
+    /// the #1238 route and must not be duplicated.
+    #[test]
+    fn a_minority_family_joins_by_signature_not_union_share() {
+        let mut obj = serde_json::Map::new();
+        // The code-family majority: 10 repo-source indices.
+        for i in 0..10 {
+            obj.insert(
+                format!("xc-vfc-repo-{i:03}"),
+                json!({ "mappings": { "properties": {
+                    "body":  { "type": "text" },
+                    "defs":  { "type": "text" },
+                    "title": { "type": "text" }
+                } } }),
+            );
+        }
+        // The payload family: 2 indices, identical signature, no standard
+        // field. Union = 12, quarter gate demands 3: `message` at 2 fails.
+        for i in 0..2 {
+            obj.insert(
+                format!("xc-vfc-payloads-{i:03}"),
+                json!({ "mappings": { "properties": {
+                    "cve":     { "type": "keyword" },
+                    "message": { "type": "text" },
+                    "patch":   { "type": "semantic_text" },
+                    "text":    { "type": "text" }
+                } } }),
+            );
+        }
+        assert_eq!(
+            resolve_fields(Some(&Value::Object(obj))),
+            vec![
+                "body".to_string(),
+                "defs".to_string(),
+                "title".to_string(),
+                "text^0.5".to_string(),
+                "message^0.5".to_string(),
+                "patch^0.5".to_string(),
+            ],
+            "payload-family prose joins beside the code-family standard fields"
+        );
+    }
+
+    /// The family route's two guard rails. A single odd raw-JSON index
+    /// inside a code corpus has no witness, so its fields stay out (the
+    /// union route is still available to them if the corpus grows). And a
+    /// junk field in an index that maps `body` — the README-frontmatter
+    /// shape from exploit-pocs-2026 — never enters the family route at
+    /// all, whatever how many indices carry it.
+    #[test]
+    fn a_family_needs_a_witness_and_body_indices_stay_out() {
+        let mut obj = serde_json::Map::new();
+        // Nine plain code indices give the union a quarter gate of 3.
+        for i in 0..9 {
+            obj.insert(
+                format!("xc-code-{i:03}"),
+                json!({ "mappings": { "properties": {
+                    "body": { "type": "text" }
+                } } }),
+            );
+        }
+        // Two body-mapping indices sharing a frontmatter field: body
+        // family, not an own-only family — `frontmatter` must stay out of
+        // the family route AND sits at 2/12, under the union gate.
+        for i in 0..2 {
+            obj.insert(
+                format!("xc-README-{i:03}"),
+                json!({ "mappings": { "properties": {
+                    "body":        { "type": "text" },
+                    "frontmatter": { "type": "text" }
+                } } }),
+            );
+        }
+        // One lone raw-JSON index: no witness, `summary` must stay out.
+        obj.insert(
+            "xc-lone-json-000".to_string(),
+            json!({ "mappings": { "properties": {
+                "summary": { "type": "text" }
+            } } }),
+        );
+        assert_eq!(
+            resolve_fields(Some(&Value::Object(obj))),
+            vec!["body".to_string()],
+            "no family fires: junk in body indices excluded, lone JSON index has no witness"
         );
     }
 }
