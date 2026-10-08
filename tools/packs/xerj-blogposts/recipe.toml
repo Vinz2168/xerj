@@ -1,0 +1,57 @@
+# xerj-blogposts — the house-writing corpus: every post XERJ has published,
+# as records, so an agent writing the next one can retrieve how the last ones
+# were argued rather than guessing at the voice.
+#
+# Source is our own Apache-2.0 prose (landing/blog/*.html), derived to
+# posts/*.json by gen_posts.py in this directory. Two rules it inherits from
+# the corpus program:
+#   * it indexes ONLY the published posts — never engine code (rule 3 of the
+#     xerj-code skill: a reference corpus is for other people's work, not a
+#     mirror of ours that would return our own mistakes as precedent);
+#   * gen_posts.py --check pins the records to the site, so the corpus cannot
+#     silently drift from what xerj.org serves.
+#
+# What it is FOR (the use case the G7 gate scores): "write the post about X
+# in the house voice" — retrieve the two or three posts closest in subject,
+# then match their structure: a number in the first paragraph, the loss kept
+# in, every claim traced to a run, no em-dashes, no filler intro.
+
+[recipe]
+format = 1
+name = "xerj-blogposts"
+description = "XERJ engineering posts as records: the house voice, arguments and measured numbers, retrievable"
+
+[[sources]]
+slug = "posts"
+kind = "dir"
+path = "posts"
+glob = "**/*.json"
+format = "flat"
+licence = "Apache-2.0"
+
+[identity]
+# one record per post: ids are already unique, so the union-find has no
+# merging to do — the block is present but carries no cross-source edges.
+edges = [{ field = "id" }]
+
+[envelope]
+id_from = ["id"]
+title_from = ["title"]
+body_join = ["title", "description", "published", "body"]
+
+[[derived]]
+name = "cve_ids"
+op = "regex_extract"
+from = ["body"]
+pattern = '(?i)\bCVE-\d{4}-\d{4,}\b'
+unique = true
+
+[[derived]]
+name = "release_ids"
+op = "regex_extract"
+from = ["body"]
+pattern = '(?i)\brc\.\d+\b'
+unique = true
+
+[emit]
+shards = 4

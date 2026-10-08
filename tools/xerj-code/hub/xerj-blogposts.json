@@ -1,0 +1,5 @@
+{"corpus":"xerj-blogposts","cloned_at":"2026-10-08T03:34:58Z","repos":[
+  {"repo":"xerj","url":"https://github.com/xerj-org/xerj","licence":"Apache-2.0","sha":"fce97e180e558df407af8d453bd52d5a7968b091","files":7,"bytes":107295,
+   "review":{"spdx":"Apache-2.0","use":"adapt-with-attribution","by":"xerj-org","at":"2026-10-08",
+             "note":"Our own published prose, not third-party code. The recipe harvests ONLY landing/blog/*.html (via gen_posts.py-derived posts/*.json under tools/packs/xerj-blogposts/); engine code is out of scope by the skill's rule 3 (never index this repository's code into a reference corpus). Pin is the commit whose posts the first build records."}}
+],"kind":"harvested","recipe":"tools/packs/xerj-blogposts/recipe.toml"}

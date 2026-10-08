@@ -169,11 +169,22 @@ PAGES: dict[str, dict[str, str]] = {
         description="Guest recipes from Chunxiao Wang (Assay): topic slicing beat token windows on recall@1 by double digits, a 0.87 classifier nearly matched by a 0.78 always-yes baseline, and the mask bug that scored every query zero. Plus the corpus gap we checked and confirmed.",
         published="2026-10-07", updated="2026-10-07",
     ),
+    # Exploit-hub A/B post, 2026-10-08. Every number traces to the
+    # sealed-truth eval (/root/eval-holdout/EVAL-REPORT.md): 23744 route/
+    # field from 36 in-corpus PoCs, 23 s retrieval vs 2.1 s negative
+    # control, the #1238 field-set table, 0/128 PoC lag, 37.6 GB honest
+    # group size, blogposts corpus 7 records / 107,295 B read-back 5/5.
+    "blog/the-exploit-hub.html": dict(
+        label="The exploit hub", kind="article",
+        title="The exploit hub, tested on three fresh CVEs",
+        description="We ran the exploit corpus against three CVEs it had never seen: one query named the exact route and field for one, an in-corpus 2026 exploit named the exact denylist segments the vendor shipped for another, and the third proved the corpus adds nothing when its stratum is empty. Losses included.",
+        published="2026-10-08", updated="2026-10-08",
+    ),
     "blog/index.html": dict(
         label="Blog", kind="collection",
         title="XERJ.ai — Blog: the engineering log",
-        description="Measured results with the losses left in: guest eval scars from a production agent-memory system, the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
-        updated="2026-10-07",
+        description="Measured results with the losses left in: the exploit hub tested on three fresh CVEs, guest eval scars from a production agent-memory system, the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
+        updated="2026-10-08",
     ),
     "demo/index.html": dict(
         label="Real-data demo", kind="software",
