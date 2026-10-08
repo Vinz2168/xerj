@@ -8014,6 +8014,13 @@ fn query_node_to_agg_filter(node: &QueryNode) -> Option<Value> {
             }
             Some(serde_json::json!({ "terms": { field: Value::Array(strs) } }))
         }
+        // #1260: `exists` is columnarizable (a non-null column row).  Before
+        // this arm the node fell to the catch-all `None`, which dropped the
+        // whole filtered-agg fast path for ANY query containing an exists
+        // leaf — the finalize-verify window shape (`bool.filter [terms …,
+        // exists …]` + terms agg) ran the brute `_source` path.  Meta
+        // fields (`_id`, …) still bail downstream in `compile_pred`.
+        QueryNode::Exists { field } => Some(serde_json::json!({ "exists": { "field": field } })),
         // Numeric **or** date/keyword-string range.  Every present bound must
         // be a JSON number, or every present bound must be a string — a mixed
         // pair has no single columnar form and stays on the brute path.

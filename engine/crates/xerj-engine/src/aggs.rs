@@ -7090,7 +7090,16 @@ pub(crate) fn doc_matches_filter(doc: &Value, filter: &Value) -> bool {
             "exists" => {
                 // exists: {"field": "price"} — match docs that have the field.
                 if let Some(field) = query_body.get("field").and_then(Value::as_str) {
-                    let has_field = !extract_field_values(doc, field).is_empty();
+                    // #1260: a field whose value is directly an OBJECT counts
+                    // as present.  `extract_field_values` flattens objects to
+                    // `[]` while the query path's `value_present`
+                    // (`doc_matches_query_typed`'s Exists arm) treats an
+                    // object as present — the two disagreeed, and the fast
+                    // aggs exists arm is built on them agreeing.  Scalars,
+                    // arrays and nulls are unchanged: `extract_field_values`
+                    // already mirrors `value_present` for them.
+                    let has_field = !extract_field_values(doc, field).is_empty()
+                        || matches!(get_nested_field(doc, field), Value::Object(_));
                     if !has_field {
                         return false;
                     }
