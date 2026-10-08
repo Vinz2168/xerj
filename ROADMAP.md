@@ -12,10 +12,14 @@ rejecting breaker is the boot-time tiered process cap (95% watermark),
 not the live-settable `max_query_memory_mb`, and the mitigation is the
 `XERJ_MAX_PROCESS_MEMORY_MB` restart; the same cap was then measured
 driving an *idle* flush loop — two parked A/B nodes wrote 644 GB and
-858 GB to disk in seven hours with no client traffic. #1254: autoindex
-silently drops a file that lands in no dataset and no junk list —
-otel-proto's 11 `.proto` files, whose corpus graded FAIL 1/5 on the
-missing family. #1244 **stays open** with both mechanism fixes merged
+858 GB to disk in seven hours with no client traffic. #1254
+(re-attributed same-day, like #1250): definition-format files fall to
+txt-lines line-chunking — all 11 otel-proto `.proto` files ARE indexed
+(79 chunk records), but each competes as a ~2KB fragment against
+whole-document prose, so the suite's needle ranked 19th and the corpus
+graded FAIL 1/5; the original "silently unindexed" claim was retracted
+(its probe wildcarded `ax_file`, which stores content digests, not
+filenames). #1244 **stays open** with both mechanism fixes merged
 inside the window ([#1246](https://github.com/xerj-org/xerj/pull/1246),
 [#1251](https://github.com/xerj-org/xerj/pull/1251)): its completion
 condition is the pre-registered G7 suites passing on rebuilt corpora,
@@ -230,9 +234,12 @@ ingest oscillates on the parent RSS breaker; root cause re-attributed
 same-day to the boot-time tiered process cap, mitigation the
 `XERJ_MAX_PROCESS_MEMORY_MB` restart, and the same cap drives an idle
 flush loop measured at 644/858 GB of writes) and
-[#1254](https://github.com/xerj-org/xerj/issues/1254) (autoindex drops
-a file that lands in no dataset and no junk list — otel-proto's 11
-`.proto` files silently unindexed).
+[#1254](https://github.com/xerj-org/xerj/issues/1254) (definition
+formats fall to txt-lines line-chunking, so otel-proto's 11 `.proto`
+files — indexed, 79 chunk records — compete as ~2KB fragments against
+whole-document prose; the needle ranked 19th and the corpus graded
+FAIL 1/5; the original silent-unindexing claim was retracted the same
+day).
 [#1244](https://github.com/xerj-org/xerj/issues/1244) (the `xerj code`
 own-field recall legs and the multi-family family-route gate both
 merged in rc.92; the issue stays open until the pre-registered G7
