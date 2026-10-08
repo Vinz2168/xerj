@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>XERJ.ai — Blog: the engineering log</title>
-<meta name="description" content="Measured results with the losses left in: guest eval scars from a production agent-memory system, the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
+<meta name="description" content="Measured results with the losses left in: the exploit hub tested on three fresh CVEs, guest eval scars from a production agent-memory system, the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@400;700;800;900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -16,7 +16,7 @@
 <meta property="og:site_name" content="XERJ.ai">
 <meta property="og:type" content="website">
 <meta property="og:title" content="XERJ.ai — Blog: the engineering log">
-<meta property="og:description" content="Measured results with the losses left in: guest eval scars from a production agent-memory system, the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
+<meta property="og:description" content="Measured results with the losses left in: the exploit hub tested on three fresh CVEs, guest eval scars from a production agent-memory system, the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
 <meta property="og:url" content="https://xerj.org/blog/">
 <meta property="og:image" content="https://xerj.org/og/xerj-card.png">
 <meta property="og:image:width" content="1200">
@@ -25,7 +25,7 @@
 <meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="XERJ.ai — Blog: the engineering log">
-<meta name="twitter:description" content="Measured results with the losses left in: guest eval scars from a production agent-memory system, the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
+<meta name="twitter:description" content="Measured results with the losses left in: the exploit hub tested on three fresh CVEs, guest eval scars from a production agent-memory system, the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.">
 <meta name="twitter:image" content="https://xerj.org/og/xerj-card.png">
 <script type="application/ld+json">
 {
@@ -59,7 +59,7 @@
   "@context": "https://schema.org",
   "@type": "CollectionPage",
   "name": "XERJ.ai — Blog: the engineering log",
-  "description": "Measured results with the losses left in: guest eval scars from a production agent-memory system, the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
+  "description": "Measured results with the losses left in: the exploit hub tested on three fresh CVEs, guest eval scars from a production agent-memory system, the Corpus Hub launch, the rc.80 gates post, the Jev decisions study, the JEV rerank verdict, the storage formats that cut the index 28%, and the signed rust-vulns corpus pack.",
   "url": "https://xerj.org/blog/",
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
@@ -126,6 +126,46 @@
   <!-- Reverse-chronological by hand while there is one post; new posts PREPEND.
        Move to a generator only past ~10 posts. -->
   <ol class="blog-list">
+    <li>
+      <a class="bl-card" href="/blog/the-exploit-hub">
+        <!-- A/B eval, sealed ground truth: every figure from the run log
+             (/root/eval-holdout/EVAL-REPORT.md). Bars share one
+             denominator per row; the adds-~0 case is counted, not
+             dropped. -->
+        <div class="bl-preview" aria-hidden="true">
+          <div class="blp-kicker">CYBER-EXPLOITS CORPUS · A/B EVAL · SEALED TRUTH · 3 FRESH CVES</div>
+          <div class="blp-row">
+            <div class="blp-ds">NEEDLE POCS</div>
+            <div class="blp-pair">
+              <span class="blp-num">16 <i>needle docs, top 27</i></span><span class="blp-bar a" style="width:59.3%"></span>
+              <span class="blp-num">0 <i>shipped client, same query</i></span><span class="blp-bar b" style="width:1%"></span>
+            </div>
+          </div>
+          <div class="blp-row">
+            <div class="blp-ds">COST</div>
+            <div class="blp-pair">
+              <span class="blp-num">23 s <i>1.09M docs, cited</i></span><span class="blp-bar a" style="width:100%"></span>
+              <span class="blp-num">2.1 s <i>clone+grep, repos known</i></span><span class="blp-bar b" style="width:9.1%"></span>
+            </div>
+          </div>
+          <div class="blp-row">
+            <div class="blp-ds">TALLY</div>
+            <div class="blp-pair">
+              <span class="blp-num">2 of 3 attribution <span class="blp-chip">1 of 3 patch</span></span><span class="blp-bar a" style="width:66.7%"></span>
+              <span class="blp-num">1 adds ~0 <i>counted</i></span><span class="blp-bar b" style="width:33.3%"></span>
+            </div>
+          </div>
+          <p class="blp-foot">group 37.6 GB · exploit-pocs 1,093,749 docs · eval caught client defect #1238</p>
+        </div>
+        <div class="bl-meta">
+          <p class="bl-date"><time datetime="2026-10-08">2026-10-08</time> · CYBER-EXPLOITS CORPUS · EVAL</p>
+          <h2 class="bl-title">The exploit hub, tested on three fresh CVEs</h2>
+          <p class="bl-excerpt">One query over 1.09 million PoC documents named the exact route and field for CVE-2026-23744; an in-corpus 2026 exploit named the exact denylist segments the vendor shipped for CVE-2026-105844; the third case proved the corpus adds nothing when its stratum is empty, and we count it. The vendor patch beat both arms on the needle, the eval caught a live client defect, and the losses are in the tables.</p>
+          <p class="bl-byline">AUTHOR · XERJ ENGINEERING · PUBLISHED · 2026-10-08</p>
+          <span class="bl-read">READ THE POST &rarr;</span>
+        </div>
+      </a>
+    </li>
     <li>
       <a class="bl-card" href="/blog/eval-scars-from-agent-memory">
         <!-- Guest post: every figure is Chunxiao Wang's, from issues
