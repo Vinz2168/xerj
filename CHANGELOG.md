@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.91] - 2026-10-08
+
+### Added
+
+- **The exploit-hub corpus, tested on three post-pin CVEs with and without it** (PR
+  [#1240](https://github.com/xerj-org/xerj/pull/1240)) — the A/B eval write-up the
+  cyber-exploits group was built for: one analyst, two arms (plain Claude Code vs
+  Claude Code + the corpus), three CVEs published after the corpus pin, sealed ground
+  truth. On the needle (CVE-2026-23744, 36 indexed PoC repos) one `multi_match` round
+  over 1,093,749 docs named `POST /api/mcp/connect` and `serverConfig.command` and the
+  one-request trigger, cited — the advisory alone could not; both arms then predicted
+  the wrong patch and that loss stays in the table. On the analogy (CVE-2026-105844,
+  no PoC anywhere) Exploit-DB entry 52528 supplied the denylist segments and both
+  mechanisms the sealed 3.88.0 diff shipped. The empty stratum (CVE-2026-97332) is
+  counted, not dropped. The negative control too: 23 s retrieval vs 2.1 s clone+grep
+  when repo names are already known — the corpus is the discovery layer, not a fetch
+  accelerator. n=3, one analyst: a case study with measured arms, not statistics, and
+  the post says so. The same PR caught live client defect
+  [#1238](https://github.com/xerj-org/xerj/issues/1238) during the eval. Also ships
+  the `xerj-blogposts` house-writing corpus at 8 records (this post included; the
+  registry pin moves with the rebuild in
+  [#1242](https://github.com/xerj-org/xerj/pull/1242)).
+
+### Fixed
+
+- **`exists` inside a filter-context `bool` had no arm in the columnar filter
+  executor, so the whole plan bailed and source-scanned every row** (issue
+  [#1183](https://github.com/xerj-org/xerj/issues/1183), PR
+  [#1234](https://github.com/xerj-org/xerj/pull/1234)) — keyword `exists` lowers to
+  an empty-prefix dictionary range, numeric/boolean to an unbounded window (the same
+  lowerings the standalone root `exists` uses), and text/`semantic_text` fields get a
+  new source-backed `SourceExists` leaf that pays one stored-source parse per term
+  survivor instead of per row. Meta fields stay on the brute path. Measured on the
+  standing node's 91,143-doc segment: the conjunction fell 9,638 ms -> handled by the
+  plan. The finalize-verify crawl itself is larger than this fix: the count-context
+  gate still excludes `SourceExists` plans and a single tombstone disables the
+  term-count fast path, so the exact-semantic-count shape on the 572,992-doc index
+  still brute-scans — measured 2026-10-08 and left tracked in #1183, which stays open
+  until a full xerj-search rebuild passes finalize with verified numbers.
+
+- **One sibling repo could fill a whole `xerj code` page, and the plain-text
+  extraction family could outscore code-family hits** (issue
+  [#1238](https://github.com/xerj-org/xerj/issues/1238), PR
+  [#1241](https://github.com/xerj-org/xerj/pull/1241)) — two diversification fixes
+  in `xccode`. A per-source-INDEX cap (`MAX_PER_INDEX = 1`, engaged only when the
+  fan-out has at least as many distinct indices as the page wants, so a homogeneous
+  corpus's handful of shard indices is untouched): measured on the live exploit group
+  (query "MCPJam inspector 23744", 5,644 indices, 36 needle PoC repos), one
+  sibling-CVE demo repo took 6 of the top 10 slots with a different file each — the
+  per-FILE cap of #1137 cannot see that wall — and the capped page held 5 needle
+  records where the old page held 1. And `text` joins the `multi_match` as a
+  `^0.5` recall leg (same posture as `defs_expanded^0.5`): at full weight one
+  plain-text demo index outscored every code-family hit; at `^0.5` the family stays
+  searchable (same 39 total hits) while needle docs keep their scores.
+
 ## [1.0.0-rc.90] - 2026-10-07
 
 ### Added
