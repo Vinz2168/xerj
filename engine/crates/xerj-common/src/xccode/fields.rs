@@ -92,8 +92,33 @@ pub fn resolve_fields(mapping: Option<&Value>) -> Vec<String> {
     // the standard fields are accounted for. Before the gate, the sorted
     // 24-cap kept literal `$comment` and cut `Summary` there: 2,143 own
     // text fields, all noise. `div_ceil` so a 5-index union demands 2.
+    //
+    // The union route alone assumes the corpus is ONE family. A multi-
+    // family corpus breaks it: vuln-fix-commits (measured 2026-10-08) is
+    // project-kb repo source (body/defs/title) PLUS a minority of payload
+    // indices whose prose lives in `message` — 4 of 26 union indices,
+    // under the quarter gate's 7, so the corpus answered from its tooling
+    // files while every payload was unsearchable (the needle is rank 1 at
+    // 36.35 queried on `message` directly). An exact-signature family
+    // grouping was tried first and is too brittle: the mapper types only
+    // fields present in a shard's documents, so the SAME logical family
+    // splits into `message,patch,text` and `files,message,text` shards
+    // and each half fails a majority rule. The family route below
+    // therefore admits a field when ANY index that maps none of the
+    // standard content fields maps it — an own-only index's content is
+    // unreachable any other way (the floor does not fire while `body` is
+    // mapped somewhere, and the #1158 `text` slot is synthesized EMPTY
+    // for exactly the records that carry schema-named prose).
+    //
+    // Junk protection shifts from admission to priority: README
+    // frontmatter junk lives in body-mapping indices and never enters
+    // this route at all, while own-only junk (dataset column names) can
+    // enter — but the cap below ranks legs by how many indices map them,
+    // so a 1-index column name sorts behind every widely-mapped field.
+    // That also ends the alphabetical-cap failure the #1244 gate was
+    // partly compensating for ($comment kept, Summary cut).
     let min_union_indices = obj.len().div_ceil(4);
-    let own_gated = own_text_fields(obj, min_union_indices);
+    let own_gated = own_recall_legs(obj, min_union_indices);
     if out.is_empty() {
         // #1158: a raw-JSON corpus (ghsa-db's advisory mirrors, OSV) maps
         // NONE of the standard content fields — every record carries its
@@ -111,7 +136,8 @@ pub fn resolve_fields(mapping: Option<&Value>) -> Vec<String> {
         // raw-JSON corpus whose shards each map different prose fields is
         // better served by its 10%-coverage fields than by a guaranteed-
         // wrong `body`.
-        let own_any = own_text_fields(obj, 1);
+        let mut own_any = own_text_fields(obj, 1);
+        own_any.truncate(MAX_OWN_FIELDS);
         if own_any.is_empty() {
             vec!["body".to_string()]
         } else {
@@ -141,16 +167,21 @@ pub fn resolve_fields(mapping: Option<&Value>) -> Vec<String> {
     }
 }
 
+/// Cap on how many own fields may join the `multi_match` as `^0.5` recall
+/// legs (see [`own_text_fields`]). Measured against the exploit-pocs-2026
+/// corpus that motivated the gate: 2,143 own text fields would otherwise
+/// ride the query.
+const MAX_OWN_FIELDS: usize = 24;
+
 /// The corpus's own searchable content fields: every property mapped `text`
 /// (or `semantic_text`) by at least `min_indices` of the indices in the
-/// union, `ax_*` provenance excluded, names sorted, capped so a wide schema
-/// cannot balloon the multi_match. Callers pick the gate: the #1158 floor
-/// passes `1` (any mapping index — the alternative is a guaranteed-wrong
-/// `body`), the #1244 union passes a quarter of the union (see the coverage
-/// note in [`resolve_fields`]).
+/// union, `ax_*` provenance excluded, names sorted, uncapped (callers cap —
+/// see [`MAX_OWN_FIELDS`]). Callers pick the gate: the #1158 floor passes
+/// `1` (any mapping index — the alternative is a guaranteed-wrong `body`),
+/// the #1244 union passes a quarter of the union (see the coverage note in
+/// [`resolve_fields`]).
 fn own_text_fields(obj: &serde_json::Map<String, Value>, min_indices: usize) -> Vec<String> {
     const AX: &str = "ax_";
-    const MAX_OWN_FIELDS: usize = 24;
     let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for m in obj.values() {
         let Some(props) = m.pointer("/mappings/properties").and_then(Value::as_object) else {
@@ -170,7 +201,66 @@ fn own_text_fields(obj: &serde_json::Map<String, Value>, min_indices: usize) -> 
         .into_iter()
         .filter(|(_, n)| *n >= min_indices)
         .map(|(k, _)| k)
+        .collect()
+}
+
+/// The #1244 union + family admission for own text fields, as one ranked
+/// list. A field is admitted when EITHER:
+///
+/// * at least `min_union_indices` of the union's indices map it (the
+///   quarter gate — schema prose that repeats across a single-family
+///   corpus, measured 37-96% on cve-records), OR
+/// * ANY index that maps none of the standard content fields maps it (the
+///   family route — a minority family in a multi-family corpus, measured
+///   `message` at 4/26 on vuln-fix-commits).
+///
+/// The list is capped at [`MAX_OWN_FIELDS`] entries ordered by how many
+/// indices map each field (ties alphabetical), so coverage decides which
+/// legs ride the query — not the field's name. Junk that slips through the
+/// family route (dataset column names in own-only indices) carries the
+/// lowest counts and sorts behind every widely-mapped field; the
+/// alphabetical-cap failure this replaces kept a literal `$comment` and
+/// cut `Summary` on exploit-pocs-2026.
+fn own_recall_legs(obj: &serde_json::Map<String, Value>, min_union_indices: usize) -> Vec<String> {
+    const STANDARD: [&str; 4] = ["body", "defs", "title", "defs_expanded"];
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut family: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for m in obj.values() {
+        let Some(props) = m.pointer("/mappings/properties").and_then(Value::as_object) else {
+            continue;
+        };
+        let own_text: Vec<&String> = props
+            .iter()
+            .filter(|(key, spec)| {
+                !key.starts_with("ax_")
+                    && spec
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| t == "text" || t == "semantic_text")
+            })
+            .map(|(key, _)| key)
+            .collect();
+        // An index that maps none of the standard content fields carries
+        // its content ONLY in own fields — everything it maps joins the
+        // family route.
+        if !own_text.iter().any(|f| STANDARD.contains(&f.as_str())) {
+            for f in &own_text {
+                family.insert((*f).clone());
+            }
+        }
+        for f in &own_text {
+            *counts.entry((*f).clone()).or_insert(0) += 1;
+        }
+    }
+    let mut admitted: Vec<(String, usize)> = counts
+        .into_iter()
+        .filter(|(f, n)| *n >= min_union_indices || family.contains(f))
+        .collect();
+    admitted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    admitted
+        .into_iter()
         .take(MAX_OWN_FIELDS)
+        .map(|(f, _)| f)
         .collect()
 }
 
@@ -461,5 +551,146 @@ mod tests {
             vec!["$comment".to_string(), "summary".to_string()],
             "the #1158 floor is exempt from the coverage gate"
         );
+    }
+
+    /// The #1244 family route, measured on vuln-fix-commits: repo-source
+    /// indices (body/defs/title) beside a MINORITY of payload indices whose
+    /// prose lives in `message` — 4 of 26 live indices, under the union
+    /// quarter gate, so the corpus answered from its tooling files while
+    /// every payload was unsearchable. The payload indices share their
+    /// mapping signature, so `message` joins by family majority. `text`
+    /// (synthesized, empty in payload records) was already on the list via
+    /// the #1238 route and must not be duplicated.
+    #[test]
+    fn a_minority_family_joins_by_signature_not_union_share() {
+        let mut obj = serde_json::Map::new();
+        // The code-family majority: 10 repo-source indices.
+        for i in 0..10 {
+            obj.insert(
+                format!("xc-vfc-repo-{i:03}"),
+                json!({ "mappings": { "properties": {
+                    "body":  { "type": "text" },
+                    "defs":  { "type": "text" },
+                    "title": { "type": "text" }
+                } } }),
+            );
+        }
+        // The payload family: 2 indices, identical signature, no standard
+        // field. Union = 12, quarter gate demands 3: `message` at 2 fails.
+        for i in 0..2 {
+            obj.insert(
+                format!("xc-vfc-payloads-{i:03}"),
+                json!({ "mappings": { "properties": {
+                    "cve":     { "type": "keyword" },
+                    "message": { "type": "text" },
+                    "patch":   { "type": "semantic_text" },
+                    "text":    { "type": "text" }
+                } } }),
+            );
+        }
+        assert_eq!(
+            resolve_fields(Some(&Value::Object(obj))),
+            vec![
+                "body".to_string(),
+                "defs".to_string(),
+                "title".to_string(),
+                "text^0.5".to_string(),
+                "message^0.5".to_string(),
+                "patch^0.5".to_string(),
+            ],
+            "payload-family prose joins beside the code-family standard fields"
+        );
+    }
+
+    /// The family route's boundary: a field in an index that maps `body`
+    /// — the README-frontmatter shape from exploit-pocs-2026 — never
+    /// enters the family route, however many indices carry it (it would
+    /// have to pass the union gate instead). But a lone own-only index
+    /// inside a code corpus DOES contribute its fields: its content is
+    /// unreachable any other way, and the coverage-ranked cap (next
+    /// test) keeps its 1-index fields behind every widely-mapped leg.
+    #[test]
+    fn body_indices_never_enter_the_family_route_but_a_lone_own_index_does() {
+        let mut obj = serde_json::Map::new();
+        // Nine plain code indices give the union a quarter gate of 3.
+        for i in 0..9 {
+            obj.insert(
+                format!("xc-code-{i:03}"),
+                json!({ "mappings": { "properties": {
+                    "body": { "type": "text" }
+                } } }),
+            );
+        }
+        // Two body-mapping indices sharing a frontmatter field: body
+        // family, not an own-only family — `frontmatter` must stay out of
+        // the family route AND sits at 2/12, under the union gate.
+        for i in 0..2 {
+            obj.insert(
+                format!("xc-README-{i:03}"),
+                json!({ "mappings": { "properties": {
+                    "body":        { "type": "text" },
+                    "frontmatter": { "type": "text" }
+                } } }),
+            );
+        }
+        // One lone raw-JSON index: `summary` joins by the family route.
+        obj.insert(
+            "xc-lone-json-000".to_string(),
+            json!({ "mappings": { "properties": {
+                "summary": { "type": "text" }
+            } } }),
+        );
+        assert_eq!(
+            resolve_fields(Some(&Value::Object(obj))),
+            vec!["body".to_string(), "summary^0.5".to_string()],
+            "frontmatter (body index) stays out; summary (own-only index) joins at ^0.5"
+        );
+    }
+
+    /// The cap ranks legs by mapping coverage, not name: a field mapped
+    /// by two own-only indices survives while 25 alphabetically-earlier
+    /// 1-index fields fight for the remaining slots. This is the rule
+    /// that ends the `$comment`-kept-`Summary`-cut failure the #1244
+    /// alphabetical cap produced on exploit-pocs-2026.
+    #[test]
+    fn the_cap_ranks_legs_by_coverage_not_name() {
+        let mut obj = serde_json::Map::new();
+        for i in 0..4 {
+            obj.insert(
+                format!("xc-code-{i:03}"),
+                json!({ "mappings": { "properties": {
+                    "body": { "type": "text" }
+                } } }),
+            );
+        }
+        let mut wide = serde_json::Map::new();
+        for i in 1..=25 {
+            wide.insert(format!("a{i:02}"), json!({ "type": "text" }));
+        }
+        obj.insert(
+            "xc-wide-json-000".to_string(),
+            json!({ "mappings": { "properties": Value::Object(wide) } }),
+        );
+        for i in 0..2 {
+            obj.insert(
+                format!("xc-zfamily-{i:03}"),
+                json!({ "mappings": { "properties": {
+                    "z_field": { "type": "text" }
+                } } }),
+            );
+        }
+        // 7 indices -> quarter gate 2: z_field (2) passes the union gate
+        // outright; the a-fields join via the family route at count 1.
+        // Coverage order: body(4), z_field(2), then a01.. by name; cap 24
+        // cuts a23/a24/a25 and keeps z_field despite its name.
+        let got = resolve_fields(Some(&Value::Object(obj)));
+        assert!(
+            got.contains(&"z_field^0.5".to_string()),
+            "2-index field kept"
+        );
+        assert!(!got.contains(&"a23^0.5".to_string()), "26th leg cut");
+        assert!(got.contains(&"a01^0.5".to_string()) && got.contains(&"a22^0.5".to_string()));
+        assert_eq!(got.first().unwrap(), "body");
+        assert_eq!(got.len(), 1 + 24 - 1); // body full-weight + 23 own legs
     }
 }
