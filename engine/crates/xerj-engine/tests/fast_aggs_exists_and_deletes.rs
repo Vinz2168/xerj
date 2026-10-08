@@ -25,6 +25,16 @@ use xerj_engine::aggs::fast_path_aggs_served;
 use xerj_engine::{Engine, Index};
 use xerj_query::parse_request;
 
+/// The served/bailed assertions read the PROCESS-GLOBAL
+/// `fast_path_aggs_served()` counter as a before/after delta, so two of
+/// these tests running concurrently count each other's serves (CI caught
+/// exactly that: run 37816544794 failed `exists_on_meta_field_bails_to_brute`
+/// with delta 1 while a sibling test's fast-path serve landed inside the
+/// window).  The whole file is ~1 s, so serialize it rather than inventing
+/// a per-index counter only the tests would use.
+static ONE_AT_A_TIME: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 fn make_engine(dir: &TempDir) -> Engine {
     let mut config = Config::default();
     config.server.data_dir = dir.path().to_str().unwrap().to_string();
@@ -81,6 +91,7 @@ fn exists_terms_query() -> serde_json::Value {
 
 #[tokio::test]
 async fn exists_in_top_filter_matches_brute() {
+    let _sequential = ONE_AT_A_TIME.lock().await;
     let dir = TempDir::new().unwrap();
     let engine = make_engine(&dir);
     engine.create_index("existsq", Schema::empty()).unwrap();
@@ -123,6 +134,7 @@ async fn exists_in_top_filter_matches_brute() {
 /// `value_present` on the brute path.
 #[tokio::test]
 async fn exists_on_numeric_field_matches_brute() {
+    let _sequential = ONE_AT_A_TIME.lock().await;
     let dir = TempDir::new().unwrap();
     let engine = make_engine(&dir);
     engine.create_index("existsn", Schema::empty()).unwrap();
@@ -166,6 +178,7 @@ async fn exists_on_numeric_field_matches_brute() {
 /// bookkeeping) — the fast path must BAIL, not answer it empty.
 #[tokio::test]
 async fn exists_on_meta_field_bails_to_brute() {
+    let _sequential = ONE_AT_A_TIME.lock().await;
     let dir = TempDir::new().unwrap();
     let engine = make_engine(&dir);
     engine.create_index("existsmeta", Schema::empty()).unwrap();
@@ -197,6 +210,7 @@ async fn exists_on_meta_field_bails_to_brute() {
 /// corpus answer is unchanged by a byte-identical overwrite.
 #[tokio::test]
 async fn unmerged_ghosts_still_bail() {
+    let _sequential = ONE_AT_A_TIME.lock().await;
     let dir = TempDir::new().unwrap();
     let engine = make_engine(&dir);
     engine.create_index("ghosts", Schema::empty()).unwrap();
@@ -248,6 +262,7 @@ async fn unmerged_ghosts_still_bail() {
 /// autoindex-catalog (rewritten continuously, merged in the background).
 #[tokio::test]
 async fn merged_delete_history_re_qualifies_for_fast_path() {
+    let _sequential = ONE_AT_A_TIME.lock().await;
     let dir = TempDir::new().unwrap();
     let engine = make_engine(&dir);
     engine.create_index("readmit", Schema::empty()).unwrap();
@@ -331,6 +346,7 @@ async fn merged_delete_history_re_qualifies_for_fast_path() {
 /// disagreed.  The alignment is pinned here.
 #[tokio::test]
 async fn object_valued_memtable_doc_counts_as_exists() {
+    let _sequential = ONE_AT_A_TIME.lock().await;
     let dir = TempDir::new().unwrap();
     let engine = make_engine(&dir);
     engine.create_index("objmem", Schema::empty()).unwrap();
