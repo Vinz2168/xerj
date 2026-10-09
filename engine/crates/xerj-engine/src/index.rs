@@ -24954,7 +24954,16 @@ impl Index {
         // body for a 160-byte answer. That matters most to the callers most
         // likely to use highlighting — agents paying per token for context.
         let page = if let Some(hl_req) = &request.highlight {
-            apply_highlight(page, hl_req, query)
+            // #1281: field names may be patterns (`"*"`, `"mess*"`), which
+            // `apply_highlight` would otherwise look up as literal source keys
+            // and never find.
+            if hl_req.fields.keys().any(|f| f.contains('*')) {
+                let schema = self.schema.read().await;
+                let expanded = expand_highlight_field_patterns(hl_req, &schema.schema, query);
+                apply_highlight(page, &expanded, query)
+            } else {
+                apply_highlight(page, hl_req, query)
+            }
         } else {
             page
         };
@@ -36116,6 +36125,127 @@ fn apply_highlight(hits: Vec<Hit>, hl: &HighlightRequest, query: &QueryNode) -> 
             hit
         })
         .collect()
+}
+
+/// Expand field-name patterns in a highlight request against the mapping
+/// (#1281).
+///
+/// ES 8.13.4 (verified) expands a pattern to the mapped `text` and `keyword`
+/// fields it matches, object sub-fields included (`obj.*` → `obj.inner`) and
+/// numeric fields excluded. With `require_field_match` (default `true`) only
+/// the fields the query targets survive: `match: {message}` + `"*"` highlights
+/// `message` alone, while a field-less `query_string` highlights them all. An
+/// explicit entry is kept as written and wins over a pattern that also covers
+/// it; the pattern's options are copied to each field it expands to.
+fn expand_highlight_field_patterns(
+    hl: &HighlightRequest,
+    schema: &Schema,
+    query: &QueryNode,
+) -> HighlightRequest {
+    fn highlightable(fields: &[FieldConfig], prefix: &str, out: &mut Vec<String>) {
+        for fc in fields {
+            let path = if prefix.is_empty() {
+                fc.name.clone()
+            } else {
+                format!("{prefix}.{}", fc.name)
+            };
+            match fc.field_type {
+                FieldType::Text | FieldType::Keyword => out.push(path),
+                // Object properties are fields of their own; a text field's
+                // `fields` are multi-fields, which this expansion skips.
+                FieldType::Object | FieldType::Nested => highlightable(&fc.fields, &path, out),
+                _ => {}
+            }
+        }
+    }
+    fn glob(pattern: &str, name: &str) -> bool {
+        let parts: Vec<&str> = pattern.split('*').collect();
+        let (first, last) = (parts[0], parts[parts.len() - 1]);
+        if !name.starts_with(first) || name.len() < first.len() + last.len() {
+            return false;
+        }
+        let mut rest = &name[first.len()..];
+        for mid in &parts[1..parts.len() - 1] {
+            match rest.find(mid) {
+                Some(at) => rest = &rest[at + mid.len()..],
+                None => return false,
+            }
+        }
+        rest.ends_with(last)
+    }
+    // Collects the field names (possibly patterns: a field-less
+    // `query_string` reaches here as `match` on `"*"`) the query targets.
+    // Returns `false` when the query targets every field outright.
+    fn spec(f: &str, out: &mut Vec<String>) -> bool {
+        out.push(f.split('^').next().unwrap_or(f).to_string());
+        true
+    }
+    fn targeted(q: &QueryNode, out: &mut Vec<String>) -> bool {
+        match q {
+            QueryNode::Term { field, .. }
+            | QueryNode::Terms { field, .. }
+            | QueryNode::Range { field, .. }
+            | QueryNode::Prefix { field, .. }
+            | QueryNode::Wildcard { field, .. }
+            | QueryNode::Match { field, .. }
+            | QueryNode::MatchPhrase { field, .. }
+            | QueryNode::MatchPhrasePrefix { field, .. }
+            | QueryNode::Fuzzy { field, .. }
+            | QueryNode::Regexp { field, .. } => {
+                out.push(field.clone());
+                true
+            }
+            QueryNode::MultiMatch { fields, .. } | QueryNode::SimpleQueryString { fields, .. } => {
+                if fields.is_empty() {
+                    return false;
+                }
+                fields.iter().all(|f| spec(f, out))
+            }
+            QueryNode::QueryString { default_field, .. } => match default_field {
+                Some(f) => spec(f, out),
+                None => false,
+            },
+            QueryNode::Bool {
+                must,
+                should,
+                must_not,
+                filter,
+                ..
+            } => must
+                .iter()
+                .chain(should)
+                .chain(must_not)
+                .chain(filter)
+                .all(|c| targeted(c, out)),
+            QueryNode::Constant { query, .. }
+            | QueryNode::Boosted { query, .. }
+            | QueryNode::Named { query, .. }
+            | QueryNode::Nested { query, .. }
+            | QueryNode::FunctionScore { query, .. } => targeted(query, out),
+            QueryNode::DisMax { queries, .. } => queries.iter().all(|c| targeted(c, out)),
+            _ => true,
+        }
+    }
+
+    let mut candidates = Vec::new();
+    highlightable(&schema.fields, "", &mut candidates);
+    if hl.require_field_match != Some(false) {
+        let mut named = Vec::new();
+        if targeted(query, &mut named) {
+            candidates.retain(|c| named.iter().any(|n| n == c || glob(n, c)));
+        }
+    }
+
+    let mut out = hl.clone();
+    out.fields.retain(|name, _| !name.contains('*'));
+    for (pattern, opts) in hl.fields.iter().filter(|(name, _)| name.contains('*')) {
+        for field in candidates.iter().filter(|c| glob(pattern, c)) {
+            out.fields
+                .entry(field.clone())
+                .or_insert_with(|| opts.clone());
+        }
+    }
+    out
 }
 
 /// Extract query terms for highlighting.

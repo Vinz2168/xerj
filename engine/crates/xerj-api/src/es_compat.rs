@@ -6961,6 +6961,7 @@ fn parse_highlight(hl_val: &Value) -> Option<xerj_query::ast::HighlightRequest> 
             .get("number_of_fragments")
             .and_then(Value::as_u64)
             .map(|n| n as usize),
+        require_field_match: obj.get("require_field_match").and_then(Value::as_bool),
     })
 }
 
