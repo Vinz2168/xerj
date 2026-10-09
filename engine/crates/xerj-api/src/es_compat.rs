@@ -6158,6 +6158,72 @@ fn find_search_body_script_limit_violation(
         .find_map(find_script_limit_violation)
 }
 
+/// Request-time check of every `terms` aggregation's `order` paths (#1283).
+///
+/// ES rejects an order key that names an aggregation the request does not
+/// define with a 400 (`Invalid aggregation order path [nope]. Cannot find
+/// aggregation named [nope]`, verified against ES 8.13.4). The executor has no
+/// error channel for it: an unresolvable path compared every bucket as equal
+/// and fell through to the key tiebreaker, so a typo produced a plausible but
+/// wrongly ordered HTTP 200. Checked on the request, before execution, so the
+/// answer is the same whichever executor path (fast or general) the
+/// aggregation later takes.
+///
+/// A path is `agg1>agg2>…>aggN`, where the last element may carry a value key
+/// (`p.95`, `p[95.0]`). Each element's name must be a sub-aggregation of the
+/// level before it; `_count` and `_key` are the built-in keys. Value keys are
+/// not validated here — that stays the executor's (lenient) business.
+fn find_invalid_agg_order_path(aggs: Option<&Value>) -> Option<String> {
+    fn sub_aggs(def: &Value) -> Option<&Value> {
+        def.get("aggs").or_else(|| def.get("aggregations"))
+    }
+    fn order_keys(order: &Value) -> Vec<&str> {
+        match order {
+            Value::Object(o) => o.keys().map(String::as_str).collect(),
+            Value::Array(arr) => arr
+                .iter()
+                .filter_map(Value::as_object)
+                .flat_map(|o| o.keys().map(String::as_str))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+    fn check_path(path: &str, mut level: Option<&Value>) -> Option<String> {
+        if path == "_count" || path == "_key" {
+            return None;
+        }
+        for element in path.split('>') {
+            let name = element
+                .find(['.', '['])
+                .map_or(element, |at| &element[..at]);
+            match level.and_then(|defs| defs.get(name)) {
+                Some(def) => level = sub_aggs(def),
+                None => {
+                    return Some(format!(
+                        "Invalid aggregation order path [{path}]. Cannot find aggregation named [{name}]"
+                    ))
+                }
+            }
+        }
+        None
+    }
+    let defs = aggs?.as_object()?;
+    for def in defs.values() {
+        let subs = sub_aggs(def);
+        if let Some(order) = def.get("terms").and_then(|t| t.get("order")) {
+            for path in order_keys(order) {
+                if let Some(reason) = check_path(path, subs) {
+                    return Some(reason);
+                }
+            }
+        }
+        if let Some(reason) = find_invalid_agg_order_path(subs) {
+            return Some(reason);
+        }
+    }
+    None
+}
+
 /// Parse an ES time-units string to milliseconds: `"500ms"`, `"30s"`,
 /// `"2m"`, `"1h"`, `"1d"`, `"5micros"`, `"100nanos"`, bare number =
 /// millis. Sub-millisecond values round up to 1 ms so `timeout=100nanos`
@@ -6298,6 +6364,9 @@ fn build_search_request(
     // The field set lives in `GuardedField`, shared with the raw-body guard
     // the `_msearch` / `_search/template` / `_msearch/template` paths run.
     if let Some(msg) = find_search_body_script_limit_violation(body, aggs_value.as_ref()) {
+        return Err(xerj_common::XerjError::invalid_query(msg));
+    }
+    if let Some(msg) = find_invalid_agg_order_path(aggs_value.as_ref()) {
         return Err(xerj_common::XerjError::invalid_query(msg));
     }
 
@@ -25487,6 +25556,17 @@ async fn msearch_impl(
             }));
             continue;
         }
+        if let Some(msg) = find_invalid_agg_order_path(
+            search_body_val
+                .get("aggs")
+                .or_else(|| search_body_val.get("aggregations")),
+        ) {
+            responses.push(json!({
+                "error": { "type": "illegal_argument_exception", "reason": msg },
+                "status": 400
+            }));
+            continue;
+        }
 
         // `rerank` is a `_search` stage and this path has its own, smaller
         // renderer. `parse_request` ignores keys it does not know, so without
@@ -35742,6 +35822,13 @@ pub async fn search_template(
     if let Some(msg) = find_body_script_limit_violation(&search_body_val) {
         return ApiError::new(xerj_common::XerjError::invalid_query(msg)).into_response();
     }
+    if let Some(msg) = find_invalid_agg_order_path(
+        search_body_val
+            .get("aggs")
+            .or_else(|| search_body_val.get("aggregations")),
+    ) {
+        return ApiError::new(xerj_common::XerjError::invalid_query(msg)).into_response();
+    }
 
     // A template that renders a `rerank` block: this minimal path does not run
     // the stage, and `parse_request` would drop the key without a word. Same
@@ -35990,6 +36077,17 @@ async fn msearch_template_impl(
         // same `GuardedField` set; the rendered template is user input and
         // this path skips `build_search_request` too.
         if let Some(msg) = find_body_script_limit_violation(&search_body_val) {
+            responses.push(json!({
+                "error": { "type": "illegal_argument_exception", "reason": msg },
+                "status": 400
+            }));
+            continue;
+        }
+        if let Some(msg) = find_invalid_agg_order_path(
+            search_body_val
+                .get("aggs")
+                .or_else(|| search_body_val.get("aggregations")),
+        ) {
             responses.push(json!({
                 "error": { "type": "illegal_argument_exception", "reason": msg },
                 "status": 400
