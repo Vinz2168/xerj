@@ -77,6 +77,9 @@ setup:
                       terms:
                           field: host
                           order: { nope: desc }
+  # This runner records a `catch` response without checking its status, so
+  # the 400 is asserted on the body (`status` is in ES's error envelope).
+  - match: { status: 400 }
 
   - do:
       catch: bad_request
@@ -93,3 +96,4 @@ setup:
                           m:
                               max:
                                   field: ms
+  - match: { status: 400 }
