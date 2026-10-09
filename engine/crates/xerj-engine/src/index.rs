@@ -20203,6 +20203,14 @@ impl Index {
                     ),
                 )));
             }
+            // #1284: a non-numeric value against a numeric field is a query
+            // that cannot be built, and ES fails it (`query_shard_exception` /
+            // `number_format_exception`) rather than answering a 0-hit.
+            if let Some(value) = non_numeric_term_value(&resolved, &schema.schema) {
+                return Err(EngineError::Common(xerj_common::XerjError::invalid_query(
+                    format!("failed to create query: For input string: \"{value}\""),
+                )));
+            }
             // #437: a sort field this engine cannot resolve (any of 11 ES
             // meta-field names besides the ones handled below, or an
             // unmapped/misspelled field) fell through to `_source` lookup
@@ -41250,6 +41258,70 @@ fn unsearchable_query_field(q: &QueryNode, schema: &Schema) -> Option<String> {
         // field-less `more_like_this` (with `fields` the parser lowers it to
         // `bool.should` of `match`, which the leaf arms above catch), and
         // `percolate` (the field holds stored queries, not data).
+        _ => None,
+    }
+}
+
+/// The first string value a `term` / `terms` / `range` clause sends to a
+/// numeric (`long` / `double`) field that does not parse as a number (#1284).
+///
+/// ES 8.13.4 answers every one of these with a 400 whose root cause reads
+/// `failed to create query: For input string: "abc"`, top-level or under
+/// `bool.filter`; XERJ answered a silent 0-hit 200, so a type error in a
+/// dashboard query looked like an empty result. These clause types have no
+/// `lenient` option in ES, so there is nothing to honour here. A decimal
+/// against a `long` (`"1.5"`) is a valid query that matches nothing on ES, so
+/// only an unparseable string is rejected. `match` / `multi_match` /
+/// `query_string` are left alone: they DO take `lenient`, which the AST does
+/// not carry yet.
+fn non_numeric_term_value(q: &QueryNode, schema: &Schema) -> Option<String> {
+    let numeric = |field: &str| {
+        declared_field(schema, field)
+            .is_some_and(|fc| matches!(fc.field_type, FieldType::Long | FieldType::Double))
+    };
+    let bad = |v: &serde_json::Value| -> Option<String> {
+        let s = v.as_str()?;
+        s.trim().parse::<f64>().is_err().then(|| s.to_string())
+    };
+    match q {
+        QueryNode::Term { field, value, .. } if numeric(field) => bad(value),
+        QueryNode::Terms { field, values, .. } if numeric(field) => values.iter().find_map(bad),
+        QueryNode::Range {
+            field,
+            gte,
+            gt,
+            lte,
+            lt,
+            ..
+        } if numeric(field) => [gte, gt, lte, lt].into_iter().flatten().find_map(bad),
+        QueryNode::Bool {
+            must,
+            should,
+            must_not,
+            filter,
+            ..
+        } => must
+            .iter()
+            .chain(should)
+            .chain(must_not)
+            .chain(filter)
+            .find_map(|c| non_numeric_term_value(c, schema)),
+        QueryNode::Constant { query, .. }
+        | QueryNode::Boosted { query, .. }
+        | QueryNode::Named { query, .. }
+        | QueryNode::Nested { query, .. }
+        | QueryNode::FunctionScore { query, .. } => non_numeric_term_value(query, schema),
+        QueryNode::Pinned { organic, .. } => non_numeric_term_value(organic, schema),
+        QueryNode::Boosting {
+            positive, negative, ..
+        } => non_numeric_term_value(positive, schema)
+            .or_else(|| non_numeric_term_value(negative, schema)),
+        QueryNode::DisMax { queries, .. } => queries
+            .iter()
+            .find_map(|c| non_numeric_term_value(c, schema)),
+        QueryNode::Knn { filter, .. } | QueryNode::SemanticSearch { filter, .. } => filter
+            .as_ref()
+            .and_then(|f| non_numeric_term_value(f, schema)),
         _ => None,
     }
 }

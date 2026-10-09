@@ -1,0 +1,49 @@
+setup:
+  - do:
+      indices.create:
+          index: non_numeric_term
+          body:
+              mappings:
+                  properties:
+                      bytes:
+                          type: long
+                      h:
+                          type: keyword
+  - do:
+      bulk:
+          refresh: true
+          body:
+              - '{"index": {"_index": "non_numeric_term", "_id": "1"}}'
+              - '{"bytes": 1, "h": "a"}'
+
+---
+"non-numeric term-level value on a numeric field is a 400 (#1284)":
+  - do:
+      catch: bad_request
+      search:
+          index: non_numeric_term
+          body: { query: { term: { bytes: "abc" } } }
+  # This runner records a `catch` response without checking its status, so
+  # the 400 is asserted on the body (`status` is in ES's error envelope).
+  - match: { status: 400 }
+
+  - do:
+      catch: bad_request
+      search:
+          index: non_numeric_term
+          body: { query: { bool: { filter: [ { range: { bytes: { gte: "abc" } } } ] } } }
+  - match: { status: 400 }
+
+---
+"numeric strings and non-numeric fields stay valid (#1284)":
+  - do:
+      search:
+          index: non_numeric_term
+          body: { query: { term: { bytes: "1" } } }
+  - match: { hits.total.value: 1 }
+
+  - do:
+      search:
+          index: non_numeric_term
+          body: { query: { term: { h: "abc" } } }
+  - match: { hits.total.value: 0 }
