@@ -1,8 +1,9 @@
-//! Issue #1284 (term-level part): a string that is not a number, sent by a
-//! `term` / `terms` / `range` clause to a numeric field, is a query ES cannot
-//! build. ES 8.13.4 answers 400 with root cause `failed to create query: For
-//! input string: "abc"` (`query_shard_exception` / `number_format_exception`).
-//! XERJ answered 200 with 0 hits, so a type error looked like an empty result.
+//! Issue #1284: a string that is not a number, sent to a numeric field by a
+//! `term` / `terms` / `range` clause, or by a full-text clause that is not
+//! lenient, is a query ES cannot build. ES 8.13.4 answers 400 with root cause
+//! `failed to create query: For input string: "abc"` (`query_shard_exception`
+//! / `number_format_exception`). XERJ answered 200 with 0 hits, so a type
+//! error looked like an empty result.
 //!
 //! Elasticsearch is referenced for wire semantics only; no ES code is
 //! reproduced here.
@@ -138,6 +139,121 @@ async fn numeric_strings_and_non_numeric_fields_stay_valid() {
         assert_eq!(st, StatusCode::OK, "{query}: {resp}");
         assert_eq!(resp["count"], json!(hits), "{query}: {resp}");
     }
+}
+
+/// Full-text clauses that are not lenient. Every shape here returned 400 on
+/// ES 8.13.4 with this exact reason: `match` with `lenient` absent or false,
+/// and `multi_match` / `query_string` / `simple_query_string` whose field set
+/// is narrower than every field (so ES defaults `lenient` to false), or that
+/// say `lenient: false` outright.
+#[tokio::test]
+async fn non_lenient_full_text_clauses_are_a_400() {
+    let (app, _dir) = seeded().await;
+    for query in [
+        json!({"match": {"bytes": "abc"}}),
+        json!({"match": {"bytes": {"query": "abc", "lenient": false}}}),
+        json!({"match": {"ms": "abc"}}),
+        json!({"match_phrase": {"bytes": "abc"}}),
+        json!({"multi_match": {"query": "abc", "fields": ["bytes", "msg"]}}),
+        json!({"multi_match": {"query": "abc", "fields": ["b*"]}}),
+        json!({"multi_match": {"query": "abc", "fields": ["bytes"], "type": "phrase"}}),
+        json!({"query_string": {"query": "bytes:abc", "lenient": false}}),
+        json!({"query_string": {"query": "abc", "default_field": "bytes"}}),
+        json!({"query_string": {"query": "abc", "fields": ["bytes", "msg"]}}),
+        json!({"query_string": {"query": "bytes:(1 OR abc)", "lenient": false}}),
+        json!({"query_string": {"query": "bytes:>abc", "lenient": false}}),
+        json!({"query_string": {"query": "bytes:\"abc\"", "lenient": false}}),
+        json!({"query_string": {"query": "msg:abc AND bytes:abc", "lenient": false}}),
+        json!({"simple_query_string": {"query": "abc", "fields": ["bytes"]}}),
+        json!({"simple_query_string": {"query": "abc", "fields": ["bytes", "msg"]}}),
+        json!({"bool": {"filter": [{"match": {"bytes": "abc"}}]}}),
+    ] {
+        for path in ["/t84/_count", "/t84/_search"] {
+            let (st, resp) = query_on(&app, path, &query).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{path} {query}: {resp}");
+            assert!(
+                resp.to_string()
+                    .contains(r#"failed to create query: For input string: \"abc\""#),
+                "{path} {query}: reason must name the bad value: {resp}"
+            );
+        }
+    }
+}
+
+/// Lenient full-text clauses stay a 200, as on ES 8.13.4: an explicit
+/// `lenient: true`, and the every-field default (`query_string` with no
+/// `default_field`, or `["*"]`), which is lenient even for a clause that names
+/// the numeric field itself. The two `query_string` ranges were a 200 on main
+/// and must not become a 400 now that ranges are checked.
+#[tokio::test]
+async fn lenient_full_text_clauses_stay_a_200() {
+    let (app, _dir) = seeded().await;
+    for (query, hits) in [
+        (
+            json!({"match": {"bytes": {"query": "abc", "lenient": true}}}),
+            0,
+        ),
+        (
+            json!({"match": {"bytes": {"query": "abc", "lenient": "true"}}}),
+            0,
+        ),
+        (
+            json!({"multi_match": {"query": "abc", "fields": ["bytes", "msg"], "lenient": true}}),
+            0,
+        ),
+        (json!({"query_string": {"query": "bytes:abc"}}), 0),
+        (
+            json!({"query_string": {"query": "bytes:abc", "lenient": true}}),
+            0,
+        ),
+        (json!({"query_string": {"query": "bytes:>abc"}}), 0),
+        (json!({"query_string": {"query": "bytes:[abc TO 5]"}}), 0),
+        (json!({"query_string": {"query": "bytes:\"abc\""}}), 0),
+        (
+            json!({"query_string": {"query": "bytes:>abc", "default_field": "*"}}),
+            0,
+        ),
+        (
+            json!({"simple_query_string": {"query": "abc", "fields": ["bytes"], "lenient": true}}),
+            0,
+        ),
+        // Valid values on a numeric field, and full-text on text fields.
+        (json!({"match": {"bytes": "1"}}), 1),
+        (json!({"match": {"bytes": "1.5"}}), 0),
+        (
+            json!({"multi_match": {"query": "1", "fields": ["bytes"]}}),
+            1,
+        ),
+        (
+            json!({"query_string": {"query": "bytes:1", "lenient": false}}),
+            1,
+        ),
+        (json!({"match": {"msg": "hello"}}), 1),
+    ] {
+        // `_search` matters on its own: its ES-compat layer rewrites a `match`
+        // on a numeric field to a `term` before the engine sees it.
+        for path in ["/t84/_count", "/t84/_search"] {
+            let (st, resp) = query_on(&app, path, &query).await;
+            assert_eq!(st, StatusCode::OK, "{path} {query}: {resp}");
+            let got = if path.ends_with("_count") {
+                &resp["count"]
+            } else {
+                &resp["hits"]["total"]["value"]
+            };
+            assert_eq!(got, &json!(hits), "{path} {query}: {resp}");
+        }
+    }
+}
+
+async fn query_on(app: &axum::Router, path: &str, query: &Value) -> (StatusCode, Value) {
+    send(
+        app,
+        "POST",
+        path,
+        "application/json",
+        json!({ "query": query }).to_string(),
+    )
+    .await
 }
 
 /// `_msearch` fails only the offending item.
