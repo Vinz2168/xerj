@@ -1955,117 +1955,121 @@ fn tokenize_query_string(q: &str) -> Result<Option<Vec<QsTok>>> {
     Ok(Some(out))
 }
 
+/// How one clause of a query-string boolean takes part in it.
+#[derive(Clone, Copy, PartialEq)]
+enum QsOccur {
+    Must,
+    Should,
+    MustNot,
+}
+
+/// The conjunction written before a clause.
+#[derive(Clone, Copy, PartialEq)]
+enum QsConj {
+    None,
+    And,
+    Or,
+}
+
+/// Parse one boolean level of a query string: clauses up to the end of the
+/// input or the closing `)` of the current group.
+///
+/// Every clause of one level lands in ONE boolean, with an occur decided the
+/// way Lucene's classic query parser decides it (`QueryParserBase.addClause`,
+/// Apache-2.0; approach only, nothing copied), which is what ES 8.13.4 runs:
+///
+/// - `AND` before a clause makes the clause before it required too, unless
+///   that one is prohibited;
+/// - with `default_operator: AND`, `OR` before a clause makes the clause
+///   before it optional, unless it is prohibited;
+/// - `-` / `NOT` make a clause prohibited (MUST_NOT) whatever the operator;
+/// - otherwise, under `OR` a clause is required only with `+` or after
+///   `AND`; under `AND` every clause not introduced by `OR` is required.
+///
+/// So `kiwi OR lime AND plum` is `kiwi +lime +plum`, not
+/// `kiwi OR (lime AND plum)`. A prohibited clause excludes from the whole
+/// level: before #1299, `alpha -beta` built `alpha OR (NOT beta)`, whose
+/// pure-negative branch matched every document without `beta`.
 fn parse_qs_or(
     toks: &[QsTok],
     pos: &mut usize,
     ctx: QsFields<'_>,
     default_op: Option<BoolOperator>,
 ) -> Option<QueryNode> {
-    let mut left = parse_qs_and(toks, pos, ctx, default_op)?;
-    // `A OR B` — explicit OR operator.
-    while *pos < toks.len() && matches!(toks[*pos], QsTok::Or) {
-        *pos += 1;
-        let right = parse_qs_and(toks, pos, ctx, default_op)?;
-        left = QueryNode::Bool {
-            must: vec![],
-            must_not: vec![],
-            filter: vec![],
-            should: vec![left, right],
-            minimum_should_match: Some(MinShouldMatch::Fixed(1)),
-        };
-    }
-    // When default_operator is OR (the ES default when unset) and
-    // parse_qs_and stopped because it hit a juxtaposed clause, fold the
-    // remaining clauses into a should-bool. Without this, `field:foo
-    // field:xyz` only evaluates the first clause and drops `field:xyz`.
-    let implicit_or = matches!(default_op, None | Some(BoolOperator::Or));
-    if implicit_or {
-        while *pos < toks.len() && !matches!(toks[*pos], QsTok::RParen | QsTok::Or | QsTok::And) {
-            let right = parse_qs_and(toks, pos, ctx, default_op)?;
-            left = QueryNode::Bool {
-                must: vec![],
-                must_not: vec![],
-                filter: vec![],
-                should: vec![left, right],
-                minimum_should_match: Some(MinShouldMatch::Fixed(1)),
-            };
-        }
-    }
-    Some(left)
-}
-
-fn parse_qs_and(
-    toks: &[QsTok],
-    pos: &mut usize,
-    ctx: QsFields<'_>,
-    default_op: Option<BoolOperator>,
-) -> Option<QueryNode> {
-    let mut clauses: Vec<QueryNode> = Vec::new();
-    let mut not_clauses: Vec<QueryNode> = Vec::new();
-    let mut explicit_and = false;
-    loop {
-        // Optional + / - / NOT prefix for each clause.
-        let mut force_not = false;
-        while *pos < toks.len() {
-            match &toks[*pos] {
-                QsTok::Must => {
-                    *pos += 1;
-                }
-                QsTok::Not => {
-                    force_not = true;
-                    *pos += 1;
-                }
+    let default_and = matches!(default_op, Some(BoolOperator::And));
+    let mut clauses: Vec<(QsOccur, QueryNode)> = Vec::new();
+    while *pos < toks.len() && !matches!(toks[*pos], QsTok::RParen) {
+        let mut conj = QsConj::None;
+        while let Some(t) = toks.get(*pos) {
+            match t {
+                QsTok::And => conj = QsConj::And,
+                QsTok::Or => conj = QsConj::Or,
                 _ => break,
             }
+            *pos += 1;
         }
+        let (mut req_mod, mut not_mod) = (false, false);
+        while let Some(t) = toks.get(*pos) {
+            match t {
+                QsTok::Must => req_mod = true,
+                QsTok::Not => not_mod = true,
+                _ => break,
+            }
+            *pos += 1;
+        }
+        // A dangling operator (`kiwi AND`, `kiwi -`) has no clause to apply
+        // to: decline, and the caller falls back to the opaque node.
         let node = parse_qs_unary(toks, pos, ctx)?;
-        if force_not {
-            not_clauses.push(node);
-        } else {
-            clauses.push(node);
-        }
-        if *pos >= toks.len() {
-            break;
-        }
-        match &toks[*pos] {
-            QsTok::And => {
-                explicit_and = true;
-                *pos += 1;
-                continue;
-            }
-            QsTok::Or | QsTok::RParen => break,
-            _ => {
-                // Juxtaposition — treat as OR unless default_op is AND.
-                if matches!(default_op, Some(BoolOperator::And)) || explicit_and {
-                    continue;
+
+        if let Some(prev) = clauses.last_mut() {
+            if prev.0 != QsOccur::MustNot {
+                if conj == QsConj::And {
+                    prev.0 = QsOccur::Must;
+                } else if conj == QsConj::Or && default_and {
+                    prev.0 = QsOccur::Should;
                 }
-                break;
             }
         }
+        let required = if default_and {
+            !not_mod && conj != QsConj::Or
+        } else {
+            req_mod || (conj == QsConj::And && !not_mod)
+        };
+        let occur = if not_mod {
+            QsOccur::MustNot
+        } else if required {
+            QsOccur::Must
+        } else {
+            QsOccur::Should
+        };
+        clauses.push((occur, node));
     }
-    if clauses.len() == 1 && not_clauses.is_empty() {
-        return Some(clauses.pop().unwrap());
+
+    if clauses.len() == 1 && clauses[0].0 != QsOccur::MustNot {
+        return clauses.pop().map(|(_, n)| n);
     }
-    let should_mode =
-        !explicit_and && !clauses.is_empty() && !matches!(default_op, Some(BoolOperator::And));
-    let node = if should_mode {
-        QueryNode::Bool {
-            must: vec![],
-            filter: vec![],
-            must_not: not_clauses,
-            should: clauses,
-            minimum_should_match: Some(MinShouldMatch::Fixed(1)),
+    if clauses.is_empty() {
+        return None;
+    }
+    let (mut must, mut should, mut must_not) = (Vec::new(), Vec::new(), Vec::new());
+    for (occur, node) in clauses {
+        match occur {
+            QsOccur::Must => must.push(node),
+            QsOccur::Should => should.push(node),
+            QsOccur::MustNot => must_not.push(node),
         }
-    } else {
-        QueryNode::Bool {
-            must: clauses,
-            filter: vec![],
-            must_not: not_clauses,
-            should: vec![],
-            minimum_should_match: None,
-        }
-    };
-    Some(node)
+    }
+    // With a required clause, the optional ones only add score (Lucene and
+    // ES `bool`); with none, at least one of them must match.
+    let minimum_should_match =
+        (must.is_empty() && !should.is_empty()).then_some(MinShouldMatch::Fixed(1));
+    Some(QueryNode::Bool {
+        must,
+        should,
+        must_not,
+        filter: vec![],
+        minimum_should_match,
+    })
 }
 
 fn parse_qs_unary(toks: &[QsTok], pos: &mut usize, ctx: QsFields<'_>) -> Option<QueryNode> {
@@ -5472,6 +5476,116 @@ mod tests {
         let (field, _, _, _, lte) = expect_range(qs("n:<=5"));
         assert_eq!(field, "n");
         assert_eq!(lte, Some(json!(5)));
+    }
+
+    /// The `query` of each bare `Match` in `nodes`, in order.
+    fn match_terms(nodes: &[QueryNode]) -> Vec<&str> {
+        nodes
+            .iter()
+            .map(|n| match n {
+                QueryNode::Match { query, .. } => query.as_str(),
+                other => panic!("expected a bare match, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// One query-string boolean level as (must, should, must_not, msm).
+    fn occurs(
+        query: &str,
+        default_operator: Option<&str>,
+    ) -> (
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Option<MinShouldMatch>,
+    ) {
+        let mut body = json!({"query": query, "default_field": "t"});
+        if let Some(op) = default_operator {
+            body["default_operator"] = json!(op);
+        }
+        match q(json!({ "query_string": body })) {
+            QueryNode::Bool {
+                must,
+                should,
+                must_not,
+                minimum_should_match,
+                ..
+            } => {
+                let own = |v: &[QueryNode]| match_terms(v).into_iter().map(String::from).collect();
+                (
+                    own(&must),
+                    own(&should),
+                    own(&must_not),
+                    minimum_should_match,
+                )
+            }
+            other => panic!("{query}: expected a Bool, got {other:?}"),
+        }
+    }
+
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// #1299: a prohibited clause excludes from its whole level. `alpha
+    /// -beta` used to lower to `alpha OR (NOT beta)`, whose pure-negative
+    /// branch matched every document without `beta`.
+    #[test]
+    fn query_string_negation_excludes_from_the_whole_level() {
+        let one = Some(MinShouldMatch::Fixed(1));
+        for query in [
+            "alpha -beta",
+            "-beta alpha",
+            "alpha NOT beta",
+            "alpha OR -beta",
+        ] {
+            assert_eq!(
+                occurs(query, None),
+                (vec![], strs(&["alpha"]), strs(&["beta"]), one.clone()),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            occurs("alpha beta -gamma", None),
+            (vec![], strs(&["alpha", "beta"]), strs(&["gamma"]), one)
+        );
+        // `+` makes a clause required and the rest only score.
+        assert_eq!(
+            occurs("+alpha beta -gamma", None),
+            (strs(&["alpha"]), strs(&["beta"]), strs(&["gamma"]), None)
+        );
+    }
+
+    /// Mixed `AND` / `OR` follow Lucene's classic parser, as ES 8.13.4 does:
+    /// `AND` makes the clause before it required too, and under
+    /// `default_operator: AND` an `OR` makes the clause before it optional.
+    #[test]
+    fn query_string_mixed_operators_follow_the_classic_parser() {
+        assert_eq!(
+            occurs("kiwi OR lime AND plum", None),
+            (strs(&["lime", "plum"]), strs(&["kiwi"]), vec![], None)
+        );
+        assert_eq!(
+            occurs("kiwi AND lime OR plum", None),
+            (strs(&["kiwi", "lime"]), strs(&["plum"]), vec![], None)
+        );
+        assert_eq!(
+            occurs("kiwi AND NOT lime OR plum", None),
+            (strs(&["kiwi"]), strs(&["plum"]), strs(&["lime"]), None)
+        );
+        assert_eq!(
+            occurs("kiwi OR lime plum", Some("AND")),
+            (strs(&["plum"]), strs(&["kiwi", "lime"]), vec![], None)
+        );
+        assert_eq!(
+            occurs("-kiwi lime OR plum", Some("AND")),
+            (
+                vec![],
+                strs(&["lime", "plum"]),
+                strs(&["kiwi"]),
+                Some(MinShouldMatch::Fixed(1))
+            )
+        );
     }
 
     /// `query_string`'s `fields` was accepted and ignored — the key never
