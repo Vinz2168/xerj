@@ -11362,20 +11362,39 @@ async fn search_impl(
                                     // de-boosted `{"match": {kw: {"query": …,
                                     // "boost": N}}}`.
                                     let mut boost: Option<Value> = None;
+                                    let mut lenient = false;
                                     let value = match raw {
                                         Value::Object(inner) => {
                                             boost = inner.get("boost").cloned();
+                                            lenient =
+                                                matches!(
+                                                    inner.get("lenient"),
+                                                    Some(Value::Bool(true))
+                                                ) || inner.get("lenient").and_then(Value::as_str)
+                                                    == Some("true");
                                             inner.get("query").cloned().unwrap_or(raw.clone())
                                         }
                                         _ => raw.clone(),
                                     };
+                                    // #1284: a `term` has no `lenient`, and the
+                                    // engine 400s a non-numeric term value on a
+                                    // numeric field. A lenient `match` whose value
+                                    // is not a number stays a `match`, which the
+                                    // engine answers with no hits, as ES does.
+                                    let lenient_non_numeric = lenient
+                                        && exact.contains(field)
+                                        && value
+                                            .as_str()
+                                            .is_some_and(|s| s.trim().parse::<f64>().is_err());
                                     let s_owned = match &value {
                                         Value::String(s) => Some(s.clone()),
                                         Value::Number(n) => Some(n.to_string()),
                                         _ => None,
                                     };
                                     let split_field = split.contains(field);
-                                    if split_field {
+                                    if lenient_non_numeric {
+                                        // Leave the clause as written.
+                                    } else if split_field {
                                         if let Some(s) = s_owned.as_deref() {
                                             let toks: Vec<&str> = s.split_whitespace().collect();
                                             if toks.len() > 1 {

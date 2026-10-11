@@ -523,6 +523,7 @@ fn parse_match(params: &Value) -> Result<QueryNode> {
             analyzer: None,
             boost: None,
             minimum_should_match: None,
+            lenient: false,
         });
     }
 
@@ -561,8 +562,33 @@ fn parse_match(params: &Value) -> Result<QueryNode> {
         analyzer,
         boost,
         minimum_should_match,
+        lenient: parse_lenient(vobj.get("lenient")).unwrap_or(false),
     };
     Ok(maybe_named(node, name))
+}
+
+/// Read a clause's `lenient` flag (#1284). ES takes a JSON boolean or the
+/// strings `"true"` / `"false"`; `None` means the caller applies its default.
+fn parse_lenient(v: Option<&Value>) -> Option<bool> {
+    match v? {
+        Value::Bool(b) => Some(*b),
+        Value::String(s) if s == "true" => Some(true),
+        Value::String(s) if s == "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether a field list means "every field", the case where ES defaults
+/// `lenient` to true for `multi_match`, `query_string` and
+/// `simple_query_string` (#1284). An empty list counts: with no fields those
+/// clauses fall back to `index.query.default_field`, whose default is `*`.
+/// A narrower pattern (`b*`) does not, and ES stays strict for it.
+fn targets_every_field(fields: &[String]) -> bool {
+    match fields {
+        [] => true,
+        [only] => qs_split_boost(only).0 == "*",
+        _ => false,
+    }
 }
 
 /// Best-effort conversion of a JSON scalar to a string for query
@@ -602,6 +628,7 @@ fn parse_match_phrase(params: &Value) -> Result<QueryNode> {
             slop: 0,
             analyzer: None,
             boost: None,
+            lenient: false,
         });
     }
 
@@ -632,12 +659,15 @@ fn parse_match_phrase(params: &Value) -> Result<QueryNode> {
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
+    // `match_phrase` has no `lenient` option in ES (it answers `[match_phrase]
+    // query does not support [lenient]`), so a parsed phrase is always strict.
     let node = QueryNode::MatchPhrase {
         field,
         query,
         slop,
         analyzer,
         boost,
+        lenient: false,
     };
     Ok(maybe_named(node, name))
 }
@@ -775,6 +805,9 @@ fn parse_multi_match(params: &Value) -> Result<QueryNode> {
     if fields.is_empty() {
         return invalid("`multi_match.fields` must not be empty");
     }
+    // #1284: explicit `lenient`, else ES's default: lenient only when the
+    // clause targets every field (`["*"]`).
+    let lenient = parse_lenient(obj.get("lenient")).unwrap_or_else(|| targets_every_field(&fields));
 
     let type_str = obj
         .get("type")
@@ -909,6 +942,7 @@ fn parse_multi_match(params: &Value) -> Result<QueryNode> {
                         boost: None,
                         analyzer: analyzer_opt.clone(),
                         minimum_should_match: None,
+                        lenient,
                     }
                 }
             };
@@ -983,6 +1017,7 @@ fn parse_multi_match(params: &Value) -> Result<QueryNode> {
         boost,
         slop,
         max_expansions,
+        lenient,
     })
 }
 
@@ -1229,6 +1264,7 @@ fn parse_range(params: &Value) -> Result<QueryNode> {
         lte,
         lt,
         boost,
+        lenient: false,
     })
 }
 
@@ -1436,6 +1472,14 @@ fn parse_query_string(params: &Value) -> Result<QueryNode> {
         .unwrap_or_default();
     let default_operator = parse_bool_operator(obj.get("default_operator")).ok();
     let boost = obj.get("boost").and_then(|v| v.as_f64()).map(|b| b as f32);
+    // #1284: explicit `lenient`, else ES's default, which is lenient only when
+    // the clause's field set is every field. That is why `bytes:abc` with no
+    // `default_field` is a 200 on ES even though the clause names `bytes`.
+    let lenient =
+        parse_lenient(obj.get("lenient")).unwrap_or_else(|| match default_field.as_deref() {
+            Some(df) if fields.is_empty() => df == "*",
+            _ => targets_every_field(&fields),
+        });
 
     // Try to lower the query string into a Bool tree so downstream matchers
     // can honor `field:value` + OR/AND syntax.  Fall back to the opaque
@@ -1447,6 +1491,7 @@ fn parse_query_string(params: &Value) -> Result<QueryNode> {
         QsFields {
             default_field: default_field.as_deref(),
             fields: &fields,
+            lenient,
         },
         default_operator,
     )? {
@@ -1502,6 +1547,10 @@ fn qs_split_boost(spec: &str) -> (String, Option<f32>) {
 struct QsFields<'a> {
     default_field: Option<&'a str>,
     fields: &'a [String],
+    /// The clause's effective `lenient` (#1284), stamped on every leaf the
+    /// string lowers to, field-qualified ones included: ES decides leniency
+    /// once per `query_string`, not per clause.
+    lenient: bool,
 }
 
 impl QsFields<'_> {
@@ -2196,6 +2245,7 @@ fn parse_qs_unary(
                         analyzer: None,
                         boost,
                         minimum_should_match: None,
+                        lenient: ctx.lenient,
                     })
                     .collect(),
             )
@@ -2211,6 +2261,7 @@ fn parse_qs_unary(
                         slop: 0,
                         analyzer: None,
                         boost,
+                        lenient: ctx.lenient,
                     })
                     .collect(),
             )
@@ -2241,6 +2292,7 @@ fn parse_qs_unary(
                         lte: lte.clone(),
                         lt: lt.clone(),
                         boost,
+                        lenient: ctx.lenient,
                     })
                     .collect(),
             )
@@ -2447,6 +2499,8 @@ fn parse_simple_query_string(params: &Value) -> Result<QueryNode> {
     let mm: Option<MinShouldMatch> = obj
         .get("minimum_should_match")
         .and_then(|v| parse_min_should_match(v).ok());
+    // #1284: same default as `multi_match` / `query_string`.
+    let lenient = parse_lenient(obj.get("lenient")).unwrap_or_else(|| targets_every_field(&fields));
 
     // Tokenize the query: split on whitespace; leading +/-/| signal per-term operators.
     let mut must: Vec<QueryNode> = Vec::new();
@@ -2467,7 +2521,7 @@ fn parse_simple_query_string(params: &Value) -> Result<QueryNode> {
         if term_text.is_empty() {
             continue;
         }
-        let node = make_simple_query_node(term_text, &fields);
+        let node = make_simple_query_node(term_text, &fields, lenient);
         match sign {
             '+' => must.push(node),
             '-' => must_not.push(node),
@@ -2485,7 +2539,7 @@ fn parse_simple_query_string(params: &Value) -> Result<QueryNode> {
 
     // No tokens parsed (rare empty query): treat query as a literal term.
     if must.is_empty() && should.is_empty() && must_not.is_empty() {
-        let node = make_simple_query_node(&query, &fields);
+        let node = make_simple_query_node(&query, &fields, lenient);
         return Ok(node);
     }
 
@@ -2506,7 +2560,7 @@ fn parse_simple_query_string(params: &Value) -> Result<QueryNode> {
 }
 
 /// Build a Match or MultiMatch node for a term in a simple_query_string.
-fn make_simple_query_node(term: &str, fields: &[String]) -> QueryNode {
+fn make_simple_query_node(term: &str, fields: &[String], lenient: bool) -> QueryNode {
     if fields.len() == 1 {
         QueryNode::Match {
             field: fields[0].clone(),
@@ -2515,6 +2569,7 @@ fn make_simple_query_node(term: &str, fields: &[String]) -> QueryNode {
             analyzer: None,
             boost: None,
             minimum_should_match: None,
+            lenient,
         }
     } else if fields.is_empty() {
         // No fields specified — use a match_all-like placeholder.
@@ -2534,6 +2589,7 @@ fn make_simple_query_node(term: &str, fields: &[String]) -> QueryNode {
             boost: None,
             slop: 0,
             max_expansions: 50,
+            lenient,
         }
     }
 }
@@ -3738,6 +3794,10 @@ fn parse_more_like_this(params: &Value) -> Result<QueryNode> {
                     analyzer: None,
                     boost: None,
                     minimum_should_match: None,
+                    // ES refuses a numeric `more_like_this` field with a
+                    // different error (`only supports text/keyword fields`);
+                    // #1284's type check is not that refusal, so stay out.
+                    lenient: true,
                 });
             }
         }
@@ -4413,6 +4473,8 @@ fn parse_match_bool_prefix(params: &Value) -> Result<QueryNode> {
                 boost: None,
                 analyzer: analyzer.clone(),
                 minimum_should_match: None,
+                // `match_bool_prefix` has no `lenient` option in ES.
+                lenient: false,
             }
         }
     };
