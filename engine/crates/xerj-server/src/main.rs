@@ -239,7 +239,11 @@ fn help_text(feedback: bool) -> String {
                                                   PR) — see xerj feedback --help\n\
          \n\
          OPTIONS (for `xerj [OPTIONS]`, the bare server start):\n\
-             --config,   -c <PATH>  Path to TOML config file\n\
+             --config,   -c <PATH>  Path to TOML config file. CORS is off by default (no\n\
+                                      Access-Control-* headers); a browser app calling the node\n\
+                                      directly needs [cors] allowed_origins =\n\
+                                      [\"http://localhost:8080\"] there (allow_any_origin = true\n\
+                                      is for local development only)\n\
              --data-dir, -d <PATH>  Override data directory\n\
              --bind,     -b <ADDR>  Interface to bind every listener to. Default 127.0.0.1 —\n\
                                       loopback only, reachable from this machine and nowhere\n\
@@ -302,9 +306,11 @@ fn help_text(feedback: bool) -> String {
                                       local file only, no download path. Env:\n\
                                       XERJ_DECIDE_MODEL_DIR\n\
              --port      <PORT>     Port for the Elasticsearch-compatible API (default 9200).\n\
-                                      Also claims PORT+1 for the native REST API and PORT+2\n\
-                                      for gRPC, so a second instance needs only this one flag:\n\
-                                      xerj --insecure --port 9300 -d ./other-data\n\
+                                      When given, also claims PORT+1 for the native REST API and\n\
+                                      PORT+2 for gRPC, so a second instance needs only this one\n\
+                                      flag: xerj --insecure --port 9300 -d ./other-data\n\
+                                      Without it the native REST API listens on 8080 and gRPC on\n\
+                                      8081 ([server] rest_port / grpc_port in the TOML config).\n\
              --disable-feedback     Do not print the feedback invitation above. Honoured in any\n\
                                       position, including after --help. Env:\n\
                                       XERJ_DISABLE_FEEDBACK=true\n\
