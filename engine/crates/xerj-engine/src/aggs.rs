@@ -4031,7 +4031,7 @@ fn lookup_agg_metric(sub: Option<&Value>, path: &str) -> f64 {
     for seg in normalized.split('.').filter(|s| !s.is_empty()) {
         match cur.get(seg) {
             Some(v) => cur = v,
-            None => return f64::NEG_INFINITY,
+            None => return lookup_keyed_metric(root, path).unwrap_or(f64::NEG_INFINITY),
         }
     }
     if let Some(v) = cur.get("value") {
@@ -4039,7 +4039,52 @@ fn lookup_agg_metric(sub: Option<&Value>, path: &str) -> f64 {
             return f;
         }
     }
-    cur.as_f64().unwrap_or(f64::NEG_INFINITY)
+    cur.as_f64()
+        .or_else(|| lookup_keyed_metric(root, path))
+        .unwrap_or(f64::NEG_INFINITY)
+}
+
+/// ES's value-key form for a multi-value metric (#1282): `p.95` or `p[95.0]`
+/// on a `percentiles` sub-agg names the 95th percentile, which lives at
+/// `p.values["95.0"]` (or in a `{key, value}` array when `keyed: false`). The
+/// plain dotted walk above cannot reach it — `"95"` is not the stored key, and
+/// `[95.0]` is not a segment — so it ranked every bucket as equal and the
+/// terms order silently fell back to the key tiebreaker.
+fn lookup_keyed_metric(root: &Value, path: &str) -> Option<f64> {
+    let (chain, last) = match path.rsplit_once('>') {
+        Some((chain, last)) => (Some(chain), last),
+        None => (None, path),
+    };
+    let mut cur = root;
+    for name in chain.into_iter().flat_map(|c| c.split('>')) {
+        cur = cur.get(name)?;
+    }
+    let (name, key) = match last.split_once('[') {
+        Some((name, rest)) => (name, rest.strip_suffix(']')?),
+        None => last.split_once('.')?,
+    };
+    let agg = cur.get(name)?;
+    if let Some(f) = agg.get(key).and_then(Value::as_f64) {
+        return Some(f);
+    }
+    let want = key.parse::<f64>().ok();
+    let same_key = |k: &str| want.is_some() && k.parse::<f64>().ok() == want;
+    match agg.get("values")? {
+        Value::Object(values) => values
+            .get(key)
+            .or_else(|| values.iter().find(|(k, _)| same_key(k)).map(|(_, v)| v))
+            .and_then(Value::as_f64),
+        Value::Array(entries) => entries
+            .iter()
+            .find(|e| match e.get("key") {
+                Some(Value::String(k)) => same_key(k),
+                Some(k) => k.as_f64().is_some() && k.as_f64() == want,
+                None => false,
+            })
+            .and_then(|e| e.get("value"))
+            .and_then(Value::as_f64),
+        _ => None,
+    }
 }
 
 fn run_ip_prefix(

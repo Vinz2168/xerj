@@ -1087,10 +1087,11 @@ async fn es_headers_middleware(
             "x-elastic-product",
             HeaderValue::from_static("Elasticsearch"),
         );
-        // RFC 7234 warning header — signals no specific deprecation for now.
-        if let Ok(v) = HeaderValue::from_str("299 Elasticsearch-8.13.0 \"\"") {
-            headers.insert("warning", v);
-        }
+        // No `Warning` header here (#1285). ES sends `Warning: 299 …` only
+        // when a request hit a deprecation, always with its message; an empty
+        // one on every response made official clients raise a blank
+        // deprecation warning per call (elasticsearch-py turns each header
+        // into an `ElasticsearchWarning`).
     }
     resp
 }
@@ -1332,6 +1333,20 @@ mod tests {
                 .get("x-elastic-product")
                 .and_then(|v| v.to_str().ok()),
             Some("Elasticsearch")
+        );
+    }
+
+    /// #1285: an Elastic-shaped caller must not get a `Warning` header when
+    /// nothing is deprecated. It used to be `299 Elasticsearch-8.13.0 ""` on
+    /// every response; ES 8.13.4 sends none on `/`, `_search`,
+    /// `_cluster/health` or `_cat/indices`.
+    #[tokio::test]
+    async fn elastic_caller_gets_no_empty_warning_header() {
+        let headers = headers_for("elasticsearch").await;
+        assert!(
+            !headers.contains_key("warning"),
+            "no deprecation happened, so no Warning header: {:?}",
+            headers.get("warning")
         );
     }
 
