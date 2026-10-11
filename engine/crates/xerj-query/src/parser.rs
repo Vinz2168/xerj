@@ -1586,11 +1586,24 @@ fn try_lower_query_string(
     // Range clauses must target a concrete field: resolve unqualified
     // ranges against default_field / fields up-front so `>10` with no usable
     // target errors instead of degrading to a term match.
+    // An unqualified range inside `field:( … )` lands on that field (#1298),
+    // so track which open parens belong to a field group.
     let mut has_range = false;
+    let mut groups: Vec<bool> = Vec::new();
+    let mut pending_field_group = false;
     for t in &tokens {
+        match t {
+            QsTok::FieldGroup(_) => pending_field_group = true,
+            QsTok::LParen => groups.push(std::mem::take(&mut pending_field_group)),
+            QsTok::RParen => {
+                groups.pop();
+            }
+            _ => {}
+        }
         if let QsTok::Range { field, .. } = t {
             has_range = true;
-            if field.is_empty() && !ctx.has_concrete_target() {
+            let in_field_group = groups.iter().any(|g| *g);
+            if field.is_empty() && !in_field_group && !ctx.has_concrete_target() {
                 return Err(qerr(
                     "query_string range requires an explicit field (e.g. `price:>10`) or a non-wildcard default_field",
                 ));
@@ -1624,6 +1637,9 @@ enum QsTok {
         lt: Option<Value>,
         lte: Option<Value>,
     },
+    /// `field:` directly before a `(`: the group that follows is scoped to
+    /// `field` (#1298). Always immediately followed by `LParen`.
+    FieldGroup(String),
     Or,
     And,
     Not,
@@ -1940,6 +1956,19 @@ fn tokenize_query_string(q: &str) -> Result<Option<Vec<QsTok>>> {
                 let (rtok, next) = qs_parse_cmp_range(q, field, rest, i)?;
                 out.push(rtok);
                 i = next;
+            } else if rest.is_empty()
+                && q[i..]
+                    .trim_start_matches(|c: char| c.is_ascii_whitespace())
+                    .starts_with('(')
+            {
+                // `field:(a OR b)` (also `field: (…)`): the bare-token scan
+                // stopped at the `(`, leaving `field:` with no value. Lucene
+                // scopes the whole group to `field`; before #1298 this became
+                // an empty-valued term and the group searched every field.
+                out.push(QsTok::FieldGroup(field.to_string()));
+                while bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
             } else {
                 out.push(QsTok::Term(field.to_string(), unescape_qs(rest)));
             }
@@ -2018,7 +2047,7 @@ fn parse_qs_and(
                 _ => break,
             }
         }
-        let node = parse_qs_unary(toks, pos, ctx)?;
+        let node = parse_qs_unary(toks, pos, ctx, default_op)?;
         if force_not {
             not_clauses.push(node);
         } else {
@@ -2068,11 +2097,32 @@ fn parse_qs_and(
     Some(node)
 }
 
-fn parse_qs_unary(toks: &[QsTok], pos: &mut usize, ctx: QsFields<'_>) -> Option<QueryNode> {
+fn parse_qs_unary(
+    toks: &[QsTok],
+    pos: &mut usize,
+    ctx: QsFields<'_>,
+    default_op: Option<BoolOperator>,
+) -> Option<QueryNode> {
     if *pos >= toks.len() {
         return None;
     }
     match toks[*pos].clone() {
+        QsTok::FieldGroup(field) => {
+            // `field:( … )` (#1298): parse the group as if `field` were the
+            // only default field, so every unqualified clause inside it
+            // (terms, phrases, wildcards, ranges, nested groups) targets
+            // `field`. A clause inside that names its own field keeps it,
+            // as in ES. The tokenizer always emits `LParen` next.
+            *pos += 1;
+            if !matches!(toks.get(*pos), Some(QsTok::LParen)) {
+                return None;
+            }
+            let scoped = QsFields {
+                default_field: Some(&field),
+                fields: &[],
+            };
+            parse_qs_unary(toks, pos, scoped, default_op)
+        }
         QsTok::LParen => {
             *pos += 1;
             // Bound paren-nesting depth. The shared thread-local `QUERY_DEPTH`
@@ -2086,7 +2136,10 @@ fn parse_qs_unary(toks: &[QsTok], pos: &mut usize, ctx: QsFields<'_>) -> Option<
             // opaque `QueryNode::QueryString` path (iterative tokenizer, no
             // recursion). The guard decrements on drop when this arm returns.
             let _depth_guard = DepthGuard::enter().ok()?;
-            let n = parse_qs_or(toks, pos, ctx, None)?;
+            // `default_operator` applies inside a group too: on ES 8.13.4
+            // `(alpha beta)` with `AND` needs both terms. Passing `None`
+            // here made every group implicitly OR.
+            let n = parse_qs_or(toks, pos, ctx, default_op)?;
             if *pos >= toks.len() || !matches!(toks[*pos], QsTok::RParen) {
                 return None;
             }
@@ -5472,6 +5525,104 @@ mod tests {
         let (field, _, _, _, lte) = expect_range(qs("n:<=5"));
         assert_eq!(field, "n");
         assert_eq!(lte, Some(json!(5)));
+    }
+
+    /// Every (field, value) leaf of a lowered query_string, in tree order.
+    fn qs_leaves(node: &QueryNode) -> Vec<(String, String)> {
+        fn walk(n: &QueryNode, out: &mut Vec<(String, String)>) {
+            match n {
+                QueryNode::Match { field, query, .. }
+                | QueryNode::MatchPhrase { field, query, .. } => {
+                    out.push((field.clone(), query.clone()))
+                }
+                QueryNode::Wildcard { field, value, .. } => {
+                    out.push((field.clone(), value.clone()))
+                }
+                QueryNode::Range { field, .. } => out.push((field.clone(), "<range>".into())),
+                QueryNode::Bool {
+                    must,
+                    should,
+                    must_not,
+                    filter,
+                    ..
+                } => {
+                    for c in must.iter().chain(should).chain(must_not).chain(filter) {
+                        walk(c, out);
+                    }
+                }
+                QueryNode::DisMax { queries, .. } => queries.iter().for_each(|c| walk(c, out)),
+                QueryNode::Boosted { query, .. } => walk(query, out),
+                other => panic!("unexpected leaf {other:?}"),
+            }
+        }
+        let mut out = Vec::new();
+        walk(node, &mut out);
+        out
+    }
+
+    fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(f, q)| (f.to_string(), q.to_string()))
+            .collect()
+    }
+
+    /// #1298: `field:( … )` scopes the whole group to `field`. It used to
+    /// lower to an empty-valued `Match` on `field` plus the group's terms on
+    /// the `*` placeholder, so the group searched every field.
+    #[test]
+    fn query_string_field_group_is_scoped_to_the_field() {
+        assert_eq!(qs_leaves(&qs("title:(beta)")), pairs(&[("title", "beta")]));
+        assert_eq!(qs_leaves(&qs("title: (beta)")), pairs(&[("title", "beta")]));
+        assert_eq!(
+            qs_leaves(&qs("title:(alpha OR (beta AND gamma))")),
+            pairs(&[("title", "alpha"), ("title", "beta"), ("title", "gamma")])
+        );
+        // Phrases and wildcards inside the group land on the field too.
+        assert_eq!(
+            qs_leaves(&qs("title:(\"alpha beta\" alp*)")),
+            pairs(&[("title", "alpha beta"), ("title", "alp*")])
+        );
+        // A clause that names its own field keeps it, as in ES.
+        assert_eq!(
+            qs_leaves(&qs("title:(alpha OR body:gamma)")),
+            pairs(&[("title", "alpha"), ("body", "gamma")])
+        );
+        // The group's field beats `default_field` / `fields`.
+        let with_default =
+            q(json!({"query_string": {"query": "title:(beta)", "default_field": "body"}}));
+        assert_eq!(qs_leaves(&with_default), pairs(&[("title", "beta")]));
+        let with_fields =
+            q(json!({"query_string": {"query": "title:(beta)", "fields": ["body", "x"]}}));
+        assert_eq!(qs_leaves(&with_fields), pairs(&[("title", "beta")]));
+    }
+
+    /// #1298: an unqualified range inside `n:( … )` has a concrete field and
+    /// lowers to a `Range` on it. It used to be refused ("requires an
+    /// explicit field").
+    #[test]
+    fn query_string_range_inside_a_field_group_targets_the_field() {
+        assert_eq!(qs_leaves(&qs("n:(>4)")), pairs(&[("n", "<range>")]));
+        assert_eq!(qs_leaves(&qs("n:([2 TO 8])")), pairs(&[("n", "<range>")]));
+        // Outside any field group the old refusal still holds.
+        assert!(parse_query(&json!({"query_string": {"query": "(>4)"}})).is_err());
+    }
+
+    /// `default_operator` reaches inside a group: ES 8.13.4 requires both
+    /// terms for `(alpha beta)` with `AND`. Groups used to be implicitly OR.
+    #[test]
+    fn query_string_default_operator_applies_inside_a_group() {
+        for query in ["title:(alpha beta)", "(alpha beta)"] {
+            let node = q(json!({"query_string": {
+                "query": query, "default_field": "title", "default_operator": "AND"
+            }}));
+            match node {
+                QueryNode::Bool { must, should, .. } => {
+                    assert_eq!(must.len(), 2, "{query}: {must:?}");
+                    assert!(should.is_empty(), "{query}: {should:?}");
+                }
+                other => panic!("{query}: expected a Bool, got {other:?}"),
+            }
+        }
     }
 
     /// `query_string`'s `fields` was accepted and ignored — the key never
